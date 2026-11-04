@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+        <head>
+                <meta charset="utf-8" />
+                <!-- LICENSE covers this Nelth-AI branding surface, including name, logo,
+                visual, textual, symbolic identifiers, metadata, and surrounding UI.
+                Do not alter, remove, obscure, or replace it except as LICENSE permits:
+                https://docs.openwebui.com/license. -->
+                <link
+                        rel="icon"
+                        type="image/svg+xml"
+                        href="/static/favicon-tab.svg"
+                        crossorigin="use-credentials"
+                />
+                <link rel="shortcut icon" href="/static/favicon.ico" crossorigin="use-credentials" />
+                <link
+                        rel="apple-touch-icon"
+                        sizes="180x180"
+                        href="/static/apple-touch-icon.png"
+                        crossorigin="use-credentials"
+                />
+                <link rel="manifest" href="/manifest.json" crossorigin="use-credentials" />
+                <meta
+                        name="viewport"
+                        content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+                />
+                <meta name="theme-color" content="#212121" />
+                <meta name="robots" content="noindex,nofollow" />
+
+                <!-- Cache-busted (?v=) — guarantees every browser drops any stale
+                     loader.js/custom.css from earlier iterations and always runs
+                     the current citation-panel + favicon code. -->
+                <script src="/static/loader.js?v=20261107" defer crossorigin="use-credentials"></script>
+                <link rel="stylesheet" href="/static/custom.css?v=20261103" crossorigin="use-credentials" />
+
+                <script>
+                        function resizeIframe(obj) {
+                                obj.style.height = obj.contentWindow.document.documentElement.scrollHeight + 'px';
+                        }
+                </script>
+
+                <script>
+                        // On page load or when changing themes, best to add inline in `head` to avoid FOUC
+                        (() => {
+                                const metaThemeColorTag = document.querySelector('meta[name="theme-color"]');
+                                const prefersDarkTheme = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+                                if (!localStorage?.theme) {
+                                        localStorage.theme = 'system';
+                                }
+
+                                if (localStorage.theme === 'system') {
+                                        document.documentElement.classList.add(prefersDarkTheme ? 'dark' : 'light');
+                                        metaThemeColorTag.setAttribute('content', prefersDarkTheme ? '#212121' : '#ffffff');
+                                } else if (localStorage.theme === 'oled-dark') {
+                                        document.documentElement.style.setProperty('--color-gray-800', '#101010');
+                                        document.documentElement.style.setProperty('--color-gray-850', '#050505');
+                                        document.documentElement.style.setProperty('--color-gray-900', '#000000');
+                                        document.documentElement.style.setProperty('--color-gray-950', '#000000');
+                                        document.documentElement.classList.add('dark');
+                                        metaThemeColorTag.setAttribute('content', '#000000');
+                                } else if (localStorage.theme === 'light') {
+                                        document.documentElement.classList.add('light');
+                                        metaThemeColorTag.setAttribute('content', '#ffffff');
+                                } else if (localStorage.theme === 'her') {
+                                        document.documentElement.classList.add('her');
+                                        metaThemeColorTag.setAttribute('content', '#983724');
+                                } else {
+                                        document.documentElement.classList.add('dark');
+                                        metaThemeColorTag.setAttribute('content', '#212121');
+                                }
+
+                                // LICENSE covers these Nelth-AI splash logo assets.
+                                // Do not alter, remove, obscure, or replace them except as LICENSE permits:
+                                // https://docs.openwebui.com/license.
+                                const preloadHref = document.documentElement.classList.contains('dark')
+                                        ? '/static/splash-dark.png'
+                                        : '/static/splash.png';
+                                const preload = document.createElement('link');
+                                preload.rel = 'preload';
+                                preload.as = 'image';
+                                preload.href = preloadHref;
+                                preload.setAttribute('fetchpriority', 'high');
+                                document.head.appendChild(preload);
+
+                                window.matchMedia('(prefers-color-scheme: dark)').addListener((e) => {
+                                        if (localStorage.theme === 'system') {
+                                                if (e.matches) {
+                                                        document.documentElement.classList.add('dark');
+                                                        document.documentElement.classList.remove('light');
+                                                        metaThemeColorTag.setAttribute('content', '#212121');
+                                                } else {
+                                                        document.documentElement.classList.add('light');
+                                                        document.documentElement.classList.remove('dark');
+                                                        metaThemeColorTag.setAttribute('content', '#ffffff');
+                                                }
+                                        }
+                                });
+                                const isDarkMode = document.documentElement.classList.contains('dark');
+
+                                const logo = document.createElement('img');
+                                logo.id = 'logo';
+                                logo.style =
+                                        'position: absolute; width: auto; height: 6rem; top: 44%; left: 50%; transform: translateX(-50%); display:block;';
+                                logo.loading = 'eager';
+                                logo.fetchPriority = 'high';
+                                // LICENSE covers this Nelth-AI splash logo.
+                                // Do not alter, remove, obscure, or replace it except as LICENSE permits:
+                                // https://docs.openwebui.com/license.
+                                logo.src = isDarkMode ? '/static/splash-dark.png' : '/static/splash.png';
+                                logo.alt = '';
+
+                                document.addEventListener('DOMContentLoaded', function () {
+                                        const splash = document.getElementById('splash-screen');
+                                        if (document.documentElement.classList.contains('her')) {
+                                                return;
+                                        }
+
+                                        if (splash) splash.prepend(logo);
+                                });
+                        })();
+                </script>
+
+                <title>Nelth-AI</title>
+
+                <link href="/_app/immutable/entry/start.Bfx8fBLT.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/B6lOTUJz.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/cLlIXn7l.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DIeogL5L.js" rel="modulepreload">
+                <link href="/_app/immutable/entry/app.jSN9ebxr.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/C1FmrZbK.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BRvo5zlG.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/CWj6FrbW.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BeF-9El8.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/CEvjCCJc.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/ZvJmMv5w.js" rel="modulepreload">
+                <link href="/_app/immutable/nodes/0.B7x1yvyJ.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/69_IOA4Y.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/Bh3TkprI.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DiyoRGxn.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/B3LWqNn3.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BiTGkzn6.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/SYmKJpIj.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/KX15Eu8M.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BmQEDCx1.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/_waXOR9c.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BgjZNqcJ.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/CGgohGH9.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/CZHBydh6.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BFnkyRTo.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/Db8BjAY0.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/B2185GOa.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BT28bLwl.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/QjJsDpFa.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/pLIIh9h1.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BZZG_v5l.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/B0xt6c5q.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/D0_8aTnk.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DLAy4bTt.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/gRqVWkYV.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/Cojxxu7g.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/B9JUCV4x.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DL2X4WKW.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/Bfc47y5P.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/CDWr7Y6_.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BPYYtz_3.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/vY6cegtJ.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/bLUsJPKW.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/D1ievdV1.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/BQRO03s6.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/D2xCj9OA.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DOYMCczm.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/C--JqoOr.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/C7aR8OSY.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DtR3cbtb.js" rel="modulepreload">
+                <link href="/_app/immutable/chunks/DOGYXv2w.js" rel="modulepreload">
+                
+                <link href="/_app/immutable/assets/Toaster.DKF17Rty.css" rel="stylesheet">
+                <link href="/_app/immutable/assets/Modal.CSlFhZkq.css" rel="stylesheet">
+                <link href="/_app/immutable/assets/0.GKdvjqtP.css" rel="stylesheet">
+        </head>
+
+        <body data-sveltekit-preload-data="hover">
+                <div style="display: contents">
+                        <script>
+                                {
+                                        __sveltekit_12n9or8 = {
+                                                base: ""
+                                        };
+
+                                        const element = document.currentScript.parentElement;
+
+                                        Promise.all([
+                                                import("/_app/immutable/entry/start.Bfx8fBLT.js"),
+                                                import("/_app/immutable/entry/app.jSN9ebxr.js")
+                                        ]).then(([kit, app]) => {
+                                                kit.start(app, element);
+                                        });
+                                }
+                        </script>
+                </div>
+
+                <div
+                        id="splash-screen"
+                        style="position: fixed; z-index: 100; top: 0; left: 0; width: 100%; height: 100%"
+                >
+                        <style type="text/css" nonce="">
+                                html {
+                                        overflow-y: scroll !important;
+                                }
+                        </style>
+
+                        <div
+                                style="
+                                        position: absolute;
+                                        top: 33%;
+                                        left: 50%;
+
+                                        width: 24rem;
+                                        transform: translateX(-50%);
+
+                                        display: flex;
+                                        flex-direction: column;
+                                        align-items: center;
+                                "
+                        >
+                                <!-- LICENSE covers this Nelth-AI splash logo.
+                                Do not alter, remove, obscure, or replace it except as LICENSE permits:
+                                https://docs.openwebui.com/license. -->
+                                <img
+                                        id="logo-her"
+                                        alt=""
+                                        style="width: auto; height: 13rem"
+                                        src="/static/splash.png"
+                                        loading="eager"
+                                        fetchpriority="high"
+                                        class="animate-pulse-fast"
+                                />
+
+                                <div style="position: relative; width: 24rem; margin-top: 0.5rem">
+                                        <div
+                                                id="progress-background"
+                                                style="
+                                                        position: absolute;
+                                                        width: 100%;
+                                                        height: 0.75rem;
+
+                                                        border-radius: 9999px;
+                                                        background-color: #fafafa9a;
+                                                "
+                                        ></div>
+
+                                        <div
+                                                id="progress-bar"
+                                                style="
+                                                        position: absolute;
+                                                        width: 0%;
+                                                        height: 0.75rem;
+                                                        border-radius: 9999px;
+                                                        background-color: #fff;
+                                                "
+                                                class="bg-white"
+                                        ></div>
+                                </div>
+                        </div>
+
+                        <!-- <span style="position: absolute; bottom: 32px; left: 50%; margin: -36px 0 0 -36px">
+                                Footer content
+                        </span> -->
+                </div>
+        </body>
+
+        <style type="text/css" nonce="">
+                html {
+                        overflow-y: hidden !important;
+                        overscroll-behavior-y: none;
+                }
+
+                #splash-screen {
+                        background: #fff;
+                }
+
+                html.dark #splash-screen {
+                        background: #212121;
+                }
+
+                html.her #splash-screen {
+                        background: #983724;
+                }
+
+                #logo-her {
+                        display: none;
+                }
+
+                #progress-background {
+                        display: none;
+                }
+
+                #progress-bar {
+                        display: none;
+                }
+
+                html.her #logo {
+                        display: none;
+                }
+
+                html.her #logo-her {
+                        display: block;
+                        filter: invert(1);
+                }
+
+                html.her #progress-background {
+                        display: block;
+                }
+
+                html.her #progress-bar {
+                        display: block;
+                }
+
+                @media (max-width: 24rem) {
+                        html.her #progress-background {
+                                display: none;
+                        }
+
+                        html.her #progress-bar {
+                                display: none;
+                        }
+                }
+
+                @keyframes pulse {
+                        50% {
+                                opacity: 0.65;
+                        }
+                }
+
+                .animate-pulse-fast {
+                        animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+                }
+        </style>
+</html>

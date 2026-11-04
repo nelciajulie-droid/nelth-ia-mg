@@ -1,0 +1,26 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  Caddy — reverse proxy TLS de production pour Nelth-AI
+#
+#  1. Remplacer nelth-ai.com par votre domaine réel (aux deux endroits).
+#  2. Vérifier que le DNS pointe vers le serveur (A/AAAA record) — sinon
+#     le certificat Let's Encrypt ne peut pas être émis.
+#  3. docker compose up -d → HTTPS automatique + renouvellement.
+# ══════════════════════════════════════════════════════════════════════════
+
+# Canonical domain: https://nelth-ai.com (www redirigé en 301)
+www.nelth-ai.com {
+	redir https://nelth-ai.com{uri} permanent
+}
+
+nelth-ai.com {
+	encode gzip zstd
+
+	# L'application Next.js (conteneur "nelth-ai", port interne 3000) sert :
+	#  • l'interface web (SPA SvelteKit compilée)
+	#  • l'API (/api/**)
+	#  • le proxy WebSocket /ws/** → service socket.io interne
+	reverse_proxy nelth-ai:3000
+
+	# Transferts utiles pour le streaming des réponses du chat.
+	flush_interval -1
+}

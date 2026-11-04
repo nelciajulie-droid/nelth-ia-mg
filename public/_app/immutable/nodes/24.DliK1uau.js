@@ -1,0 +1,2 @@
+import"../chunks/CWj6FrbW.js";import"../chunks/69_IOA4Y.js";import{p as r,b as e,e as m,s as i}from"../chunks/cLlIXn7l.js";import{i as n}from"../chunks/BiTGkzn6.js";import{p as c}from"../chunks/BFnkyRTo.js";import{C as f}from"../chunks/BwPFp-FS.js";function l(o,p){r(p,!1);const t=()=>m(c,"$page",s),[s,a]=i();n(),f(o,{get chatIdProp(){return t().params.id}}),e(),a()}export{l as component};
+//# sourceMappingURL=24.DliK1uau.js.map

@@ -1,0 +1,2 @@
+import"../chunks/CWj6FrbW.js";import"../chunks/69_IOA4Y.js";import{p as e,o as p,b as n,s as m,e as i}from"../chunks/cLlIXn7l.js";import{i as c}from"../chunks/BiTGkzn6.js";import{g}from"../chunks/B6lOTUJz.js";import{p as $}from"../chunks/BFnkyRTo.js";function P(u,t){e(t,!1);const a=()=>i($,"$page",o),[o,r]=m();p(()=>{const s=new URLSearchParams(a().url.searchParams);s.set("settings",`admin:${a().params.tab??"general"}`),g(`/?${s.toString()}`,{replaceState:!0})}),c(),n(),r()}export{P as component};
+//# sourceMappingURL=19.5F6dp1_6.js.map

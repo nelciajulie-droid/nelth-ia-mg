@@ -1,0 +1,344 @@
+/*
+ * Nelth-AI — custom UI overrides
+ * Loaded by the app shell (public/index.html) on every page.
+ */
+
+/* ── Chat responses ──────────────────────────────────────────────────────────
+ * Hide the model name label shown at the top of assistant responses
+ * (e.g. "Z.AI GLM-4 Plus") so replies start directly with their content.
+ * (The render block was also removed from the compiled frontend; this rule
+ * stays as a safety net for any other render path.)
+ * ──────────────────────────────────────────────────────────────────────────── */
+#response-message-model-name {
+        display: none !important;
+}
+
+/* Assistant responses show no model avatar at the top: the animated Nelth-AI
+ * "N" glyph lives ONLY in the loading indicator (nelth-logo-active), so a
+ * response never displays two "N" logos at once. */
+img.assistant-message-profile-image {
+        display: none !important;
+}
+
+/* ── Brand logo images (animated line-drawn "N" glyph) ───────────────────────
+ * The SVG glyphs are near-black by design (visible on light surfaces). When
+ * the app runs in dark mode, invert in-app logo <img> instances so the mark
+ * stays visible on dark surfaces:
+ *   • chat model avatars  → /api/v1/models/model/profile/image (active logo)
+ *   • login page logo     → /static/assets/nelth-logo-idle.svg (idle logo)
+ *   • other static logos  → /static/favicon.svg
+ * The browser-tab icon uses favicon-tab.svg, which adapts itself via a
+ * prefers-color-scheme media query.
+ * ──────────────────────────────────────────────────────────────────────────── */
+html.dark img[src*="/static/favicon.svg"] {
+        filter: invert(1);
+}
+
+html.dark img[src*="/api/v1/models/model/profile/image"] {
+        filter: invert(1);
+}
+
+html.dark img#logo[src*="/static/assets/nelth-logo-idle.svg"] {
+        filter: invert(1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * LAYOUT REPAIR — geometry corrections only (visual design untouched).
+ *
+ * Audit findings (measured in-browser at 1920/1440/1366/1280/1024/768/390/360):
+ *   • The shared content anchor (max-w-[58rem] = 928px) made messages and the
+ *     ChatComposer wider than the 768–800px reading column used by the welcome
+ *     screen (752px) — inconsistent widths between the two surfaces.
+ *   • The ChatComposer carried excess internal vertical padding (86px tall
+ *     for a single line).
+ *
+ * Fixes below keep every color, border, radius, shadow, icon and control of
+ * the existing design — they only correct widths, paddings and proportions.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/* ── 1. Unified content width: 928px → 800px ─────────────────────────────────
+ * max-w-[58rem] is the single width anchor shared by the message list items,
+ * the ChatComposer wrapper and the welcome-screen container (verified: the
+ * class appears only in the chat MessageInput / Messages components).
+ * 50rem = 800px — inside the 768–800px target, keeps everything centered and
+ * consistent. The chat column itself still fills the space left by the
+ * sidebar (md:max-w-[calc(100%-var(--sidebar-width))]) — only the reading
+ * column narrows. Note: the user "widescreen mode" setting switches these
+ * same elements to max-w-full, which this rule does not touch. */
+.max-w-\[58rem\] {
+        max-width: 50rem !important;
+}
+
+/* ── 2. Welcome screen: align inner content with the chat column ─────────────
+ * The welcome container pads its content by @2xl:px-20 (80px per side inside
+ * container queries ≥ 42rem). With the 800px anchor this would squeeze the
+ * greeting and the welcome composer to 640px while the active-chat composer
+ * is 784px. Reducing that padding to 8px per side keeps the welcome composer
+ * at ~768px — the same width family as the chat composer (784px) and the
+ * message column (800px). Scoped to the exact welcome-container class combo
+ * (px-1 + @2xl:px-20 is used only there). */
+@container (min-width: 42rem) {
+        .max-w-\[58rem\].px-1.\@2xl\:px-20 {
+                padding-inline: 0.5rem !important;
+        }
+}
+
+/* ── 3. ChatComposer: compact vertical rhythm (86px → ~78px) ────────────────
+ * Three micro-corrections, all preserving the exact controls, icons, radius
+ * and borders — only tightening dead vertical space:
+ *   a) editor paragraph margins 4px → 2px (single-line state)
+ *   b) input area top padding     8px → 6px
+ *   c) action row bottom margin   8px → 6px
+ * Multiline growth stays governed by the original max-h-96 / h-fit rules. */
+
+/* a) paragraphs inside the chat composer's tiptap editor */
+.input-prose .ProseMirror p {
+        margin-top: 2px !important;
+        margin-bottom: 2px !important;
+}
+
+/* b) the scrollable input wrapper that contains .input-prose */
+div:has(> .input-prose) {
+        padding-top: 6px !important;
+}
+
+/* c) the action row (attachment / tools / model selector / mic / send)
+ *    at the bottom of the composer box — identified by its unique
+ *    shadow-lg rounded-3xl parent (the composer container). */
+div.shadow-lg.rounded-3xl > div.mb-2 {
+        margin-bottom: 6px !important;
+}
+
+/* ── 4. Shell integrity guards ──────────────────────────────────────────────
+ * Belt-and-suspenders for the audited architecture:
+ *   • the app shell must never produce a document-level horizontal scrollbar
+ *     (verified fix for all 8 reference viewports);
+ *   • flex children of the shell may always shrink so the chat column can
+ *     never overflow its container (min-w-0 semantics). */
+html,
+body {
+        overflow-x: hidden;
+}
+
+.app > div {
+        min-width: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * CHATGPT-INSPIRED COLOR SYSTEM — remap of the existing gray token ramp.
+ *
+ * The compiled Tailwind v4 theme defines twelve neutral tokens
+ * (--color-gray-50 … --color-gray-950) that already drive every surface,
+ * border, text, icon, hover and placeholder color across the whole app
+ * (sidebar, chat, messages, composer, header, dropdowns, modals). This block
+ * ONLY remaps those existing tokens — no duplicate color system, no layout
+ * or component changes:
+ *
+ *   LIGHT                                DARK (html.dark)
+ *   ───────────────────────────────      ───────────────────────────────
+ *   main / chat bg      #FFFFFF          main / chat bg      #212121
+ *   sidebar             #F9F9F9          sidebar             #171717
+ *   user bubble         #F4F4F4          user bubble         #303030
+ *   hover / active      #ECECEC          hover / active      #303030
+ *   borders             #E5E5E5          borders             #424242
+ *   primary text        #0D0D0D          primary text        #ECECEC
+ *   secondary text      #676767          secondary text      #B4B4B4
+ *   muted icons/labels  #8F8F8F          muted icons/labels  #8F8F8F
+ *
+ * Specificity note: this stylesheet loads before the compiled bundle, so
+ * every rule below carries a slightly higher specificity (html:not(.dark) /
+ * html.dark / html class prefixes) than the compiled rule it replaces.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── C1. Gray ramp — light-mode base tokens ──────────────────────────────────
+ * The low steps are light surfaces & text tones; the high steps (800–950)
+ * are only used for strong TEXT in light mode (verified in the compiled
+ * bundle: every bg/border usage of those steps is dark:-prefixed).
+ * Declared on html:not(.dark) with !important so the stale inline dark
+ * tokens (set at runtime by the theme switcher and never cleared by the
+ * original bundle when switching back to light) can never leak into light
+ * mode — while the real dark runtime switch still wins, because in dark
+ * mode this rule no longer matches and the inline values take over. */
+html:not(.dark) {
+        --color-gray-50: #f9f9f9 !important;  /* sidebar & input surfaces           */
+        --color-gray-100: #ececec !important; /* hover backgrounds                 */
+        --color-gray-200: #e5e5e5 !important; /* borders, strong hover             */
+        --color-gray-300: #d4d4d4 !important; /* disabled text & dividers           */
+        --color-gray-400: #8f8f8f !important; /* muted icons, placeholders          */
+        --color-gray-500: #8f8f8f !important; /* muted icons & secondary labels     */
+        --color-gray-600: #676767 !important; /* secondary text                     */
+        --color-gray-700: #0d0d0d !important; /* primary text                       */
+        --color-gray-800: #0d0d0d !important; /* strong text (light-mode usage)     */
+        --color-gray-850: #0d0d0d !important; /* strong text (light-mode usage)     */
+        --color-gray-900: #0d0d0d !important; /* strong text (light-mode usage)     */
+        --color-gray-950: #0d0d0d !important; /* strong text (light-mode usage)     */
+}
+
+/* ── C2. Gray ramp — dark-mode token overrides ───────────────────────────────
+ * In dark mode the high steps become surfaces and the low steps become dark
+ * text tones. Light-mode utilities that use these steps are always paired
+ * with dark: companions in the compiled bundle (audited), so the scoping
+ * is safe; gray-700 keeps its muted dark value to preserve the existing
+ * muted-separator/disabled tier. The low steps are re-declared here because
+ * the !important light rules above only match non-dark documents. */
+html.dark {
+        --color-gray-100: #ececec; /* primary text (dark)               */
+        --color-gray-200: #e5e5e5; /* strong text / inverse chips       */
+        --color-gray-300: #b4b4b4; /* secondary text (dark)              */
+        --color-gray-400: #8f8f8f; /* muted icons (dark)                 */
+        --color-gray-500: #8f8f8f; /* muted labels (dark)                */
+        --color-gray-600: #676767; /* disabled text (dark)               */
+        --color-gray-700: #4d4d4d; /* muted separators / disabled (dark) */
+        --color-gray-800: #303030; /* hover bg & secondary surfaces      */
+        --color-gray-850: #303030; /* user bubble / composer / menus     */
+        --color-gray-900: #212121; /* main application background        */
+        --color-gray-950: #171717; /* sidebar background                 */
+}
+
+/* ── C3. Document canvas ───────────────────────────────────────────────────── */
+html body {
+        color: #0d0d0d;
+}
+
+html.dark body {
+        color: #ececec;
+        background: #212121;
+}
+
+/* ── C4. Markdown & composer prose — neutral ChatGPT text tones ──────────────
+ * The typography plugin declares both the light set and the invert set on
+ * the same prose classes; the dark variant swaps them automatically via
+ * `.markdown-prose:is(.dark *)`. Overriding both sets here recolors every
+ * heading, paragraph, list, quote, table and code span in messages. */
+html .prose,
+html .input-prose,
+html .input-prose-sm,
+html .markdown-prose,
+html .markdown-prose-sm,
+html .markdown-prose-xs {
+        /* light-mode tones */
+        --tw-prose-body: #0d0d0d;
+        --tw-prose-headings: #0d0d0d;
+        --tw-prose-lead: #0d0d0d;
+        --tw-prose-links: #0d0d0d;
+        --tw-prose-bold: #0d0d0d;
+        --tw-prose-counters: #676767;
+        --tw-prose-bullets: #8f8f8f;
+        --tw-prose-hr: #e5e5e5;
+        --tw-prose-quotes: #0d0d0d;
+        --tw-prose-quote-borders: #e5e5e5;
+        --tw-prose-captions: #676767;
+        --tw-prose-kbd: #0d0d0d;
+        --tw-prose-kbd-shadows: #0d0d0d1a;
+        --tw-prose-code: #0d0d0d;
+        --tw-prose-pre-code: #0d0d0d;
+        --tw-prose-pre-bg: #f9f9f9;
+        --tw-prose-th-borders: #e5e5e5;
+        --tw-prose-td-borders: #e5e5e5;
+        /* dark-mode tones (consumed via the :is(.dark *) swap) */
+        --tw-prose-invert-body: #ececec;
+        --tw-prose-invert-headings: #ececec;
+        --tw-prose-invert-lead: #ececec;
+        --tw-prose-invert-links: #ececec;
+        --tw-prose-invert-bold: #ececec;
+        --tw-prose-invert-counters: #b4b4b4;
+        --tw-prose-invert-bullets: #8f8f8f;
+        --tw-prose-invert-hr: #424242;
+        --tw-prose-invert-quotes: #ececec;
+        --tw-prose-invert-quote-borders: #424242;
+        --tw-prose-invert-captions: #b4b4b4;
+        --tw-prose-invert-kbd: #ececec;
+        --tw-prose-invert-kbd-shadows: #ffffff1a;
+        --tw-prose-invert-code: #ececec;
+        --tw-prose-invert-pre-code: #ececec;
+        --tw-prose-invert-pre-bg: #212121;
+        --tw-prose-invert-th-borders: #424242;
+        --tw-prose-invert-td-borders: #424242;
+}
+
+/* ── C5. User message bubble — exact spec surface ────────────────────────────
+ * The bubble shares the bg-gray-50 token with the sidebar; give it the
+ * slightly deeper ChatGPT bubble tone in light mode (dark mode already
+ * resolves to #303030 through the gray-850 token override above).
+ * Selector audited unique: `rounded-3xl max-w-[90%]` is the chat bubble
+ * wrapper only; scoped to non-dark so the dark utility keeps winning. */
+html:not(.dark) div.rounded-3xl.max-w-\[90\%\].bg-gray-50 {
+        background-color: #f4f4f4;
+}
+
+/* ── C6. Active navigation & selected rows ────────────────────────────────────
+ * Selected nav items / list rows combine an opacity utility with the
+ * `selected` state class; give them the solid spec tints. */
+html .bg-gray-100\/80.selected {
+        background-color: #eaeaea;
+}
+
+html.dark .dark\:bg-gray-850\/50.selected {
+        background-color: #303030;
+}
+
+/* ── C7. ChatComposer surface ─────────────────────────────────────────────────
+ * The composer is the only dark:bg-gray-500/5 consumer in the bundle;
+ * render it as the solid ChatGPT composer tone in dark mode. Light mode
+ * is already white (bg-white/5 over the white chat area) with the subtle
+ * border-gray-100/50 ring. */
+html.dark .dark\:bg-gray-500\/5 {
+        background-color: #303030;
+}
+
+/* Subtle visible composer edge in dark mode (spec: “a subtle border”),
+ * brightening slightly on hover and focus. The rest-state utility is the
+ * translucent dark:border-gray-850/50, which over the now-solid #303030
+ * surface would be invisible. */
+html.dark div.shadow-lg.rounded-3xl {
+        border-color: #42424299;
+}
+
+html.dark div.shadow-lg.rounded-3xl:hover,
+html.dark div.shadow-lg.rounded-3xl:focus-within {
+        border-color: #424242cc;
+}
+
+/* ── C8. Dark-mode borders — one consistent border tone ──────────────────────
+ * Solid dark:border-gray-700/800/850 utilities follow the surface tokens
+ * (#303030), which is too dim for borders; pin them to the spec border
+ * color. Opacity variants (/50, /60 …) keep their translucent behavior. */
+html.dark .dark\:border-gray-700,
+html.dark .dark\:border-gray-800,
+html.dark .dark\:border-gray-850 {
+        border-color: #424242;
+}
+
+html.dark .dark\:\!border-gray-700,
+html.dark .dark\:\!border-gray-800 {
+        border-color: #424242 !important;
+}
+
+html.dark .dark\:divide-gray-850 > :not(:last-child) {
+        border-color: #424242;
+}
+
+/* ── C9. Placeholders — muted tone in both modes ────────────────────────────── */
+html .ProseMirror p.is-editor-empty:first-child::before,
+html input::placeholder,
+html textarea::placeholder {
+        color: #8f8f8f;
+}
+
+html.dark .ProseMirror p.is-editor-empty:first-child::before,
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+        color: #8f8f8f;
+}
+
+/* ── C10. Toasts (sonner) — align with the surface palette ──────────────────── */
+html [data-sonner-toaster][data-theme='light'] {
+        --normal-border: #e5e5e5;
+        --normal-text: #0d0d0d;
+}
+
+html.dark [data-sonner-toaster][data-theme='dark'] {
+        --normal-bg: #303030;
+        --normal-border: #424242;
+        --normal-text: #ececec;
+}

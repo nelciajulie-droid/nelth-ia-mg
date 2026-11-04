@@ -1,0 +1,43 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  Nelth-AI — pile de production complète (application + HTTPS + domaine)
+#
+#    docker compose up -d --build
+#
+#  Caddy obtient et renouvelle automatiquement le certificat TLS
+#  (Let's Encrypt) pour le domaine configuré dans deploy/Caddyfile.
+#  Pré-requis : le domaine doit pointer (DNS A/AAAA) vers ce serveur.
+# ══════════════════════════════════════════════════════════════════════════
+
+services:
+  nelth-ai:
+    build: .
+    container_name: nelth-ai
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - APP_PORT=3000
+      - SOCKET_SERVICE_PORT=3001
+    expose:
+      - "3000"
+    # Décommenter pour publier le port sans Caddy (tests locaux) :
+    # ports:
+    #   - "3000:3000"
+
+  caddy:
+    image: caddy:2
+    container_name: nelth-ai-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - nelth-ai
+
+volumes:
+  caddy_data:
+  caddy_config:

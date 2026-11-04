@@ -1,0 +1,1 @@
+html,body{overflow-x:hidden;overscroll-behavior-x:contain}html.mobile-swipe-panel-active,body.mobile-swipe-panel-active{touch-action:pan-y}

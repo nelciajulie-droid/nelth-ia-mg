@@ -1,0 +1,2 @@
+import{N as t,X as _,Y as i,U as l,T as r,Z as o,P as g,_ as p,a0 as v,W as m,a1 as E}from"./cLlIXn7l.js";function b(n,d){let a=null,f=t;var s;if(t){a=m;for(var e=E(document.head);e!==null&&(e.nodeType!==_||e.data!==n);)e=i(e);if(e===null)l(!1);else{var y=i(e);e.remove(),r(y)}}t||(s=document.head.appendChild(o()));try{g(()=>{var u=p(()=>d(s));u.f|=v})}finally{f&&(l(!0),r(a))}}export{b as h};
+//# sourceMappingURL=DiyoRGxn.js.map
