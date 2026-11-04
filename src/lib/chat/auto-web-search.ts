@@ -26,6 +26,7 @@ Reply STRICTLY with a single JSON object, no other text:
 Rules:
 - search=true when the message needs FRESH or VOLATILE information the assistant cannot reliably know: current events, news, today's date relative facts, weather, sports results, stock/crypto prices, product prices or availability, recent releases or updates (software, games, movies), recent status of people/companies/countries, anything explicitly time-bound (latest, now, today, yesterday, "en ce moment", "actuellement"), or obscure facts likely absent from training data.
 - search=false when: greetings, small talk, math/logic, coding help, creative writing, translation, explanations of stable knowledge, opinions/advice, or when the answer is ALREADY present in the conversation history or in attached <context> document excerpts.
+- When genuinely uncertain whether fresh information would help, prefer search=true: a quick search costs a few seconds, while answering stale or invented facts is much worse. Only choose search=false when you are CONFIDENT the message needs no fresh data.
 - query: an optimized keyword search query (max ~10 words) in the LANGUAGE OF the user's message, only the essential keywords, no full sentence. Empty string when search=false.`;
 
 function truncate(text: string, max: number): string {

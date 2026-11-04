@@ -230,6 +230,13 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     }
   }
 
+  // ---- The whole completion flow (search → upstream → streaming) is
+  // wrapped in a function so the serverless SSE response stream can open
+  // BEFORE it runs (see the early-stream block at the end of this handler):
+  // every status event ("Recherche web en cours"…) then reaches the browser
+  // in real time while the phases run, instead of being buffered and
+  // bundled with the first content chunk after a 10-30s silent wait.
+  const runCompletionFlow = async (): Promise<Response> => {
   // ---------------------------------------- 3. Build LLM messages (middleware)
   let llmMessages: { role: string; content: string }[];
   if (historyMap && userMessageId) {
@@ -1107,50 +1114,6 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     return nullJson();
     };
 
-    // Serverless realtime transport (loader.js bridge): run the exact same
-    // socket-mode completion flow, but serialize every event envelope into
-    // the HTTP response as SSE lines. The bridge in the browser feeds them
-    // back through its local socket.io client, so the compiled frontend
-    // renders streaming exactly like with a real socket service.
-    if (sseEventsRequested) {
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream<Uint8Array>({
-        async start(controller) {
-          let closed = false;
-          sseSink = (envelope: unknown) => {
-            if (closed) return;
-            try {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope)}\n\n`));
-            } catch {
-              closed = true;
-            }
-          };
-          // Pre-stream events (auto web-search status…) buffered while the
-          // sections above ran — flushed in order before the live ones.
-          for (const env of sseBuffer.splice(0)) sseSink(env);
-          try {
-            await runStreamBody();
-          } finally {
-            closed = true;
-            sseSink = null;
-            try {
-              controller.close();
-            } catch {
-              /* client already gone */
-            }
-          }
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: {
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-cache',
-          'x-accel-buffering': 'no',
-        },
-      });
-    }
-
     return await runStreamBody();
   }
 
@@ -1234,6 +1197,80 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       'x-accel-buffering': 'no',
     },
   });
+  }; // end runCompletionFlow
+
+  // ------------------------------------------- Serverless SSE early stream
+  // Bridge mode (loader.js / serverless hosts): open the HTTP response
+  // stream BEFORE the completion flow runs. The auto web-search decision
+  // and the search/loader phases can take 10-30s — with the stream already
+  // open, each status event ("Recherche web en cours", "Lecture des sources",
+  // "N résultats trouvés"…) is written to the wire the moment it fires, so
+  // the browser shows the same live progress a native socket connection
+  // would. All further events (deltas, sources, title, done) flow through
+  // the same sink for the whole duration of the completion.
+  if (sseEventsRequested && sessionId) {
+    const encoder = new TextEncoder();
+    let closed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enqueue = (envelope: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope)}\n\n`));
+          } catch {
+            closed = true;
+          }
+        };
+        sseSink = enqueue;
+        // Safety flush for events that could only exist if a phase ran
+        // before this point (impossible today — the sink is live before
+        // runCompletionFlow starts; harmless belt-and-suspenders).
+        for (const env of sseBuffer.splice(0)) enqueue(env);
+        try {
+          const res = await runCompletionFlow();
+          // A non-200 result is a mid-flow HTTP error (model not found,
+          // image generation disabled…) that native mode would have
+          // returned as the fetch response. The SSE response is already a
+          // 200 stream — surface it as the message error event instead,
+          // which the compiled frontend renders natively.
+          if (res && res.status !== 200) {
+            const raw = await res.clone().text().catch(() => '');
+            let detail = raw;
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === 'object' && 'detail' in parsed) detail = String((parsed as any).detail);
+            } catch {
+              /* raw text */
+            }
+            enqueue({ chat_id: chatId, message_id: assistantMessageId, data: { type: 'chat:message:error', data: { error: { content: detail || `Error ${res.status}` }, done: true } } });
+            enqueue({ chat_id: chatId, message_id: assistantMessageId, data: { type: 'status', data: { done: true } } });
+          }
+        } catch (e) {
+          console.error('[v12-flow] SSE transport error', e);
+          const detail = e instanceof Error ? e.message : String(e);
+          enqueue({ chat_id: chatId, message_id: assistantMessageId, data: { type: 'chat:message:error', data: { error: { content: detail }, done: true } } });
+        } finally {
+          closed = true;
+          sseSink = null;
+          try {
+            controller.close();
+          } catch {
+            /* client already gone */
+          }
+        }
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        'x-accel-buffering': 'no',
+      },
+    });
+  }
+
+  return await runCompletionFlow();
 }
 
 // ---------------------------------------------------------------------------

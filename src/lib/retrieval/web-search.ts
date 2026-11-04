@@ -5,7 +5,16 @@
  * Zero-config fallback chain (endpoints validated by the user):
  *   1. DuckDuckGo Lite  — POST https://lite.duckduckgo.com/lite/   (form: q)
  *   2. DuckDuckGo HTML  — GET  https://html.duckduckgo.com/html/?q=
- *   3. 4get instance    — GET  https://search.yonderly.org/web?s=
+ *   3. 4get instance    — GET  https://search.yonderly.org/web?s= (validated
+ *      live on Vercel — answers ~6s with 10 results)
+ *   4. Bing HTML        — GET  https://www.bing.com/search?q=  (serverless-
+ *      friendly: DDG 403-blocks datacenter IPs such as Vercel's; Bing serves
+ *      its classic SERP there — result links are bing.com/ck/a redirects
+ *      whose target rides base64url-encoded in the u=a1… param. NOTE: send
+ *      ONLY the user-agent header — an accept-language header makes Bing
+ *      answer with its new JS UI which has a different markup)
+ *   5. Mojeek           — GET  https://www.mojeek.com/search?q=  (independent
+ *      index, lenient with datacenter IPs — last resort)
  *
  * Requests are intentionally bare: only the query parameter is sent
  * (no kl/region/time/etc. search parameters — extra params trigger DDG
@@ -33,7 +42,9 @@ const UA =
 const PROVIDER_TIMEOUT_MS: Record<string, number> = {
   'duckduckgo-lite': 5000,
   'duckduckgo-html': 5000,
+  'bing': 8000,
   '4get-yonderly': 12000,
+  'mojeek': 6000,
 };
 
 /** In-process memory: provider that last succeeded is tried first on the
@@ -144,7 +155,67 @@ async function searchDdgHtml(query: string, count: number): Promise<WebSearchRes
 }
 
 // ---------------------------------------------------------------------------
-// Provider 3 — 4get instance (GET /web?s=). Result markup:
+// Provider 3 — Bing HTML (GET /search?q=). Serverless-friendly: DuckDuckGo
+// 403-blocks datacenter IPs (observed live on Vercel: "ddg-lite HTTP 403" /
+// "ddg-html HTTP 403" in ~550ms), Bing serves its classic result page
+// there. Markup: <h2><a href="…bing.com/ck/a?…&u=a1<base64url>">Title</a>
+// with the real target URL base64url-encoded after the "a1" marker, plus a
+// <p class="b_lineclamp…"> snippet inside each result block.
+// ---------------------------------------------------------------------------
+function unwrapBingHref(href: string): string | null {
+  let h = href.trim().replace(/&amp;/g, '&');
+  if (!/^https?:\/\/www\.bing\.com\/ck\//i.test(h)) {
+    // Direct external link (or already unwrapped).
+    return /^https?:\/\//i.test(h) ? h : null;
+  }
+  try {
+    const u = new URL(h);
+    const enc = u.searchParams.get('u');
+    if (!enc) return null;
+    const b64 = enc.startsWith('a1') ? enc.slice(2).replace(/-/g, '+').replace(/_/g, '/') : enc;
+    const dec = Buffer.from(b64, 'base64').toString('utf8');
+    return /^https?:\/\//i.test(dec) ? dec : null;
+  } catch {
+    return null;
+  }
+}
+
+async function searchBing(query: string, count: number): Promise<WebSearchResult[]> {
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.max(10, count * 2)}`;
+  const res = await fetch(url, {
+    // Minimal headers on purpose: only the user-agent. Sending an
+    // accept-language (or a full accept) makes Bing answer with its new
+    // JS-heavy UI whose markup has no <h2><a> result anchors to parse.
+    headers: { 'user-agent': UA },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS['bing']),
+  });
+  if (!res.ok) throw new Error(`bing HTTP ${res.status}`);
+  const html = await res.text();
+  if (html.length < 2500) throw new Error('bing thin page');
+
+  const results: WebSearchResult[] = [];
+  // Result blocks: <h2><a … href="…">Title</a></h2> … snippet <p …>…</p>,
+  // until the next <h2> anchor or the end of the results <ol>.
+  const blockRe = /<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>([\s\S]*?)(?=<h2[^>]*>\s*<a|<\/ol>|$)/gi;
+  let bm: RegExpExecArray | null;
+  while ((bm = blockRe.exec(html)) && results.length < count) {
+    const target = unwrapBingHref(bm[1]);
+    if (!target) continue;
+    if (/bing\.com|microsoft\.com\/(bing|login)/i.test(target)) continue; // internal links
+    const title = stripTags(bm[2]);
+    const snipMatch =
+      /<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/.exec(bm[3]) ||
+      /<p[^>]*>([\s\S]*?)<\/p>/.exec(bm[3]);
+    const snippet = snipMatch ? stripTags(snipMatch[1]) : '';
+    if (title) results.push({ url: target, title, snippet });
+  }
+  if (!results.length) throw new Error('bing empty');
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Provider 4 — 4get instance (GET /web?s=). Result markup:
 // <a href="<url>" class="hover"><div class="title">…</div>
 //   <div class="description">…</div></a>
 // ---------------------------------------------------------------------------
@@ -174,12 +245,41 @@ async function search4get(query: string, count: number): Promise<WebSearchResult
 }
 
 // ---------------------------------------------------------------------------
-// Chain entry point
+// Provider 5 — Mojeek (GET /search?q=). Independent index, famously lenient
+// with datacenter IPs — the last-resort engine. Markup:
+// <a class="title" href="URL">Title</a> … <p class="s">snippet</p>
 // ---------------------------------------------------------------------------
+async function searchMojeek(query: string, count: number): Promise<WebSearchResult[]> {
+  const url = `https://www.mojeek.com/search?q=${encodeURIComponent(query)}&t=${Math.max(10, count * 2)}`;
+  const res = await fetch(url, {
+    headers: { 'user-agent': UA, accept: 'text/html', 'accept-language': 'fr-FR,fr;q=0.9,en;q=0.8' },
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS['mojeek']),
+  });
+  if (!res.ok) throw new Error(`mojeek HTTP ${res.status}`);
+  const html = await res.text();
+
+  const results: WebSearchResult[] = [];
+  const blockRe =
+    /<a[^>]*class="[^"]*\btitle\b[^"]*"[^>]*href="(https?:\/\/[^"']+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?=<a[^>]*class="[^"]*\btitle\b|<\/ul>|$)/gi;
+  let bm: RegExpExecArray | null;
+  while ((bm = blockRe.exec(html)) && results.length < count) {
+    const link = bm[1];
+    if (/mojeek\.com/i.test(link)) continue; // internal links
+    const title = stripTags(bm[2]);
+    const snipMatch = /<p[^>]*class="s"[^>]*>([\s\S]*?)<\/p>/.exec(bm[3]);
+    const snippet = snipMatch ? stripTags(snipMatch[1]) : '';
+    if (title) results.push({ url: link, title, snippet });
+  }
+  if (!results.length) throw new Error('mojeek empty');
+  return results;
+}
+
 const CHAIN: Array<{ name: string; run: (q: string, n: number) => Promise<WebSearchResult[]> }> = [
   { name: 'duckduckgo-lite', run: searchDdgLite },
   { name: 'duckduckgo-html', run: searchDdgHtml },
   { name: '4get-yonderly', run: search4get },
+  { name: 'bing', run: searchBing },
+  { name: 'mojeek', run: searchMojeek },
 ];
 
 /** Strip 4get result-title artifacts ("…Prix2nd Nov 26 @ 10:52am"). */
