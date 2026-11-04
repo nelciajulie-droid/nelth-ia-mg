@@ -60,3 +60,8 @@ prisma/           schéma Postgres (parité Python, 45 tables)
 mini-services/    socket-service (temps réel, optionnel) + llm-bridge (dev)
 scripts/          superviseur serve.mjs, postinstall, utilitaires
 ```
+
+## Deployments
+
+- Live: https://nelth-ia-mg.vercel.app
+- Auto-deploy: every push to `main` triggers a Vercel production build.
