@@ -25,7 +25,14 @@ import { ERROR_MESSAGES } from '@/lib/constants';
 
 export type Json = Record<string, any>;
 
-const SURROGATE_RE = /[\uD800-\uDFFF]/g;
+// Unpaired UTF-16 surrogates ONLY. The naive [\uD800-\uDFFF] strip (a
+// direct port of the Python sanitize_text_for_db) deleted every valid
+// surrogate pair too — and in JavaScript every code point ≥ U+10000 (📎,
+// 😊, …) IS a surrogate pair, so all emoji were wiped on every DB write
+// (streamed content showed them, reload lost them). Keep the pairs: only
+// lone halves are invalid and break JSON.stringify / Postgres.
+const LONE_SURROGATE_RE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const CHAT_SEARCH_FILTER_PREFIXES = ['tag:', 'folder:', 'pinned:', 'archived:', 'shared:'];
 
 // env.py parity
@@ -198,7 +205,7 @@ function deepEquals(a: any, b: any): boolean {
 
 export function sanitizeTextForDb(text: string): string {
   if (typeof text !== 'string') return text as any;
-  return text.replace(/\x00/g, '').replace(SURROGATE_RE, '');
+  return text.replace(/\x00/g, '').replace(LONE_SURROGATE_RE, '');
 }
 
 export function sanitizeDataForDb(obj: any): any {

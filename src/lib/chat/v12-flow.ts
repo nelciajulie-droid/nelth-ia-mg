@@ -304,6 +304,33 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     llmMessages.map((m) => `${m.role}:${m.content.length}`).join(' | ')
   );
 
+  // File-generation intent gate — captured HERE, before the web-search
+  // middleware prepends fetched page contents to the last user message
+  // (augmented text would false-positive on "fichier/pdf/download" words
+  // coming from the web pages, not from the user). Downloadable file cards
+  // are created ONLY when the user EXPLICITLY asked for a file/download/
+  // export in their own words this turn; otherwise the model's code/document
+  // blocks stay fully INLINE in the conversation (normal code blocks the
+  // user can read and copy — the "landing page → surprise .html file"
+  // complaint).
+  const rawLastUserText: string = (() => {
+    for (let i = llmMessages.length - 1; i >= 0; i--) {
+      if (llmMessages[i]?.role === 'user') return llmMessages[i].content || '';
+    }
+    return flattenContent(userMessage?.content);
+  })();
+  let userAskedForFile = false;
+  try {
+    const { FILE_REQUEST_RE } = await import('@/lib/document-generation');
+    userAskedForFile = FILE_REQUEST_RE.test(rawLastUserText || '');
+  } catch {
+    userAskedForFile = false;
+  }
+  console.log(
+    '[v12-flow] document extraction gate:',
+    userAskedForFile ? 'EXPLICIT file request → extract' : 'no file request → keep inline'
+  );
+
   // System prompt (params.system / model-level params come through form.params)
   const systemPrompt = form.params?.system;
   if (typeof systemPrompt === 'string' && systemPrompt.trim()) {
@@ -869,6 +896,9 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     });
   };
 
+  // File-generation intent gate: see rawLastUserText above — computed from
+  // the RAW user question (before web-search augmentation). processGenerated
+  // Documents only extracts file blocks when userAskedForFile.
   const processGeneratedDocuments = async (
     content: string
   ): Promise<{ content: string; files: any[] }> => {
@@ -876,10 +906,15 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     try {
       const { extractDocumentBlocks, generateDocumentFiles, sanitizeInventedDownloadLinks } =
         await import('@/lib/document-generation');
-      const { blocks, stripped } = extractDocumentBlocks(safeContent);
+      const { blocks, stripped } = extractDocumentBlocks(safeContent, {
+        extract: userAskedForFile,
+      });
       if (!blocks.length) {
-        // No document block emitted — at least strip any hallucinated link.
-        safeContent = sanitizeInventedDownloadLinks(safeContent);
+        // No document block extracted (none emitted, or no explicit user
+        // request → blocks kept inline) — at least strip hallucinated links.
+        safeContent = sanitizeInventedDownloadLinks(
+          userAskedForFile ? safeContent : stripped
+        );
         return { content: sanitizeCitationMarkers(safeContent), files: [] };
       }
       const files = await generateDocumentFiles(user, blocks, {

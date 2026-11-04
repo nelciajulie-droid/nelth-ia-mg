@@ -28,10 +28,13 @@ import type { ApiUser } from '@/lib/auth';
 // Capability system prompt (injected into every chat completion)
 // ---------------------------------------------------------------------------
 
-export const CAPABILITY_SYSTEM_PROMPT = `You are running on Nelth-AI, a platform that CAN generate real downloadable files for the user.
+export const CAPABILITY_SYSTEM_PROMPT = `You are running on Nelth-AI, a platform that CAN generate real downloadable files for the user — but ONLY when the user EXPLICITLY asks for one.
 
-DOCUMENT CREATION CAPABILITY:
-You CAN create documents and files directly — the user downloads them from the chat. NEVER say you cannot create files, cannot generate a PDF/Word document, or that the user must copy/paste into an editor. When the user asks you to create, generate or write a document (CV/résumé, cover letter, report, contract, invoice, letter, summary, table, spreadsheet, presentation outline, etc.), you MUST generate the actual file using a fenced code block with the language tag "document" and a filename attribute:
+DOCUMENT CREATION CAPABILITY — ONLY ON EXPLICIT REQUEST:
+Create a real downloadable file ONLY when the user's message explicitly asks for a file, a download, an export, an attachment, or names a concrete file format. Examples that qualify: "génère un fichier PDF", "fais-moi un Word téléchargeable", "exporte un Excel", "crée un fichier .html", "je veux le fichier", "make a downloadable PDF", "export as CSV".
+When the user does NOT explicitly ask for a file/download/export/format — for example "crée une landing page", "écris le code HTML", "fais-moi un CV", "donne-moi le tableau", "refais la version en HTML complet", "ok merci" — answer NORMALLY in the conversation: regular fenced code blocks (\`\`\`html, \`\`\`css, \`\`\`js, Markdown tables…) fully visible in the chat bubble. Do NOT emit a document block, do NOT mention or promise a downloadable file, do NOT attach anything — the code/text stays inline and the user can copy it.
+
+When the user DOES explicitly ask for a file, you MUST generate the actual file (never say you cannot create files, that the user must copy/paste, or that you cannot make a PDF/Word/Excel). Use a fenced code block with the language tag "document" and a filename attribute:
 
 \`\`\`document filename="cv-jane-doe.pdf"
 # Jane Doe
@@ -79,6 +82,63 @@ const ALWAYS_DOC_TAGS = new Set(['document', 'pdf', 'docx', 'xlsx', 'xls', 'exce
  *  attribute — they are also legitimate code-fence languages. */
 const DOC_TAGS_WITH_FILENAME = new Set(['html', 'md', 'txt', 'csv', 'json']);
 
+// ---------------------------------------------------------------------------
+// Explicit file-request detection (user intent gate)
+// ---------------------------------------------------------------------------
+
+/** The user EXPLICITLY asked for a file/download/export this turn.
+ *\n *  Policy: document blocks are turned into real downloadable files ONLY on
+ *  explicit request. Without one of these signals the model's output stays
+ *  fully INLINE in the conversation (normal code blocks the user can copy) —
+ *  no file card, no attachment, no "📎 …" marker.
+ *
+ *  Matches FR + EN: fichier, télécharge…, export…, download…, pièce jointe,
+ *  attachment, "au format", pdf/docx/xlsx/csv/excel (formats are
+ *  unambiguous product names), "un/le Word", "Word doc", extensions
+ *  .pdf/.doc(x)/.xls(x)/.csv/.json typed by the user.
+ *  Deliberately NOT matched: bare "document"/"doc", ".html", ".md" — too
+ *  generic ("rédige un document", "une page .html" are content requests). */
+export const FILE_REQUEST_RE = new RegExp(
+  [
+    String.raw`\bfichiers?\b`,
+    String.raw`\bt[ée]l[ée]charg\w*\b`,
+    String.raw`\bexport\w*\b`,
+    String.raw`\bdownload\w*\b`,
+    String.raw`\bpi[èe]ces?[- ]jointes?\b`,
+    String.raw`\battachments?\b`,
+    String.raw`\bau format\b`,
+    String.raw`\ben format\b`,
+    String.raw`\bpdf\b`,
+    String.raw`\bdocx\b`,
+    String.raw`\bxlsx\b`,
+    String.raw`\bexcel\b`,
+    String.raw`\bcsv\b`,
+    String.raw`\b(?:un|le|du|des|mes?|ton|notre|votre)\s+word\b`,
+    String.raw`\bword\s+(?:doc|document)s?\b`,
+    String.raw`\bdocuments?\s+(?:word|pdf|excel|xlsx)\b`,
+    String.raw`\.(?:pdf|docx?|xlsx?|csv|json)\b`,
+  ].join('|'),
+  'i'
+);
+
+/** Fenced-code language used to keep a document block INLINE when the user
+ *  did not ask for a file (extract=false): the "```document …" fence is
+ *  re-tagged as a plain code fence so the chat renders a normal block. */
+const INLINE_TAG_BY_EXT: Record<string, string> = {
+  html: 'html',
+  md: 'markdown',
+  txt: 'text',
+  csv: 'csv',
+  json: 'json',
+  // pdf/docx/xlsx sources are Markdown — render them as such.
+  pdf: 'markdown',
+  docx: 'markdown',
+  xlsx: 'markdown',
+  xls: 'markdown',
+  excel: 'markdown',
+  document: 'markdown',
+};
+
 /** Parse the filename attribute from an info string: filename="CV.pdf" */
 function parseFilename(info: string): string {
   const m = info.match(/filename\s*=\s*["']([^"']+)["']/i);
@@ -103,11 +163,20 @@ function filenameAttr(info: string): string | null {
  *   ```json / ```js / ```python …      → left untouched (regular code block)
  * Returns the blocks + the content with the blocks replaced by compact
  * markers (the chat bubble shows the marker; the real document rides the
- * message as a file card). */
-export function extractDocumentBlocks(content: string): {
+ * message as a file card).
+ *
+ *  opts.extract (default true): set false when the user did NOT explicitly
+ *  ask for a file — document-shaped fences are then kept INLINE, re-tagged
+ *  as plain code fences (```html, ```markdown…), so nothing becomes a file
+ *  card unless requested. See FILE_REQUEST_RE for the intent gate. */
+export function extractDocumentBlocks(
+  content: string,
+  opts?: { extract?: boolean }
+): {
   blocks: DocumentBlock[];
   stripped: string;
 } {
+  const extract = opts?.extract !== false;
   const blocks: DocumentBlock[] = [];
   const replacements: { start: number; end: number; text: string }[] = [];
   FENCE_RE.lastIndex = 0;
@@ -128,12 +197,25 @@ export function extractDocumentBlocks(content: string): {
       filename = attr;
     }
     if (!filename) continue; // regular code fence — leave it alone
-    blocks.push({ filename, content: body });
-    replacements.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      text: `📎 **${filename}** — fichier généré, prêt à télécharger ci-dessus.`,
-    });
+    if (extract) {
+      blocks.push({ filename, content: body });
+      replacements.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        text: `📎 **${filename}** — fichier généré, prêt à télécharger ci-dessus.`,
+      });
+    } else {
+      // No explicit user request: keep the block INLINE as a normal code
+      // fence (drop the document tag + filename attribute) so the user can
+      // read/copy the content right in the conversation.
+      const ext = (filename.split('.').pop() || '').toLowerCase();
+      const inlineTag = INLINE_TAG_BY_EXT[ext] ?? 'markdown';
+      replacements.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        text: '```' + inlineTag + '\n' + body + '\n```',
+      });
+    }
   }
   let stripped = content;
   if (replacements.length) {
