@@ -722,3 +722,293 @@ html.nsrc-lock{overflow:hidden}
     startObserving();
   }
 })();
+
+/* ====================================================================
+ * SERVERLESS REALTIME BRIDGE — socket.io event flow over HTTP SSE.
+ *
+ * Why: the compiled Open WebUI frontend v0.12.5 streams chat completions
+ * through socket.io events (`session_id = $socket?.id`); its HTTP helper
+ * parses the response as JSON. When no socket service exists (Vercel and
+ * other serverless hosts) the socket never connects, `session_id` is
+ * omitted, and the backend legitimately answers with SSE — which the JSON
+ * helper cannot parse → “Unexpected token 'd', "data: {"id"…".
+ *
+ * Fix, entirely in this layer (compiled frontend untouched):
+ *   • Fake engine.io server (XMLHttpRequest interception of /ws/socket.io):
+ *     the real handshake gets one chance; when it fails (502…), every
+ *     subsequent socket.io request is answered locally with a valid
+ *     engine.io v4 / socket.io v5 polling session. The compiled client
+ *     believes it is connected and dispatches server-pushed `42["events",
+ *     …]` packets to the app's registered handlers.
+ *   • Chat completions POST patch: when the payload has no `session_id`
+ *     (socket not connected), inject one plus `__sse_events` — the backend
+ *     then runs the exact socket-mode completion flow but serializes every
+ *     event envelope into the HTTP response as SSE lines. Each line is fed
+ *     back through the fake socket as an `events` message, and the fetch
+ *     promise resolves with the same `null` JSON the real socket mode
+ *     returns. Streaming, statuses, sources, titles and the done event all
+ *   • flow exactly like on a socket-capable host. The sandbox (real socket
+ *     service answering 200) is completely unaffected — native everywhere.
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_SSE_BRIDGE__) return;
+  window.__NELTH_SSE_BRIDGE__ = true;
+
+  const SOCKET_RE = /\/ws\/socket\.io\//;
+  // Minimal ops probe: window.__NELTH_BRIDGE__() → live bridge counters.
+  window.__NELTH_BRIDGE__ = () => ({
+    engaged,
+    sid,
+    queued: queue.length,
+    waiting: waiters.length,
+    delivered: debugDelivered,
+  });
+  let debugDelivered = 0;
+  const CHAT_RE = /\/api\/chat\/completions\/?(\?.*)?$/;
+
+  let engaged = false; // fake socket active (real one proved unreachable)
+  let handshakeFailures = 0; // consecutive failed native handshakes
+  let sid = null; // engine.io session id handed to the client
+  const queue = []; // server → client packets (concatenated per poll)
+  const waiters = []; // pending GET polls: { xhr, resolve }
+
+  const rand = () => Math.random().toString(36).slice(2, 10);
+  const nowSid = () => 'nelth-' + rand() + rand();
+
+  const deliver = () => {
+    while (queue.length && waiters.length) {
+      // engine.io v4 polling payload: packets joined by the record
+      // separator \x1e (charCode 30) — exactly what the compiled client
+      // splits on when decoding a poll response.
+      const packets = queue.join('\x1e');
+      queue.length = 0;
+      waiters.shift().resolve(packets);
+    }
+  };
+  const pushPacket = (p) => {
+    queue.push(p);
+    deliver();
+  };
+  /** Push one socket.io `events` message (the only kind the app consumes). */
+  const pushEvent = (envelope) => {
+    debugDelivered++;
+    pushPacket('42' + JSON.stringify(['events', envelope]));
+  };
+
+  const engage = () => {
+    if (engaged) return;
+    engaged = true;
+    // engine.io v4 server heartbeat — the client pongs via POST.
+    setInterval(() => pushPacket('2'), 20000);
+  };
+
+  // ------------------------------------------------ fake XHR completion
+  const finishXhr = (xhr, status, text) => {
+    try {
+      Object.defineProperty(xhr, 'readyState', { value: 4, configurable: true });
+      Object.defineProperty(xhr, 'status', { value: status, configurable: true });
+      Object.defineProperty(xhr, 'responseText', { value: text, configurable: true });
+      Object.defineProperty(xhr, 'response', { value: text, configurable: true });
+      xhr.getAllResponseHeaders = () => 'Content-Type: text/plain; charset=UTF-8\r\n';
+      xhr.getResponseHeader = (name) =>
+        String(name).toLowerCase() === 'content-type' ? 'text/plain; charset=UTF-8' : null;
+      const fn = xhr.onreadystatechange;
+      if (typeof fn === 'function') fn.call(xhr, { type: 'readystatechange' });
+    } catch (e) {
+      /* the app may have nulled its handler — fine */
+    }
+  };
+
+  // ------------------------------------------ engine.io protocol handling
+  const handleFake = (xhr, method, url, body) => {
+    if (method === 'GET') {
+      if (!sid) {
+        // Handshake: engine.io open packet (no upgrades → polling only).
+        sid = nowSid();
+        finishXhr(xhr, 200, '0' + JSON.stringify({
+          sid,
+          upgrades: [],
+          pingInterval: 25000,
+          pingTimeout: 20000,
+          maxPayload: 1000000,
+        }));
+        return;
+      }
+      // Long poll — resolved when packets are pushed (or by a ping).
+      new Promise((resolve) => {
+        waiters.push({ xhr, resolve });
+      }).then((packets) => finishXhr(xhr, 200, packets));
+      deliver();
+      return;
+    }
+    if (method === 'POST') {
+      const text = typeof body === 'string' ? body : '';
+      if (text === '40' || text.startsWith('40')) {
+        // socket.io CONNECT (default namespace, optional auth JSON) — the
+        // connect ack is delivered through the next poll, like the real one.
+        pushPacket('40' + JSON.stringify({ sid }));
+      } else if (/^42(\d+)-/.test(text)) {
+        // Client event expecting an ack (user-join, heartbeat…) → ACK.
+        const ackId = text.match(/^42(\d+)-/)[1];
+        pushPacket('43' + ackId + '[{"status":true}]');
+      }
+      // '2' pongs and plain events need no server response beyond ok.
+      finishXhr(xhr, 200, 'ok');
+      return;
+    }
+    finishXhr(xhr, 400, '');
+  };
+
+  // ------------------------------------- XMLHttpRequest interception
+  const nativeOpen = XMLHttpRequest.prototype.open;
+  const nativeSend = XMLHttpRequest.prototype.send;
+  const nativeAbort = XMLHttpRequest.prototype.abort;
+
+  XMLHttpRequest.prototype.open = function (method, url) {
+    const isSocket = SOCKET_RE.test(String(url));
+    this.__nelth = isSocket
+      ? { method: String(method || 'GET').toUpperCase(), url: String(url) }
+      : null;
+    return nativeOpen.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function (body) {
+    const fake = this.__nelth;
+    if (!fake) return nativeSend.call(this, body);
+
+    if (engaged) {
+      Promise.resolve().then(() => handleFake(this, fake.method, fake.url, body));
+      return;
+    }
+
+    // Not engaged — the real service answered the handshake. Requests WITH
+    // a session id are that connection's normal long-polls: pass through
+    // natively (engaging here would hijack a healthy connection). Only a
+    // fresh handshake (no sid — a reconnect attempt) gets failure-watched:
+    // two consecutive failures mean the service is truly unreachable.
+    const isHandshake = fake.method === 'GET' && !/[?&]sid=/.test(fake.url);
+    if (!isHandshake) {
+      return nativeSend.call(this, body);
+    }
+
+    const xhr = this;
+    const check = () => {
+      try {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status === 200 || xhr.status === 1223) {
+          handshakeFailures = 0;
+          return;
+        }
+      } catch (e) {
+        /* status unreadable — treat as failure */
+      }
+      if (++handshakeFailures >= 2) engage();
+    };
+    const origRSC = xhr.onreadystatechange;
+    xhr.onreadystatechange = function () {
+      check();
+      if (typeof origRSC === 'function') origRSC.apply(this, arguments);
+    };
+    nativeSend.call(this, body);
+  };
+
+  XMLHttpRequest.prototype.abort = function () {
+    const fake = this.__nelth;
+    if (fake && engaged) {
+      // Release any poll this xhr is holding (engine.io noop packet).
+      for (let i = 0; i < waiters.length; i++) {
+        if (waiters[i].xhr === this) {
+          waiters.splice(i, 1)[0].resolve('6');
+          break;
+        }
+      }
+      return;
+    }
+    return nativeAbort.apply(this, arguments);
+  };
+
+  // ------------------------------------------------ chat completions patch
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const isChatPost =
+      CHAT_RE.test(url) && !!init && String(init.method || '').toUpperCase() === 'POST';
+    if (!isChatPost) return nativeFetch(input, init);
+
+    let bodyObj = null;
+    try {
+      bodyObj = JSON.parse(String(init.body));
+    } catch (e) {
+      bodyObj = null;
+    }
+
+    // Socket-mode passthrough: a REAL socket service answered the handshake
+    // (bridge not engaged) AND the socket is connected (session_id present)
+    // — everything works natively (sandbox / self-hosted topology).
+    const useSseTransport =
+      engaged || !bodyObj || typeof bodyObj !== 'object' || !bodyObj.session_id;
+    if (!useSseTransport) {
+      return nativeFetch(input, init);
+    }
+
+    // Serverless mode — one of:
+    //   • the real socket service is unreachable (engaged) — any session_id
+    //     in the payload is our fake one, the backend socket hop is dead;
+    //   • the socket is not connected yet (no session_id) — the backend
+    //     would answer with raw SSE the JSON helper cannot parse.
+    // Either way: ensure a session id + the SSE event transport flag — the
+    // backend then runs the full socket-mode flow (statuses, deltas,
+    // sources, titles, done) serialized into the HTTP response.
+    engage();
+    if (!bodyObj || typeof bodyObj !== 'object') {
+      return nativeFetch(input, init); // not a JSON body — untouched
+    }
+    if (!bodyObj.session_id) bodyObj.session_id = 'nelth-sse-' + rand();
+    bodyObj.__sse_events = true;
+    const patchedInit = Object.assign({}, init, { body: JSON.stringify(bodyObj) });
+
+    return nativeFetch(input, patchedInit).then(async (res) => {
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!ct.includes('text/event-stream')) return res; // JSON error path
+
+      const chatId = bodyObj.chat_id || null;
+      const messageId = bodyObj.id || null;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          let idx;
+          while ((idx = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === '[DONE]') continue;
+            try {
+              const env = JSON.parse(payload);
+              if (env && typeof env === 'object' && env.data && env.data.type) {
+                pushEvent(env); // full socket-event envelope from the backend
+              }
+            } catch (e) {
+              /* skip malformed line */
+            }
+          }
+        }
+      } catch (e) {
+        /* client aborted — the app's own abort flow takes over */
+      }
+
+      // The socket-mode HTTP response is `null` JSON — mirror it exactly so
+      // the compiled helper's res.json() succeeds.
+      return new Response('null', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+  };
+})();

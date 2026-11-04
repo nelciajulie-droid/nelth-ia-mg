@@ -124,14 +124,34 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   const assistantMessageId: string | null = messageIds[0]?.message_id ?? null;
   const userMessageId: string | null = userMessage?.id ?? null;
 
+  // Serverless realtime transport — requested by the loader.js bridge when
+  // the browser cannot reach a socket.io service (Vercel & co). The whole
+  // socket-event flow (status, streaming deltas, sources, titles, done) is
+  // serialized into the HTTP response as SSE lines instead of being emitted
+  // over a socket hop that does not exist.
+  const sseEventsRequested = form.__sse_events === true;
+  delete form.__sse_events;
+  const sseBuffer: unknown[] = [];
+  let sseSink: ((envelope: unknown) => void) | null = null;
+
   if (isNewChat) chatId = crypto.randomUUID();
 
-  const emit = (data: unknown) =>
-    emitSocketEvent(`user:${user.id}`, {
-      chat_id: chatId,
-      message_id: assistantMessageId,
-      data,
-    });
+  const emit = (data: unknown) => {
+    const envelope = { chat_id: chatId, message_id: assistantMessageId, data };
+    if (sseSink) {
+      // SSE event transport: write into the response stream — instant and
+      // ordered, no socket hop (there is no socket service to reach).
+      sseSink(envelope);
+      return Promise.resolve();
+    }
+    if (sseEventsRequested) {
+      // Event fired before the response stream opened (auto web-search
+      // status…): buffer it — flushed in order when the stream starts.
+      sseBuffer.push(envelope);
+      return Promise.resolve();
+    }
+    return emitSocketEvent(`user:${user.id}`, envelope);
+  };
 
   // ------------------------------------------------- 2. Chat bookkeeping (DB)
   let historyMap: Record<string, any> | null = null;
@@ -867,6 +887,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
 
   // --------------------------------------- 5b. Streaming + session (UI flow)
   if (sessionId) {
+    const runStreamBody = async (): Promise<Response> => {
     const completionId = crypto.randomUUID();
     let aggregate = '';
     let usage: any = null;
@@ -1084,6 +1105,53 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     await emit({ type: 'chat:list', data: { chat_id: chatId, folder_id: form.folder_id ?? null } });
 
     return nullJson();
+    };
+
+    // Serverless realtime transport (loader.js bridge): run the exact same
+    // socket-mode completion flow, but serialize every event envelope into
+    // the HTTP response as SSE lines. The bridge in the browser feeds them
+    // back through its local socket.io client, so the compiled frontend
+    // renders streaming exactly like with a real socket service.
+    if (sseEventsRequested) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          let closed = false;
+          sseSink = (envelope: unknown) => {
+            if (closed) return;
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(envelope)}\n\n`));
+            } catch {
+              closed = true;
+            }
+          };
+          // Pre-stream events (auto web-search status…) buffered while the
+          // sections above ran — flushed in order before the live ones.
+          for (const env of sseBuffer.splice(0)) sseSink(env);
+          try {
+            await runStreamBody();
+          } finally {
+            closed = true;
+            sseSink = null;
+            try {
+              controller.close();
+            } catch {
+              /* client already gone */
+            }
+          }
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          'x-accel-buffering': 'no',
+        },
+      });
+    }
+
+    return await runStreamBody();
   }
 
   // ------------------------- 5c. Streaming, no session (API clients): SSE out
