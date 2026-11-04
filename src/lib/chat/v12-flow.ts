@@ -355,6 +355,37 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     }
   }
 
+  // ---------------------------------------- 3.3bis Agent skills manifest
+  // (Claude.ai-style lazy loading): EVERY request carries only the skill
+  // names + trimmed descriptions (~3KB). The model must reply with
+  // `USE_SKILL(name)` as its FIRST line when — and only when — the task
+  // matches one; the streaming gate below then detects the marker, loads
+  // that ONE pack's full instructions and restarts the completion. The
+  // other 19 packs never enter the context (the user's ask: "prend le skill
+  // ce qu'il besoin à chaque tâche, comme claude.ai").
+  let skillsActive = false;
+  {
+    const { getSkillManifestPrompt } = await import('@/lib/skills/registry');
+    // rawLastUserText: the user's own words (web-search augmentation would
+    // false-positive the server-side skill hint with page keywords).
+    const skillManifest = await getSkillManifestPrompt(rawLastUserText);
+    if (skillManifest) {
+      skillsActive = true;
+      const hasSkillsPrompt = llmMessages.some(
+        (m) => m.role === 'system' && m.content.includes('AGENT SKILLS')
+      );
+      if (!hasSkillsPrompt) {
+        if (llmMessages.length && llmMessages[0].role === 'system') {
+          llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}\n\n---\n\n${skillManifest}` };
+        } else {
+          llmMessages.unshift({ role: 'system', content: skillManifest });
+        }
+      }
+    }
+  }
+  // Skills actually loaded this turn (persisted in message meta for UI/audit).
+  const usedSkills: string[] = [];
+
   // ------------------------------------ 3.4 Web search (explicit toggle OR auto).
   // Python middleware: features.web_search → search engine + context/citation
   // injection into the last user message. The TS port uses the built-in
@@ -720,18 +751,21 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
   const taskSignal = task.controller.signal;
   const finishTask = () => completeTask(task.id);
 
+  // Shared upstream caller (flow scope): used by pass 1 AND the agent-skill
+  // pass 2 (runStreamBody / the SSE API path re-call it with the injected
+  // skill messages).
+  const timeoutSignal = AbortSignal.timeout(600_000);
+  const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
+  const callUpstream = (body: Record<string, any>) =>
+    fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+
   let upstream: Response;
   try {
-    const timeoutSignal = AbortSignal.timeout(600_000);
-    const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
-    const callUpstream = (body: Record<string, any>) =>
-      fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      });
-
     upstream = await callUpstream(reqBody);
 
     // Provider flakiness guard (observed on the free dots-studio model with
@@ -851,11 +885,12 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       ...(usage ? { usage } : {}),
       ...(files && files.length ? { files } : {}),
       ...(webCitations ? { sources: webCitations } : {}),
-      ...(done || llmContent
+      ...(done || llmContent || usedSkills.length
         ? {
             meta: {
               ...(done ? { response_ended_at: nowSec() } : {}),
               ...(llmContent ? { llm_content: llmContent } : {}),
+              ...(usedSkills.length ? { used_skills: usedSkills } : {}),
             },
           }
         : {}),
@@ -949,6 +984,50 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       };
     }
     let content = data?.choices?.[0]?.message?.content ?? '';
+
+    // Agent skills lazy-loading (non-streaming): a leading USE_SKILL(name)
+    // marker restarts the completion with that pack's instructions injected —
+    // same protocol as the streaming gate in 5b.
+    if (skillsActive && content) {
+      const { SKILL_MARKER_RE, getSkillByName, buildSkillInjectionMessages, stripSkillMarkers } =
+        await import('@/lib/skills/registry');
+      const m = SKILL_MARKER_RE.exec(content);
+      if (m) {
+        const skill = getSkillByName(m[1]);
+        if (skill) {
+          usedSkills.push(skill.name);
+          await emit({
+            type: 'status',
+            data: { action: 'skill', description: `Skill « ${skill.label || skill.name} » chargé`, done: false },
+          });
+          try {
+            const res2 = await callUpstream({
+              ...reqBody,
+              messages: await buildSkillInjectionMessages(llmMessages, skill),
+            });
+            if (res2.ok) {
+              const data2 = await res2.json();
+              const content2 =
+                (route.type === 'openai'
+                  ? data2?.choices?.[0]?.message?.content
+                  : data2?.message?.content) ?? '';
+              if (content2) {
+                content = content2;
+                if (data2?.choices?.[0]?.message) data = data2;
+              }
+            }
+          } catch (e) {
+            console.error('[v12-flow] skill pass-2 failed', e);
+          }
+          await emit({
+            type: 'status',
+            data: { action: 'skill', description: `Skill « ${skill.label || skill.name} » chargé`, done: true },
+          });
+        }
+      }
+      content = stripSkillMarkers(content);
+    }
+
     // Reasoning tags → structured output items (frontend collapsible block).
     let reasoningOutput = parseCompleteOutput(content);
     if (reasoningOutput.length) {
@@ -1088,9 +1167,53 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       }
     };
 
-    const reader = (route.type === 'openai' ? upstream.body! : upstream.body!).getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    // Agent-skills streaming gate (lazy loading): holds the FIRST tokens —
+    // content and reasoning alike — until the USE_SKILL decision is known:
+    //   marker found → pass 1 stops, the pack's full instructions are injected
+    //                 and the completion restarts (pass-2 block below); the
+    //                 user only sees a status chip, never the marker.
+    //   no marker   → the buffered tokens are released through the normal
+    //                 machinery and the answer streams as usual.
+    let skillGate: import('@/lib/skills/registry').SkillGate | null = null;
+    if (skillsActive) {
+      const { SkillGate, skillNames } = await import('@/lib/skills/registry');
+      skillGate = new SkillGate(skillNames());
+    }
+
+    const processReasoningDelta = async (reasoningDelta: string): Promise<void> => {
+      const wasActive = nativeReasoning.active;
+      nativeReasoning.pushReasoning(reasoningDelta);
+      await emitNative(!wasActive); // first chunk → force the switch
+    };
+
+    const processContentDelta = async (delta: string): Promise<void> => {
+      aggregate += delta;
+      if (nativeReasoning.active) {
+        // Structured snapshots only (plain deltas would double-append).
+        nativeReasoning.pushContent(delta);
+        await emitNative();
+      } else {
+        const r = reasoning.push(delta);
+        if (r.mode === 'structured') {
+          // Full-output snapshots only (plain deltas would double-append).
+          if (r.switched) {
+            lastStructuredEmit = 0;
+            await emitStructured(true);
+          } else {
+            await emitStructured();
+          }
+        } else if (r.plainDelta) {
+          await emit({
+            type: 'chat:completion',
+            data: {
+              id: completionId,
+              done: false,
+              choices: [{ index: 0, delta: { content: r.plainDelta } }],
+            },
+          });
+        }
+      }
+    };
 
     const handleUpstreamLine = async (line: string) => {
       const trimmed = line.trim();
@@ -1114,40 +1237,33 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
             ? obj.choices[0].delta.reasoning_content
             : '');
         if (reasoningDelta) {
-          const wasActive = nativeReasoning.active;
-          nativeReasoning.pushReasoning(reasoningDelta);
-          await emitNative(!wasActive); // first chunk → force the switch
-        }
-        if (delta) {
-          aggregate += delta;
-          if (nativeReasoning.active) {
-            // Structured snapshots only (plain deltas would double-append).
-            nativeReasoning.pushContent(delta);
-            await emitNative();
+          if (skillGate && !skillGate.decided) {
+            skillGate.pendingReasoning += reasoningDelta;
           } else {
-            const r = reasoning.push(delta);
-            if (r.mode === 'structured') {
-              // Full-output snapshots only (plain deltas would double-append).
-              if (r.switched) {
-                lastStructuredEmit = 0;
-                await emitStructured(true);
-              } else {
-                await emitStructured();
-              }
-            } else if (r.plainDelta) {
-              await emit({
-                type: 'chat:completion',
-                data: {
-                  id: completionId,
-                  done: false,
-                  choices: [{ index: 0, delta: { content: r.plainDelta } }],
-                },
-              });
-            }
+            await processReasoningDelta(reasoningDelta);
           }
         }
+        if (delta) {
+          if (skillGate && !skillGate.decided) {
+            const action = skillGate.push(delta);
+            if (action === 'plain') {
+              // Marker definitively absent → release the held prefix
+              // (buffered reasoning first, then content) and stream on.
+              const pending = skillGate.pendingReasoning;
+              skillGate.pendingReasoning = '';
+              if (pending) await processReasoningDelta(pending);
+              const flush = skillGate.flushPlain();
+              if (flush) await processContentDelta(flush);
+            }
+            // 'skill' → restart flagged (the pass-2 block takes over);
+            // 'buffered' → keep holding, nothing user-visible yet.
+          } else if (!skillGate?.restart) {
+            await processContentDelta(delta);
+          }
+          // skillGate.restart → swallow the rest of pass 1.
+        }
       } else {
-        // ollama NDJSON line
+        // ollama NDJSON line (no gate — local models)
         const content: string = obj?.message?.content ?? '';
         if (obj?.done) usage = obj;
         if (content) {
@@ -1174,35 +1290,123 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       }
     };
 
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 1);
-          await handleUpstreamLine(line);
+    const consumeUpstream = async (response: Response): Promise<'completed' | 'restarted'> => {
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 1);
+            await handleUpstreamLine(line);
+            if (skillGate?.restart) return 'restarted';
+          }
+          // No checkpoint while the gate is undecided — the held prefix may
+          // be a USE_SKILL marker (not user-visible content).
+          if (
+            Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS &&
+            !(skillGate && !skillGate.decided)
+          ) {
+            lastCheckpoint = Date.now();
+            await checkpointPartial();
+          }
         }
-        if (Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS) {
-          lastCheckpoint = Date.now();
-          await checkpointPartial();
+        if (buffer.trim()) await handleUpstreamLine(buffer);
+      } catch (e) {
+        if (skillGate?.restart) return 'restarted';
+        if (taskSignal.aborted) {
+          // User pressed Stop: keep the partial assistant message, no error
+          // banner (matches the original behavior — the frontend marks the
+          // message done from the stop flow itself).
+          console.log('[v12-flow] generation aborted by user');
+        } else {
+          console.error('[v12-flow] stream error', e);
+          await emit({
+            type: 'chat:message:error',
+            data: { error: { content: 'Chat completion stream failed' }, done: true },
+          });
         }
+        return 'completed';
       }
-      if (buffer.trim()) await handleUpstreamLine(buffer);
-    } catch (e) {
-      if (taskSignal.aborted) {
-        // User pressed Stop: keep the partial assistant message, no error
-        // banner (matches the original behavior — the frontend marks the
-        // message done from the stop flow itself).
-        console.log('[v12-flow] generation aborted by user');
-      } else {
-        console.error('[v12-flow] stream error', e);
+      return 'completed';
+    };
+
+    // Pass 1 (gated). A USE_SKILL(name) first line restarts the completion
+    // with that ONE pack's full instructions injected after the model's own
+    // marker message — a tool-call round trip. The 19 other packs never
+    // enter the context (Claude.ai-style lazy loading).
+    const pass1 = await consumeUpstream(upstream);
+    // Stream ended before the gate could decide (very short answer, no
+    // marker): release the held tokens through the normal machinery.
+    if (pass1 === 'completed' && skillGate && !skillGate.decided) {
+      const pending = skillGate.pendingReasoning;
+      skillGate.pendingReasoning = '';
+      if (pending) await processReasoningDelta(pending);
+      const flush = skillGate.flushPlain();
+      if (flush) await processContentDelta(flush);
+    }
+    if (pass1 === 'restarted' && skillGate?.skillName) {
+      const { getSkillByName, buildSkillInjectionMessages } = await import('@/lib/skills/registry');
+      const skill = getSkillByName(skillGate.skillName);
+      if (skill) {
+        usedSkills.push(skill.name);
+        try {
+          await upstream.body?.cancel();
+        } catch {
+          /* pass 1 already ending */
+        }
+        const skillLabel = skill.label || skill.name;
         await emit({
-          type: 'chat:message:error',
-          data: { error: { content: 'Chat completion stream failed' }, done: true },
+          type: 'status',
+          data: { action: 'skill', description: `Skill « ${skillLabel} » chargé`, done: false },
         });
+        try {
+          let res2 = await callUpstream({
+            ...reqBody,
+            messages: await buildSkillInjectionMessages(llmMessages, skill),
+          });
+          if (isKilo && res2.status === 400) {
+            const probe = await res2.clone().text().catch(() => '');
+            if (/bad request|Provider returned error/i.test(probe)) {
+              console.warn('[v12-flow] skill pass-2 gateway 400 flake — retrying');
+              res2 = await callUpstream({
+                ...reqBody,
+                messages: await buildSkillInjectionMessages(llmMessages, skill),
+              });
+            }
+          }
+          if (!res2.ok) {
+            const errText = await res2.text().catch(() => '');
+            await emit({
+              type: 'chat:message:error',
+              data: { error: { content: errText.slice(0, 500) || `Upstream error ${res2.status}` }, done: true },
+            });
+            await persistAssistant(aggregate, usage, true, null, null, null);
+            finishTask();
+            await titlePromise;
+            return nullJson();
+          }
+          skillGate = null; // pass 2 streams freely (no gate)
+          await consumeUpstream(res2);
+        } catch (e) {
+          if (!taskSignal.aborted) {
+            console.error('[v12-flow] skill pass-2 failed', e);
+            await emit({
+              type: 'chat:message:error',
+              data: { error: { content: 'Chat completion stream failed' }, done: true },
+            });
+          }
+        } finally {
+          await emit({
+            type: 'status',
+            data: { action: 'skill', description: `Skill « ${skillLabel} » chargé`, done: true },
+          });
+        }
       }
     }
 
@@ -1217,6 +1421,14 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       const finalReasoning = reasoning.finish();
       finalOutput = finalReasoning.usedStructured ? finalReasoning.output : null;
       finalContent = finalReasoning.usedStructured ? finalReasoning.content : aggregate;
+    }
+
+    // Agent-skill marker hygiene: the gate consumed the leading USE_SKILL
+    // marker; strip any late/mid-text leak so neither the UI nor the next
+    // turn's LLM context ever sees the protocol.
+    if (finalContent.includes('USE_SKILL')) {
+      const { stripSkillMarkers } = await import('@/lib/skills/registry');
+      finalContent = stripSkillMarkers(finalContent);
     }
 
     // Document blocks → downloadable file cards (before the final completion
@@ -1282,74 +1494,145 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     async start(controller) {
       const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
       try {
-        const reader = upstream.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const text = decoder.decode(value, { stream: true });
-          // Incremental persistence — same serverless hardening as the UI
-          // flow (5b): checkpoint the partial content so a function kill
-          // leaves the generated text in the DB instead of nothing.
-          if (
-            isSavedChatId(chatId) &&
-            assistantMessageId &&
-            aggregate.trim() &&
-            Date.now() - lastSseCheckpoint >= 5000
-          ) {
-            lastSseCheckpoint = Date.now();
-            try {
-              await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
-                parentId: userMessageId,
-                role: 'assistant',
-                content: aggregate,
-                done: false,
-                model: modelId,
-              } as any);
-            } catch {
-              /* best-effort checkpoint */
-            }
-          }
-          if (route.type === 'openai') {
-            for (const line of text.split('\n')) {
-              const trimmed = line.trim();
-              if (trimmed.startsWith('data:') && trimmed !== 'data: [DONE]') {
-                try {
-                  const obj = JSON.parse(trimmed.slice(5).trim());
-                  aggregate += obj?.choices?.[0]?.delta?.content ?? '';
-                  if (obj?.usage) usage = obj.usage;
-                } catch { /* ignore */ }
+        // Agent-skills gate for API clients (same lazy loading as the UI
+        // flow 5b): the first tokens are held until USE_SKILL(name) is
+        // confirmed absent; a marker restarts the completion with the pack's
+        // instructions injected, and pass 2 streams out instead.
+        let gate: import('@/lib/skills/registry').SkillGate | null = null;
+        if (skillsActive) {
+          const { SkillGate, skillNames } = await import('@/lib/skills/registry');
+          gate = new SkillGate(skillNames());
+        }
+        let pendingRaw = '';
+        let restartName: string | null = null;
+
+        const consumePass = async (response: Response): Promise<'completed' | 'restarted'> => {
+          const reader = response.body!.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) return 'completed';
+            const text = decoder.decode(value, { stream: true });
+            // Incremental persistence — same serverless hardening as the UI
+            // flow (5b): checkpoint the partial content so a function kill
+            // leaves the generated text in the DB instead of nothing.
+            if (
+              isSavedChatId(chatId) &&
+              assistantMessageId &&
+              aggregate.trim() &&
+              !(gate && !gate.decided) &&
+              Date.now() - lastSseCheckpoint >= 5000
+            ) {
+              lastSseCheckpoint = Date.now();
+              try {
+                await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
+                  parentId: userMessageId,
+                  role: 'assistant',
+                  content: aggregate,
+                  done: false,
+                  model: modelId,
+                } as any);
+              } catch {
+                /* best-effort checkpoint */
               }
             }
-            send(text);
-          } else {
-            buffer += text;
-            let idx: number;
-            while ((idx = buffer.indexOf('\n')) >= 0) {
-              const line = buffer.slice(0, idx).trim();
-              buffer = buffer.slice(idx + 1);
-              if (!line) continue;
-              try {
-                const obj = JSON.parse(line);
-                const content = obj?.message?.content ?? '';
-                aggregate += content;
-                send(
-                  `data: ${JSON.stringify({
-                    model: modelId,
-                    created: nowSec(),
-                    object: 'chat.completion.chunk',
-                    choices: [
-                      {
-                        index: 0,
-                        delta: obj.done ? {} : { role: 'assistant', content },
-                        finish_reason: obj.done ? 'stop' : null,
-                      },
-                    ],
-                  })}\n\n`
-                );
-                if (obj.done) send('data: [DONE]\n\n');
-              } catch { /* skip */ }
+            if (route.type === 'openai') {
+              let chunkContent = '';
+              for (const line of text.split('\n')) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('data:') && trimmed !== 'data: [DONE]') {
+                  try {
+                    const obj = JSON.parse(trimmed.slice(5).trim());
+                    chunkContent += obj?.choices?.[0]?.delta?.content ?? '';
+                    if (obj?.usage) usage = obj.usage;
+                  } catch { /* ignore */ }
+                }
+              }
+              if (gate && !gate.decided) {
+                const action = gate.push(chunkContent);
+                if (action === 'skill') {
+                  restartName = gate.skillName;
+                  try {
+                    await reader.cancel();
+                  } catch { /* pass 1 already ending */ }
+                  return 'restarted';
+                }
+                if (action === 'plain') {
+                  // Marker definitively absent → release the held raw prefix.
+                  send(pendingRaw + text);
+                  pendingRaw = '';
+                } else {
+                  pendingRaw += text; // keep holding the raw SSE lines
+                }
+              } else {
+                send(text);
+              }
+              aggregate += chunkContent;
+            } else {
+              buffer += text;
+              let idx: number;
+              while ((idx = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, idx).trim();
+                buffer = buffer.slice(idx + 1);
+                if (!line) continue;
+                try {
+                  const obj = JSON.parse(line);
+                  const content = obj?.message?.content ?? '';
+                  aggregate += content;
+                  send(
+                    `data: ${JSON.stringify({
+                      model: modelId,
+                      created: nowSec(),
+                      object: 'chat.completion.chunk',
+                      choices: [
+                        {
+                          index: 0,
+                          delta: obj.done ? {} : { role: 'assistant', content },
+                          finish_reason: obj.done ? 'stop' : null,
+                        },
+                      ],
+                    })}\n\n`
+                  );
+                  if (obj.done) send('data: [DONE]\n\n');
+                } catch { /* skip */ }
+              }
+            }
+          }
+        };
+
+        const pass1 = await consumePass(upstream);
+        // Stream ended before the gate could decide → release the held raw
+        // prefix (aggregate already includes it — 5c parses as it goes).
+        if (pass1 === 'completed' && gate && !gate.decided && pendingRaw) {
+          send(pendingRaw);
+          pendingRaw = '';
+        }
+        if (pass1 === 'restarted' && restartName) {
+          const { getSkillByName, buildSkillInjectionMessages } = await import('@/lib/skills/registry');
+          const skill = getSkillByName(restartName);
+          if (skill) {
+            usedSkills.push(skill.name);
+            aggregate = ''; // the held pass-1 prefix (marker) is dropped
+            let res2: Response | null = null;
+            try {
+              res2 = await callUpstream({ ...reqBody, messages: await buildSkillInjectionMessages(llmMessages, skill) });
+              if (isKilo && res2.status === 400) {
+                const probe = await res2.clone().text().catch(() => '');
+                if (/bad request|Provider returned error/i.test(probe)) {
+                  console.warn('[v12-flow] 5c skill pass-2 gateway 400 flake — retrying');
+                  res2 = await callUpstream({ ...reqBody, messages: await buildSkillInjectionMessages(llmMessages, skill) });
+                }
+              }
+            } catch (e) {
+              console.error('[v12-flow] 5c skill pass-2 failed', e);
+            }
+            if (res2 && res2.ok) {
+              gate = null; // pass 2 streams freely
+              await consumePass(res2);
+            } else {
+              controller.error(new Error(`Upstream error ${res2?.status ?? 502}`));
+              return;
             }
           }
         }

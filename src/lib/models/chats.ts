@@ -1523,6 +1523,24 @@ export async function importChats(userId: string, forms: ChatImportForm[]): Prom
 
 export async function updateChatById(id: string, chatPatch: Json, touch = true): Promise<ChatModel | null> {
   try {
+    // Title-only updates (background title generation): update JUST the
+    // title column. The generic path below rewrites the whole `chat` JSON
+    // (read-modify-write) — running concurrently with the final assistant
+    // persist it can resurrect a stale done:false message: the title task
+    // reads the row BEFORE the persist and writes its stale snapshot AFTER,
+    // wiping the just-persisted streaming result (repro: short answer whose
+    // title resolves right around the stream end).
+    const patchKeys = Object.keys(chatPatch ?? {});
+    if (patchKeys.length === 1 && patchKeys[0] === 'title') {
+      const rawTitle = (chatPatch as any).title;
+      const title = typeof rawTitle === 'string' ? rawTitle : String(rawTitle ?? 'New Chat');
+      await db.chat.update({
+        where: { id },
+        data: { title, ...(touch ? { updated_at: nowSec() } : {}) } as any,
+      });
+      return getChatById(id);
+    }
+
     const row = await db.chat.findUnique({ where: { id } });
     if (!row) return null;
 
@@ -1548,7 +1566,12 @@ export async function updateChatById(id: string, chatPatch: Json, touch = true):
 
     const data: Record<string, unknown> = {
       chat: JSON.stringify(updated),
-      title: typeof updated.title === 'string' ? updated.title : String(updated.title ?? 'New Chat'),
+      // Patch without a title → keep the column title (the JSON title may be
+      // stale "New Chat" — the title-only fast path updates just the column).
+      title:
+        typeof (chatPatch as any).title === 'string'
+          ? (chatPatch as any).title
+          : row.title ?? (typeof updated.title === 'string' ? updated.title : 'New Chat'),
     };
     if ('history' in chatPatch || 'messages' in chatPatch || 'currentId' in chatPatch || 'branchPointMessageId' in chatPatch) {
       data.current_message_id = getCurrentMessageId(updated);
@@ -1750,9 +1773,14 @@ export async function upsertMessageToChatByIdAndMessageId(
     await upsertChatMessage(cleanMessageId, id, savedMessage.user_id ?? row.user_id ?? '', savedMessage);
 
     chat.history = history;
+    // Title column is authoritative (the background title generation updates
+    // it via the title-only fast path — see updateChatById). Sync the JSON
+    // title from the column instead of clobbering the column with the stale
+    // JSON "New Chat" placeholder.
+    if (typeof row.title === 'string' && row.title) chat.title = row.title;
     const data: Record<string, unknown> = {
       chat: JSON.stringify(sanitizeDataForDb(chat)),
-      title: typeof chat.title === 'string' ? sanitizeTextForDb(chat.title) : String(chat.title ?? 'New Chat'),
+      title: (typeof row.title === 'string' && row.title) || (typeof chat.title === 'string' ? sanitizeTextForDb(chat.title) : 'New Chat'),
       current_message_id: getCurrentMessageId(chat),
     };
     if (touch) data.updated_at = nowSec();
@@ -1784,7 +1812,7 @@ export async function deleteMessageFromChatByIdAndMessageId(
         where: { id },
         data: {
           chat: JSON.stringify(sanitizeDataForDb(chat)),
-          title: typeof chat.title === 'string' ? sanitizeTextForDb(chat.title) : String(chat.title ?? 'New Chat'),
+          title: (typeof row.title === 'string' && row.title) || (typeof chat.title === 'string' ? sanitizeTextForDb(chat.title) : 'New Chat'),
           current_message_id: getCurrentMessageId(chat),
         } as any,
       });
@@ -1800,7 +1828,7 @@ export async function deleteMessageFromChatByIdAndMessageId(
       where: { id },
       data: {
         chat: JSON.stringify(sanitizeDataForDb(chat)),
-        title: typeof chat.title === 'string' ? sanitizeTextForDb(chat.title) : String(chat.title ?? 'New Chat'),
+        title: (typeof row.title === 'string' && row.title) || (typeof chat.title === 'string' ? sanitizeTextForDb(chat.title) : 'New Chat'),
         current_message_id: getCurrentMessageId(chat),
         updated_at: nowSec(),
       } as any,

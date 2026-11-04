@@ -226,6 +226,7 @@ const ADMIN_CONFIG_DEFAULTS: Record<string, unknown> = {
   'memories.enable': env.ENABLE_MEMORIES,
   'memories.system_context.enable': envBool('ENABLE_MEMORY_SYSTEM_CONTEXT', 'True'),
   'skills.lazy_loading.enable': envBool('ENABLE_SKILL_LAZY_LOADING', 'False'),
+  'skills.catalog.enable': envBool('ENABLE_SKILL_CATALOG', 'True'),
   'skills.content_max_chars': process.env.SKILL_CONTENT_MAX_CHARS ? parseInt(process.env.SKILL_CONTENT_MAX_CHARS, 10) : null,
   'skills.preview_max_chars': process.env.SKILL_PREVIEW_MAX_CHARS ? parseInt(process.env.SKILL_PREVIEW_MAX_CHARS, 10) : null,
   'notes.enable': env.ENABLE_NOTES,
@@ -268,6 +269,7 @@ const ADMIN_CONFIG_KEYS: Record<string, string> = {
   ENABLE_MEMORIES: 'memories.enable',
   ENABLE_MEMORY_SYSTEM_CONTEXT: 'memories.system_context.enable',
   ENABLE_SKILL_LAZY_LOADING: 'skills.lazy_loading.enable',
+  ENABLE_SKILL_CATALOG: 'skills.catalog.enable',
   SKILL_CONTENT_MAX_CHARS: 'skills.content_max_chars',
   SKILL_PREVIEW_MAX_CHARS: 'skills.preview_max_chars',
   ENABLE_NOTES: 'notes.enable',
@@ -1214,6 +1216,7 @@ export const routes: Route[] = [
         ENABLE_APPS: 'apps.enable',
         I18N: 'ui.i18n',
         ENABLE_SKILL_LAZY_LOADING: 'skills.lazy_loading.enable',
+        ENABLE_SKILL_CATALOG: 'skills.catalog.enable',
         SKILL_CONTENT_MAX_CHARS: 'skills.content_max_chars',
         SKILL_PREVIEW_MAX_CHARS: 'skills.preview_max_chars',
       };
