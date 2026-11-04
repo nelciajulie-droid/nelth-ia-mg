@@ -173,7 +173,7 @@ export async function generateChatCompletionInternal(
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300_000),
+      signal: AbortSignal.timeout(600_000),
     });
   } catch (e) {
     return new Response(

@@ -55,8 +55,27 @@ function flattenContent(content: unknown): string {
 
 function messageContent(m: any): string {
   if (!m || typeof m !== 'object') return '';
+  // Raw content (document blocks intact) — see persistAssistant(): the
+  // processed `content` replaces generated documents with "📎 …" markers
+  // for the UI, and structured `output` items hold the processed text too.
+  // Sending the processed text back to the model strips it of the very
+  // code/files it produced (next turn: "Voici la version claire…" — the
+  // model no longer has its own code and re-announces it without it).
+  const raw = typeof m?.meta?.llm_content === 'string' ? m.meta.llm_content : '';
+  if (raw.trim()) return raw;
   const out = getOutputText(m.output);
-  return out || flattenContent(m.content);
+  const base = out || flattenContent(m.content);
+  // Legacy messages persisted before llm_content existed: at least name the
+  // generated files so the model knows they exist in the conversation.
+  if (Array.isArray(m.files) && m.files.length) {
+    const names = m.files
+      .map((f: any) => (f && typeof f.name === 'string' ? f.name : null))
+      .filter((n: any): n is string => !!n);
+    if (names.length) {
+      return `${base}\n\n[Fichiers générés précédemment et joints à ce message : ${names.join(', ')}]`;
+    }
+  }
+  return base;
 }
 
 // Python config.py DEFAULT_TITLE_GENERATION_PROMPT_TEMPLATE (verbatim).
@@ -248,9 +267,29 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       if (stored && Object.keys(stored as any).length) map = stored as any;
     }
     const chain = getMessageList(map as any, userMessageId).reverse();
+    // In-flight assistant placeholders (this turn's targets) are dropped, as
+    // before. Any OTHER empty assistant message is an interrupted/killed
+    // generation (serverless function timeout, crash…) — it is NOT silently
+    // removed: the model is told a response existed but was interrupted, so
+    // it does not re-deliver from scratch ("Voici la version claire…" with
+    // no code — the code it wrote died with the function before persist).
+    const inFlightIds = new Set(
+      messageIds.map((e: any) => e?.message_id).filter((id: any): id is string => !!id)
+    );
     llmMessages = chain
-      .filter((m: any) => !(m.role === 'assistant' && !messageContent(m)))
-      .map((m: any) => ({ role: m.role, content: messageContent(m) }));
+      .map((m: any) => {
+        if (m.role === 'assistant' && !messageContent(m)) {
+          return inFlightIds.has(m.id)
+            ? null
+            : {
+                role: 'assistant',
+                content:
+                  "[La génération de cette réponse précédente a été interrompue avant sa sauvegarde — aucun contenu n'est disponible.]",
+              };
+        }
+        return { role: m.role, content: messageContent(m) };
+      })
+      .filter((m: any): m is { role: string; content: string } => m !== null);
   } else {
     llmMessages = (form.messages ?? []).map((m: any) => ({
       role: m.role,
@@ -260,6 +299,10 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       llmMessages = [{ role: 'user', content: flattenContent(userMessage.content) }];
     }
   }
+  console.log(
+    '[v12-flow] llm context:',
+    llmMessages.map((m) => `${m.role}:${m.content.length}`).join(' | ')
+  );
 
   // System prompt (params.system / model-level params come through form.params)
   const systemPrompt = form.params?.system;
@@ -652,7 +695,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
 
   let upstream: Response;
   try {
-    const timeoutSignal = AbortSignal.timeout(300_000);
+    const timeoutSignal = AbortSignal.timeout(600_000);
     const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
     const callUpstream = (body: Record<string, any>) =>
       fetch(url, {
@@ -728,14 +771,49 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     });
   }
 
+  // Title generation — Python background_tasks parity, hardened for
+  // serverless: on hosts that hard-kill functions at a max duration (Vercel:
+  // 60s by default), a post-stream title call never runs — the chat would
+  // stay "New Chat" forever (observed in production: every long landing-page
+  // generation killed at exactly 60.3s, title never generated). Kicked off
+  // here — concurrent with the main generation, completes in seconds — it
+  // always lands in time. Gated on the chat still being untitled so
+  // follow-up turns never churn an existing title.
+  const titlePromise: Promise<string | null> = (async () => {
+    if (!isSavedChatId(chatId) || !backgroundTasks.title_generation || isTemporaryChatId(chatId)) {
+      return null;
+    }
+    try {
+      const chat = await getChatById(chatId);
+      if (chat && chat.title !== 'New Chat' && chat.title) return null;
+      const title = await generateChatTitle(route, llmMessages);
+      if (title) {
+        await updateChatById(chatId, { title });
+        await emit({ type: 'chat:title', data: title });
+        return title;
+      }
+    } catch {
+      /* best-effort */
+    }
+    return null;
+  })();
+
   const persistAssistant = async (
     content: string,
     usage: any,
     done = true,
     output?: any[] | null,
-    files?: any[] | null
+    files?: any[] | null,
+    rawContent?: string | null
   ) => {
     if (!isSavedChatId(chatId) || !assistantMessageId) return;
+    // rawContent: the full generated text BEFORE document-block extraction
+    // (```document … → downloadable file cards). `content` is the processed
+    // text the UI shows (blocks replaced by "📎 …" markers). meta.llm_content
+    // keeps the raw text so the NEXT turn's LLM context still contains the
+    // code/documents the model produced — see messageContent().
+    const llmContent =
+      rawContent && rawContent.trim() && rawContent !== content ? rawContent.slice(0, 100_000) : null;
     await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
       parentId: userMessageId,
       role: 'assistant',
@@ -746,7 +824,14 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       ...(usage ? { usage } : {}),
       ...(files && files.length ? { files } : {}),
       ...(webCitations ? { sources: webCitations } : {}),
-      ...(done ? { meta: { response_ended_at: nowSec() } } : {}),
+      ...(done || llmContent
+        ? {
+            meta: {
+              ...(done ? { response_ended_at: nowSec() } : {}),
+              ...(llmContent ? { llm_content: llmContent } : {}),
+            },
+          }
+        : {}),
     });
   };
 
@@ -852,6 +937,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       }
     }
     // Document blocks → downloadable file cards on the assistant message.
+    const rawContent = content;
     const docResult = await processGeneratedDocuments(content);
     content = docResult.content;
     if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
@@ -862,7 +948,8 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       data?.usage ?? null,
       true,
       reasoningOutput.length ? reasoningOutput : null,
-      docResult.files.length ? docResult.files : null
+      docResult.files.length ? docResult.files : null,
+      rawContent
     );
     if (sessionId && chatId) {
       if (docResult.files.length) {
@@ -878,15 +965,8 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       });
     }
     finishTask();
+    await titlePromise; // emitted early (chat:title) — make sure it settled
 
-    // Title generation (background_tasks parity for the non-stream path).
-    if (isSavedChatId(chatId) && backgroundTasks.title_generation && !isTemporaryChatId(chatId)) {
-      const title = await generateChatTitle(route, llmMessages);
-      if (title) {
-        await updateChatById(chatId, { title });
-        if (sessionId && chatId) await emit({ type: 'chat:title', data: title });
-      }
-    }
     // API clients (no session): surface the citations on the JSON body too —
     // the UI flow receives them through the chat:completion socket event.
     return json({ ...data, ...(webCitations ? { sources: webCitations } : {}) });
@@ -931,6 +1011,45 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
           type: 'chat:completion',
           data: { id: completionId, done: false, output },
         });
+      }
+    };
+
+    // Incremental persistence (serverless hardening): hosts that hard-kill
+    // functions at a max duration (Vercel 60s by default) never reach the
+    // final persist below — the streamed answer the user just WATCHED for a
+    // minute would vanish from the DB, and the next turn's LLM context loses
+    // the model's own code entirely (production repro: assistant message
+    // stayed done:false / content:'' after a 60.3s kill → next turn the model
+    // re-announced "Voici la version claire…" without the code). Checkpoint
+    // the partial content every few seconds with done:false so an
+    // interrupted generation leaves its trace: reload shows the partial
+    // answer, and turn N+1's context includes what was produced.
+    let lastCheckpoint = 0;
+    const CHECKPOINT_INTERVAL_MS = 5000;
+    const checkpointPartial = async (): Promise<void> => {
+      if (!isSavedChatId(chatId) || !assistantMessageId) return;
+      let partial = aggregate;
+      try {
+        if (nativeReasoning.active) {
+          partial = getOutputText(nativeReasoning.snapshot(Date.now()) as any) || aggregate;
+        } else {
+          const snap = reasoning.snapshot(Date.now()) as any;
+          partial = getOutputText(snap) || aggregate;
+        }
+      } catch {
+        partial = aggregate;
+      }
+      if (!partial.trim()) return;
+      try {
+        await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
+          parentId: userMessageId,
+          role: 'assistant',
+          content: partial,
+          done: false,
+          model: modelId,
+        } as any);
+      } catch {
+        /* best-effort checkpoint */
       }
     };
 
@@ -1031,6 +1150,10 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
           buffer = buffer.slice(idx + 1);
           await handleUpstreamLine(line);
         }
+        if (Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS) {
+          lastCheckpoint = Date.now();
+          await checkpointPartial();
+        }
       }
       if (buffer.trim()) await handleUpstreamLine(buffer);
     } catch (e) {
@@ -1063,6 +1186,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
 
     // Document blocks → downloadable file cards (before the final completion
     // event so the cards render together with the finished message).
+    const rawFinalContent = finalContent;
     const docResult = await processGeneratedDocuments(finalContent);
     finalContent = docResult.content;
     if (finalOutput?.length) {
@@ -1082,19 +1206,15 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       usage,
       true,
       finalOutput,
-      docResult.files.length ? docResult.files : null
+      docResult.files.length ? docResult.files : null,
+      rawFinalContent
     );
     finishTask();
 
-    // Title generation (Python background_tasks_handler → generate_title)
-    let title: string | null = null;
-    if (isSavedChatId(chatId) && backgroundTasks.title_generation) {
-      title = await generateChatTitle(route, llmMessages);
-      if (title) {
-        await updateChatById(chatId, { title });
-        await emit({ type: 'chat:title', data: title });
-      }
-    }
+    // Title generation ran EARLY (concurrently with the stream — see
+    // titlePromise above): it survives serverless function kills and never
+    // churns an existing title. Just await it so the done event can carry it.
+    const title = await titlePromise;
 
     await emit({
       type: 'chat:completion',
@@ -1121,6 +1241,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
   const encoder = new TextEncoder();
   let aggregate = '';
   let usage: any = null;
+  let lastSseCheckpoint = 0;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -1133,6 +1254,28 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
           const { done, value } = await reader.read();
           if (done) break;
           const text = decoder.decode(value, { stream: true });
+          // Incremental persistence — same serverless hardening as the UI
+          // flow (5b): checkpoint the partial content so a function kill
+          // leaves the generated text in the DB instead of nothing.
+          if (
+            isSavedChatId(chatId) &&
+            assistantMessageId &&
+            aggregate.trim() &&
+            Date.now() - lastSseCheckpoint >= 5000
+          ) {
+            lastSseCheckpoint = Date.now();
+            try {
+              await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
+                parentId: userMessageId,
+                role: 'assistant',
+                content: aggregate,
+                done: false,
+                model: modelId,
+              } as any);
+            } catch {
+              /* best-effort checkpoint */
+            }
+          }
           if (route.type === 'openai') {
             for (const line of text.split('\n')) {
               const trimmed = line.trim();
