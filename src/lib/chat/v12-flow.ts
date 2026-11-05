@@ -810,6 +810,10 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     });
 
   let upstream: Response;
+  /** Request-send timestamp — anchors the thinking duration (Kilo-style
+   *  gateways buffer the whole chain-of-thought server-side; without this
+   *  anchor the measured span is ~0s → "Thought for less than a second"). */
+  const upstreamStartedAt = Date.now();
   try {
     upstream = await callUpstream(reqBody);
 
@@ -1090,7 +1094,10 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       // content → structured output items.
       const native = data?.choices?.[0]?.message?.reasoning;
       if (typeof native === 'string' && native.trim()) {
-        reasoningOutput = nativeReasoningOutputItems(native, content);
+        // Anchor: reasoning started when the request was sent (the gateway
+        // buffered the chain-of-thought server-side), ended when the complete
+        // response arrived.
+        reasoningOutput = nativeReasoningOutputItems(native, content, upstreamStartedAt, Date.now());
         if (reasoningOutput.length) {
           data.output = reasoningOutput;
           if (data?.choices?.[0]?.message) {
@@ -1178,6 +1185,17 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       }
     };
 
+    // Thinking-phase UX (Kilo-style gateways buffer the whole chain-of-thought
+    // server-side — verified live: the entire reasoning arrives in one burst
+    // at the exact moment the content starts): announce the block immediately
+    // so the user sees "Thinking…" during the silent phase instead of staring
+    // at nothing, and anchor the duration to the request send so the final
+    // "Réflexion pendant N secondes" reflects the real thinking time.
+    if (isKilo && reqBody.reasoning?.enabled === true) {
+      nativeReasoning.announceThinking(upstreamStartedAt);
+      await emitNative(true);
+    }
+
     // Incremental persistence (serverless hardening): hosts that hard-kill
     // functions at a max duration (Vercel 60s by default) never reach the
     // final persist below — the streamed answer the user just WATCHED for a
@@ -1253,6 +1271,16 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
         nativeReasoning.pushContent(delta);
         await emitNative();
       } else {
+        if (nativeReasoning.announced) {
+          // Reasoning never arrived (unexpected on a thinking model) — retract
+          // the synthetic "Thinking…" placeholder: an empty-output event
+          // clears D.output on the frontend, then plain deltas resume.
+          nativeReasoning.clearAnnouncement();
+          await emit({
+            type: 'chat:completion',
+            data: { id: completionId, done: false, output: [] },
+          });
+        }
         const r = reasoning.push(delta);
         if (r.mode === 'structured') {
           // Full-output snapshots only (plain deltas would double-append).
@@ -1472,6 +1500,16 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
 
     // Final reasoning snapshot (closes open reasoning items with duration).
     const nativeFinish = nativeReasoning.finish();
+    if (nativeReasoning.announced && !nativeFinish.usedStructured) {
+      // No reasoning ever arrived (empty response on a thinking model) —
+      // retract the synthetic placeholder so the finished message never
+      // keeps a stuck "Thinking…" block.
+      nativeReasoning.clearAnnouncement();
+      await emit({
+        type: 'chat:completion',
+        data: { id: completionId, done: false, output: [] },
+      });
+    }
     let finalOutput: any[] | null;
     let finalContent: string;
     if (nativeFinish.usedStructured) {

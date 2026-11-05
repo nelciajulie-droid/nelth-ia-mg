@@ -292,10 +292,22 @@ export function parseCompleteOutput(content: string, startedAt = Date.now()): Ou
  * (`delta.content`), and emits full structured `output` snapshots —
  * one reasoning item followed by one message item — following the exact
  * same emission contract as the tag-based accumulator above.
+ *
+ * Kilo-style gateways buffer the WHOLE chain-of-thought server-side and
+ * deliver it in a single burst at the exact moment the content starts
+ * (verified live: first reasoning chunk and first content chunk share the
+ * same timestamp). Without the request-start anchor, the measured
+ * "thinking duration" is therefore ~0s ("Thought for less than a second")
+ * and without the synthetic placeholder the user stares at nothing during
+ * the entire silent thinking phase. `announceThinking()` fixes both.
  */
 export class NativeReasoningAccumulator {
   private reasoningText = '';
   private contentText = '';
+  /** Request-send timestamp — anchors the reasoning phase (see announceThinking). */
+  private requestStartedAt: number | null = null;
+  /** Synthetic "Thinking…" placeholder is live (nothing real received yet). */
+  private thinkingAnnounced = false;
   private reasoningFirstAt: number | null = null;
   private reasoningEndedAt: number | null = null;
   private contentFirstAt: number | null = null;
@@ -305,9 +317,39 @@ export class NativeReasoningAccumulator {
     return this.reasoningText.length > 0;
   }
 
+  /** True while the synthetic "Thinking…" placeholder is the only reasoning
+   *  item on screen (announced, nothing real received yet). */
+  get announced(): boolean {
+    return this.thinkingAnnounced && !this.active && !this.contentText;
+  }
+
+  /**
+   * Announce the thinking phase at the moment the upstream request starts.
+   *   1. the live placeholder lets snapshot() render an in-progress
+   *      "Thinking…" item during the silent phase (the gateway is quiet the
+   *      whole time the model is thinking server-side);
+   *   2. `requestStartedAt` anchors the duration: the first reasoning chunk
+   *      is backdated to the request start, so the final "Thought for N
+   *      seconds" reflects the REAL thinking time instead of the ~0s burst
+   *      arrival span.
+   * Idempotent; call clearAnnouncement() to retract (reasoning never came).
+   */
+  announceThinking(now = Date.now()): void {
+    this.thinkingAnnounced = true;
+    if (this.requestStartedAt === null) this.requestStartedAt = now;
+  }
+
+  /** Retract the placeholder — the caller emits an empty-output event so the
+   *  frontend drops the block instead of keeping a stuck "Thinking…". */
+  clearAnnouncement(): void {
+    this.thinkingAnnounced = false;
+  }
+
   pushReasoning(delta: string, now = Date.now()): void {
     if (!delta) return;
-    if (this.reasoningFirstAt === null) this.reasoningFirstAt = now;
+    // Backdate the phase start to the request send — the gateway was silent
+    // because the model was thinking server-side all along.
+    if (this.reasoningFirstAt === null) this.reasoningFirstAt = this.requestStartedAt ?? now;
     this.reasoningText += delta;
     // content already flowing → reasoning re-opened after the message
     if (this.contentFirstAt !== null && this.reasoningEndedAt === null) {
@@ -329,9 +371,9 @@ export class NativeReasoningAccumulator {
 
   /** Structured snapshot (full output array). */
   snapshot(now = Date.now(), allDone = false): OutputItem[] {
-    if (!this.active && !this.contentText) return [];
+    if (!this.active && !this.contentText && !this.thinkingAnnounced) return [];
     const items: OutputItem[] = [];
-    const startedMs = this.reasoningFirstAt ?? now;
+    const startedMs = this.reasoningFirstAt ?? this.requestStartedAt ?? now;
     const endedMs =
       this.reasoningEndedAt ?? (allDone && this.reasoningFirstAt !== null ? now : undefined);
     if (this.reasoningText) {
@@ -348,6 +390,21 @@ export class NativeReasoningAccumulator {
         ...(endedMs !== undefined
           ? { ended_at: endedMs / 1000, duration: Math.max(0, Math.round((endedMs - startedMs) / 1000)) }
           : {}),
+      });
+    } else if (this.thinkingAnnounced && !this.contentText && !allDone) {
+      // Synthetic live placeholder — in_progress, no duration, empty text.
+      // Replaced wholesale by the real snapshots once chunks arrive (the
+      // emission contract is full-snapshot: D.output = output).
+      items.push({
+        type: 'reasoning',
+        id: 'rs_native',
+        status: 'in_progress',
+        start_tag: '<thinking>',
+        end_tag: '</thinking>',
+        attributes: { type: 'reasoning_content' },
+        content: [{ type: 'output_text', text: '' }],
+        summary: null,
+        started_at: startedMs / 1000,
       });
     }
     if (this.contentText) {
@@ -370,15 +427,19 @@ export class NativeReasoningAccumulator {
   }
 }
 
-/** Parse a complete (non-streaming) native reasoning + content pair. */
+/** Parse a complete (non-streaming) native reasoning + content pair.
+ * `at` = when the request was sent (reasoning phase anchor — backdated so
+ * the duration reflects the real thinking time, not the ~0s arrival span),
+ * `contentAt` = when the complete response arrived. */
 export function nativeReasoningOutputItems(
   reasoning: string,
   content: string,
-  at = Date.now()
+  at = Date.now(),
+  contentAt = at
 ): OutputItem[] {
   if (!reasoning) return [];
   const acc = new NativeReasoningAccumulator();
   acc.pushReasoning(reasoning, at);
-  acc.pushContent(content, at);
-  return acc.snapshot(at, true);
+  acc.pushContent(content, contentAt);
+  return acc.snapshot(contentAt, true);
 }
