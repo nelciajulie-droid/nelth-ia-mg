@@ -368,15 +368,17 @@ export const routes: Route[] = [
 
       // Google is always rendered on the auth page: when credentials are
       // missing, redirect back with an actionable error instead of a bare 404
-      // so the toast on /auth explains exactly what to configure.
+      // so the toast on /auth explains exactly what to configure — including
+      // the deploy target (.env locally vs Vercel env vars in production) and
+      // the exact redirect URI that must be whitelisted in Google Cloud Console.
       if (!authConfig.ENABLE_OAUTH || !provider) {
         if (ctx.params.provider === 'google') {
+          const base = ((await configGet<string>('webui.url', '')) || requestOrigin(ctx.req)).replace(/\/$/, '');
           const detail = !authConfig.ENABLE_OAUTH
             ? 'La connexion Google est désactivée (ENABLE_OAUTH=false)'
-            : 'Connexion Google non configurée : renseignez GOOGLE_CLIENT_ID et GOOGLE_CLIENT_SECRET dans .env puis redémarrez (Console Firebase → Authentication → Fournisseur Google).';
-          const base = (await configGet<string>('webui.url', '')) || requestOrigin(ctx.req);
+            : `Connexion Google non configurée : renseignez GOOGLE_CLIENT_ID et GOOGLE_CLIENT_SECRET (Console Firebase → Authentication → Fournisseur Google) — via .env en local, ou Settings → Environment Variables sur Vercel en production — puis autorisez l'URI de redirection ${base}/oauth/google/callback dans Google Cloud Console (Credentials → URI de redirection autorisés).`;
           return redirectResponse(
-            `${base.replace(/\/$/, '')}/auth?error=${encodeURIComponent(detail)}`,
+            `${base}/auth?error=${encodeURIComponent(detail)}`,
             []
           );
         }
