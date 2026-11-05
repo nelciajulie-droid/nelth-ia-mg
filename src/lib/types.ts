@@ -71,10 +71,24 @@ export interface ChatSummary {
 }
 
 export interface MessageFile {
-  id: string;
+  /** File-row id — present for knowledge attachments, absent for inline
+ *  image-generation results (those carry the served `url` instead). */
+  id?: string;
   type: "file" | "image" | "collection";
   name?: string;
   url?: string;
+}
+
+/** Live image-generation state attached to an assistant message. */
+export interface ImageGenerationState {
+  /** True from the first status event until the image (or error) lands. */
+  active: boolean;
+  /** Live Nelthai job phase: "sending" | "generating" | "image". */
+  phase: string | null;
+  /** Set when the flow errored — the card shows the failure instead. */
+  error?: string;
+  /** Epoch ms of the image arrival (freezes the card's second counter). */
+  completedAt?: number;
 }
 
 /** Message shape used by the UI (kept close to the wire format). */
@@ -83,6 +97,8 @@ export interface UiMessage {
   role: "user" | "assistant" | "system";
   content: string;
   files?: MessageFile[];
+  /** Assistant-only: live image-generation card state (Nelthai job). */
+  imageGeneration?: ImageGenerationState;
 }
 
 export interface ChatDetail {

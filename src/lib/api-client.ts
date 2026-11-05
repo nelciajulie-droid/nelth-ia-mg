@@ -5,7 +5,12 @@
  *   request relies on the HttpOnly `token` cookie set at signin.
  * - All errors are normalised to `ApiError` carrying the server `detail`.
  * - `streamChatCompletion` parses the SSE protocol used by
- *   POST /api/chat/completions (data: {...choices[0].delta.content}\n\n ... data: [DONE]).
+ *   POST /api/chat/completions. It requests the UI event transport
+ *   (`session_id` + `__sse_events`) so the whole socket event flow —
+ *   status (live image-generation phases), chat:message:files (generated
+ *   images), titles, structured reasoning snapshots and plain content
+ *   deltas — arrives as ordered SSE envelopes on the HTTP response itself:
+ *     data: {chat_id, message_id, data: {type: '…', data: {…}}}\n\n
  */
 
 const TOKEN_KEY = "owu_token";
@@ -111,10 +116,41 @@ export async function uploadFile(file: globalThis.File): Promise<{ id: string; n
 // SSE streaming
 // ---------------------------------------------------------------------------
 
+/** Status event (socket `status` envelope) — image-generation phases etc. */
+export interface StreamStatusEvent {
+  action?: string;
+  description?: string;
+  done?: boolean;
+}
+
+/** Generated-image result file (chat:message:files envelope). */
+export interface StreamImageFile {
+  type: string;
+  url: string;
+  name?: string;
+}
+
+/** One block of a structured output snapshot (chat:completion `output`). */
+export interface OutputSnapshotItem {
+  type?: string;
+  attributes?: Record<string, unknown>;
+  content?: Array<{ type?: string; text?: string }>;
+  status?: string;
+  [key: string]: unknown;
+}
+
 export interface StreamCallbacks {
   onDelta: (content: string) => void;
-  onDone?: () => void;
+  /** Structured output snapshots (reasoning models) — full replacement. */
+  onOutputSnapshot?: (output: OutputSnapshotItem[]) => void;
+  /** Live status events (image-generation phase labels, …). */
+  onStatus?: (status: StreamStatusEvent) => void;
+  /** Generated image files landing (ends the image-generation card). */
+  onFiles?: (files: StreamImageFile[]) => void;
+  /** Server-side chat title update. */
+  onTitle?: (title: string) => void;
   onError?: (message: string) => void;
+  onDone?: () => void;
 }
 
 export interface StreamChatOptions {
@@ -122,11 +158,43 @@ export interface StreamChatOptions {
   messages: Array<{ role: string; content: string; files?: unknown[] }>;
   chat_id?: string;
   signal?: AbortSignal;
+  /** Assistant message wire id — the flow persists the exchange against it. */
+  id?: string;
+  /** The turn's user message (id + content + attachments) for persistence. */
+  user_message?: {
+    id: string;
+    role: string;
+    content: string;
+    files?: unknown[];
+  };
+  /** Server-side background tasks (title generation, …). */
+  background_tasks?: Record<string, unknown>;
 }
 
 /**
- * POST /api/chat/completions with stream:true and iterate the SSE response,
- * forwarding each `choices[0].delta.content` chunk to `onDelta`.
+ * Extract the visible answer text out of a structured output snapshot
+ * (`message` blocks only — reasoning blocks are the thinking UI's business).
+ */
+export function outputSnapshotText(output: OutputSnapshotItem[] | undefined | null): string {
+  if (!Array.isArray(output)) return "";
+  let text = "";
+  for (const item of output) {
+    if (item?.type !== "message") continue;
+    for (const part of item.content ?? []) {
+      if (typeof part?.text === "string") text += part.text;
+    }
+  }
+  return text;
+}
+
+/**
+ * POST /api/chat/completions with the UI event transport (session_id +
+ * __sse_events) and iterate the SSE response. Each envelope
+ * `{chat_id, message_id, data: {type, data}}` is dispatched to its callback:
+ * chat:completion (plain `choices[0].delta.content` deltas or structured
+ * `output` snapshots), status (live image-generation phases),
+ * chat:message:files (generated images), chat:title, chat:message:error.
+ * Legacy bare OpenAI chunks are still understood for API-client parity.
  */
 export async function streamChatCompletion(
   options: StreamChatOptions,
@@ -145,6 +213,13 @@ export async function streamChatCompletion(
       messages: options.messages,
       stream: true,
       chat_id: options.chat_id,
+      ...(options.id ? { id: options.id } : {}),
+      ...(options.user_message ? { user_message: options.user_message } : {}),
+      ...(options.background_tasks ? { background_tasks: options.background_tasks } : {}),
+      // UI event transport: the whole socket event flow (status, files,
+      // deltas, titles) is serialized into this SSE response.
+      session_id: crypto.randomUUID(),
+      __sse_events: true,
     }),
   });
 
@@ -155,28 +230,83 @@ export async function streamChatCompletion(
   const decoder = new TextDecoder();
   let buffer = "";
 
+  const handleEnvelope = (envelope: {
+    data?: { type?: string; data?: Record<string, unknown> };
+    choices?: Array<{ delta?: { content?: string | null } }>;
+    error?: { message?: string } | string;
+  }) => {
+    // Legacy bare OpenAI chunk (API-client parity).
+    if (!envelope?.data?.type) {
+      if (envelope.error) {
+        const message =
+          typeof envelope.error === "string" ? envelope.error : envelope.error.message ?? "Stream error";
+        callbacks.onError?.(message);
+        return;
+      }
+      const delta = envelope.choices?.[0]?.delta?.content;
+      if (typeof delta === "string" && delta.length > 0) callbacks.onDelta(delta);
+      return;
+    }
+
+    const type = envelope.data.type;
+    const payload = envelope.data.data ?? {};
+    switch (type) {
+      case "chat:completion": {
+        if (Array.isArray(payload.output)) {
+          callbacks.onOutputSnapshot?.(payload.output as OutputSnapshotItem[]);
+        }
+        const choices = payload.choices as Array<{ delta?: { content?: string | null } }> | undefined;
+        const delta = choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta.length > 0) callbacks.onDelta(delta);
+        break;
+      }
+      case "status":
+        callbacks.onStatus?.({
+          action: typeof payload.action === "string" ? payload.action : undefined,
+          description: typeof payload.description === "string" ? payload.description : undefined,
+          done: payload.done === true,
+        });
+        break;
+      case "chat:message:files": {
+        const files = Array.isArray(payload.files) ? payload.files : [];
+        const imageFiles = files
+          .filter((f): f is StreamImageFile => !!f && typeof (f as StreamImageFile).url === "string")
+          .map((f) => ({
+            type: typeof f.type === "string" ? f.type : "image",
+            url: f.url,
+            name: typeof f.name === "string" ? f.name : undefined,
+          }));
+        if (imageFiles.length) callbacks.onFiles?.(imageFiles);
+        break;
+      }
+      case "chat:title":
+        if (typeof payload === "string" || typeof (payload as { title?: unknown }).title === "string") {
+          callbacks.onTitle?.(
+            typeof payload === "string" ? payload : String((payload as { title: string }).title)
+          );
+        }
+        break;
+      case "chat:message:error": {
+        const error = (payload as { error?: { content?: string } | string }).error;
+        const message =
+          typeof error === "string" ? error : error?.content ?? "Stream error";
+        callbacks.onError?.(message);
+        break;
+      }
+      default:
+        /* chat:list, sources, … — not consumed by this client yet */
+        break;
+    }
+  };
+
   const handleEventData = (raw: string) => {
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice(5).trim();
-      if (!payload) continue;
-      if (payload === "[DONE]") {
-        return;
-      }
+      if (!payload || payload === "[DONE]" || payload === "null") continue;
       try {
-        const obj = JSON.parse(payload) as {
-          choices?: Array<{ delta?: { content?: string | null } }>;
-          error?: { message?: string } | string;
-        };
-        if (obj.error) {
-          const message =
-            typeof obj.error === "string" ? obj.error : obj.error.message ?? "Stream error";
-          callbacks.onError?.(message);
-          continue;
-        }
-        const delta = obj.choices?.[0]?.delta?.content;
-        if (typeof delta === "string" && delta.length > 0) callbacks.onDelta(delta);
+        handleEnvelope(JSON.parse(payload));
       } catch {
         /* partial JSON in a keep-alive frame — ignore */
       }

@@ -6,8 +6,9 @@
  */
 
 import * as React from "react";
-import { Check, Copy, FileText, Loader2, Sparkles } from "lucide-react";
+import { Check, Copy, FileText, ImageOff, Loader2, Sparkles } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
+import { AiImageCard } from "@/components/app/AiImageCard";
 import type { UiMessage } from "@/lib/types";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -53,7 +54,7 @@ function FileChips({ files, light = false }: { files: NonNullable<UiMessage["fil
     <div className="mb-1.5 flex flex-wrap gap-1.5">
       {files.map((file) => (
         <span
-          key={file.id}
+          key={file.id ?? file.url}
           className={
             light
               ? "inline-flex max-w-full items-center gap-1 rounded-full bg-white/20 px-2 py-0.5 text-[11px] font-medium text-white"
@@ -64,6 +65,86 @@ function FileChips({ files, light = false }: { files: NonNullable<UiMessage["fil
           <span className="max-w-[140px] truncate">{file.name ?? "attachment"}</span>
         </span>
       ))}
+    </div>
+  );
+}
+
+/** Live Nelthai job phase → card footer label. */
+const PHASE_LABELS: Record<string, string> = {
+  sending: "Sending",
+  generating: "Generating",
+  image: "Finalizing",
+};
+
+/** One assistant message's image-generation visuals. */
+function ImageGenerationBlock({ message, isLast, streaming }: { message: UiMessage; isLast: boolean; streaming: boolean }) {
+  const imageFiles = (message.files ?? []).filter(
+    (file) => file.type === "image" && typeof file.url === "string"
+  );
+  const generation = message.imageGeneration;
+  const generating = generation?.active === true && imageFiles.length === 0;
+  const generationError = generation?.error;
+  // `completedAt` is only set on the live turn — history images render static.
+  const liveReveal = imageFiles.length > 0 && generation?.completedAt != null;
+  const phaseLabel = generation?.phase ? PHASE_LABELS[generation.phase] ?? generation.phase : "Generating image";
+
+  if (!generating && imageFiles.length === 0 && !generationError) return null;
+
+  return (
+    <div className="flex w-full flex-col gap-2">
+      {/* The live card: shimmering grid + phase label while the Nelthai job
+          runs, then the SAME instance flips to its reveal when the image
+          lands (grid dissolves, blur fade-in, light sweep, flash). */}
+      {(generating || liveReveal) && (
+        <div className="w-60 max-w-full sm:w-72">
+          <AiImageCard
+            generateDuration={9999}
+            imageDone={!generating}
+            imageSrc={imageFiles[0]?.url}
+            imageAlt={imageFiles[0]?.name ?? "AI generated image"}
+            label={phaseLabel}
+          />
+        </div>
+      )}
+
+      {/* History images — static, click to open the full-size file. */}
+      {!liveReveal && imageFiles.length > 0 && (
+        <div className="flex w-60 max-w-full flex-col gap-2 sm:w-72">
+          {imageFiles.map((file) => (
+            <a
+              key={file.url}
+              href={file.url}
+              target="_blank"
+              rel="noreferrer"
+              className="group block overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 shadow-sm transition-shadow hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900"
+              aria-label={file.name ?? "Generated image — open full size"}
+            >
+              <img
+                src={file.url}
+                alt={file.name ?? "Generated image"}
+                loading="lazy"
+                className="aspect-square w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.03]"
+              />
+            </a>
+          ))}
+        </div>
+      )}
+
+      {/* Generation failure — replaces the card when the job errored. */}
+      {generationError && (
+        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-400">
+          <ImageOff className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span className="break-words">{generationError}</span>
+        </div>
+      )}
+
+      {/* Activity row while the job runs (the card already shows the phase
+          label — only add the pulse for the streaming-turn context). */}
+      {generating && isLast && streaming && (
+        <span className="flex items-center gap-1 pl-1 text-[11px] text-zinc-400">
+          <Loader2 className="size-3 animate-spin" aria-hidden /> {phaseLabel.toLowerCase()}…
+        </span>
+      )}
     </div>
   );
 }
@@ -154,7 +235,15 @@ export function ChatMessages({
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6">
         {messages.map((message, index) => {
           const isLast = index === messages.length - 1;
-          const showCursor = streaming && isLast && message.role === "assistant";
+          const imageFiles = (message.files ?? []).filter(
+            (file) => file.type === "image" && typeof file.url === "string"
+          );
+          // Image-generation turn: the card replaces the empty text bubble.
+          const imageMode =
+            message.role === "assistant" &&
+            (message.imageGeneration?.active === true || imageFiles.length > 0);
+          const showCursor =
+            streaming && isLast && message.role === "assistant" && !imageMode;
 
           if (message.role === "user") {
             return (
@@ -183,13 +272,16 @@ export function ChatMessages({
                 <Sparkles className="size-4 text-emerald-600" aria-hidden />
               </div>
               <div className="group/message flex max-w-[85%] flex-col items-start gap-1 sm:max-w-[75%]">
-                <div className="rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 shadow-sm">
-                  <Markdown content={message.content} />
-                  {showCursor ? <StreamingCursor /> : null}
-                  {message.content.length === 0 && !streaming ? (
-                    <span className="text-sm italic text-zinc-400">(empty response)</span>
-                  ) : null}
-                </div>
+                {message.content.length > 0 || (showCursor && !message.imageGeneration) ? (
+                  <div className="rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 shadow-sm">
+                    <Markdown content={message.content} />
+                    {showCursor ? <StreamingCursor /> : null}
+                    {message.content.length === 0 && !streaming ? (
+                      <span className="text-sm italic text-zinc-400">(empty response)</span>
+                    ) : null}
+                  </div>
+                ) : null}
+                <ImageGenerationBlock message={message} isLast={isLast} streaming={streaming} />
                 <div className="flex items-center gap-1 pl-1">
                   {message.content.length > 0 && !showCursor ? (
                     <CopyMessageButton content={message.content} />

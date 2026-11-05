@@ -176,6 +176,12 @@ export async function getModelsForUser(user: ApiUser): Promise<ModelItem[]> {
     }
   }
 
+  // NOTE — image generation is deliberately NOT exposed here: it is a TOOL
+  // (the image toggle in the chat input → features.image_generation), not a
+  // chat model. The picker must list the two Kilo LLM models only. The
+  // Nelthai engine stays reachable through that toggle (and through the
+  // legacy `stable-diffusion-xl` ids saved in old chats — see v12-flow).
+
   return models;
 }
 

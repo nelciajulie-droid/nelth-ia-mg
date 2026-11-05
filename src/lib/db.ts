@@ -52,6 +52,14 @@ function resolveDatabaseUrl(): string {
 
 const databaseUrl = resolveDatabaseUrl()
 
+/**
+ * Dialect flag for the raw-SQL fragments scattered across the models layer
+ * (JSON access differs: Postgres `->>`/jsonb functions vs SQLite json1).
+ * The Supabase Postgres build sets a postgres:// DATABASE_URL; the local
+ * sandbox runs SQLite (file:…).
+ */
+export const isPostgres = /^postgres(ql)?:\/\//.test(databaseUrl)
+
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }

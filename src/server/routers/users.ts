@@ -2,7 +2,7 @@ import type { Route, Ctx } from '../http';
 import { HttpError } from '../http';
 import crypto from 'crypto';
 import fs from 'fs';
-import { db } from '@/lib/db';
+import { db, isPostgres } from '@/lib/db';
 import { configGet, configSet } from '@/lib/config';
 import { env, ERROR_MESSAGES } from '@/lib/constants';
 import { createApiKey, getPasswordHash } from '@/lib/auth';
@@ -369,8 +369,18 @@ function dateKey(timestamp: number, tz: string | null): string {
   }
 }
 
-const TOKEN_INPUT_SQL = `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'input_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'prompt_tokens' AS INTEGER))`;
-const TOKEN_OUTPUT_SQL = `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'output_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'completion_tokens' AS INTEGER))`;
+// usage JSON token access — dialect-aware (Postgres jsonb / SQLite json1).
+const TOKEN_INPUT_SQL = isPostgres
+  ? `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'input_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'prompt_tokens' AS INTEGER))`
+  : `COALESCE(CAST(CASE WHEN json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.input_tokens') END AS INTEGER), CAST(CASE WHEN json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.prompt_tokens') END AS INTEGER))`;
+const TOKEN_OUTPUT_SQL = isPostgres
+  ? `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'output_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'completion_tokens' AS INTEGER))`
+  : `COALESCE(CAST(CASE WHEN json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.output_tokens') END AS INTEGER), CAST(CASE WHEN json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.completion_tokens') END AS INTEGER))`;
+
+// chat.meta internal filter for usage stats — same dialect split.
+const INTERNAL_CHAT_FILTER = isPostgres
+  ? `chat.user_id = $1 AND COALESCE(NULLIF(chat.meta, '')::jsonb ->> 'internal', '') NOT IN ('1', 'true', 'True')`
+  : `chat.user_id = $1 AND COALESCE(CASE WHEN json_valid(chat.meta) THEN json_extract(chat.meta, '$.internal') END, '') NOT IN ('1', 'true', 'True')`;
 
 async function getUserUsageSummary(
   userId: string,
@@ -578,7 +588,7 @@ async function getUserTopTools(userId: string, startDate: number, endDate: numbe
 const ACTIVE_CHAT_GAP_SECONDS = 30 * 60;
 
 async function getUserUsageChatStats(userId: string): Promise<Record<string, number>> {
-  const chatFilter = `chat.user_id = $1 AND COALESCE(NULLIF(chat.meta, '')::jsonb ->> 'internal', '') NOT IN ('1', 'true', 'True')`;
+  const chatFilter = INTERNAL_CHAT_FILTER;
   const totalRows = await db.$queryRawUnsafe<Array<{ total_chats: number | bigint }>>(
     `SELECT COUNT(chat.id) AS total_chats FROM chat WHERE ${chatFilter}`,
     userId

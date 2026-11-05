@@ -1,135 +1,101 @@
 import type { ApiUser } from '@/lib/auth';
+import {
+  submitNelthaiTextToImage,
+  submitNelthaiImageToImage,
+  waitForNelthaiImages,
+  downloadNelthaiImage,
+  normalizePhase,
+  type NelthaiImageSource,
+  type NelthaiPhase,
+} from '@/lib/imagine/nelthai';
+import { db } from '@/lib/db';
 
 /**
- * Built-in image generation engine — standalone HTTP implementation (no SDK).
+ * Built-in image generation engine — Nelthai metaai gateway (Backend V3).
  *
- * TS-port of images.py: the Python backend proxies to an external OpenAI /
- * ComfyUI / Automatic1111 endpoint when one is configured. This standalone
- * port ships a zero-config engine backed by the public Pollinations API
- * (https://image.pollinations.ai) — keyless, free, real diffusion models
- * (FLUX / Sana / Turbo). It is used:
+ * Replaces the earlier keyless Pollinations engine: real Meta-AI-quality
+ * generations through the Nelth-AI gateway (https://nelthai.space-z.ai) with
+ * BOTH directions:
  *
+ *   • text→image  — POST /api/metaai/image/async          (async job + poll)
+ *   • image→image — POST /api/metaai/image-to-image/async (multipart ONLY)
+ *
+ * It is used:
  *   - by POST /api/v1/images/generations when the configured engine has no
  *     API key (or when IMAGE_GENERATION_ENGINE === 'sd'),
+ *   - by POST /api/v1/images/edit for image→image transformations,
  *   - by the chat pipeline when the selected model is the built-in
  *     `stable-diffusion-xl` model or the image-generation feature is toggled.
  *
- * No sandbox SDK is involved: the engine talks plain HTTPS and therefore
- * works on any host (local, Docker, bare metal).
+ * The live phases of the underlying job ('sending' | 'generating' | 'image')
+ * are surfaced through the onPhase callback so the UI can show them as the
+ * label of the generating card.
  */
 
-const SUPPORTED_SIZES = [
-  '1024x1024',
-  '768x1344',
-  '864x1152',
-  '1344x768',
-  '1152x864',
-  '1440x720',
-  '720x1440',
-] as const;
-
-/** Built-in SD model exposed in the model selector. */
+/** Built-in image model exposed in the model selector. */
 export const SD_MODEL_ID = 'stable-diffusion-xl';
-export const SD_MODEL_NAME = 'Stable Diffusion XL';
+export const SD_MODEL_NAME = 'Meta AI Imagine';
 
 export const SD_MODELS = [
   { id: SD_MODEL_ID, name: SD_MODEL_NAME },
-  { id: 'stable-diffusion-3.5-large', name: 'Stable Diffusion 3.5 Large' },
-  { id: 'stable-diffusion-3.5-medium', name: 'Stable Diffusion 3.5 Medium' },
-  { id: 'sd-turbo', name: 'SD Turbo' },
 ];
 
 export function normalizeSdSize(size: string | null | undefined): string {
-  if (size && (SUPPORTED_SIZES as readonly string[]).includes(size)) return size;
-  return '1024x1024';
+  // Kept for API compatibility — the Nelthai instant mode picks its own
+  // output size; the parameter is accepted but no longer constrained.
+  return size && /^\d+x\d+$/.test(size) ? size : '1024x1024';
 }
-
-/** Pollinations endpoint base (keyless public image generation). */
-const POLLINATIONS_BASE = 'https://image.pollinations.ai/prompt';
-
-/** Optional engine override via env (empty → default public endpoint). */
-const IMAGE_ENGINE_BASE =
-  process.env.IMAGE_GENERATION_ENGINE_BASE_URL?.replace(/\/+$/, '') || POLLINATIONS_BASE;
 
 export type GeneratedImage = { bytes: Buffer; contentType: string };
 
-/** Detect the real image format from magic bytes (engine returns JPEG or PNG). */
-function sniffContentType(bytes: Buffer): string {
-  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-    return 'image/png';
-  }
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  if (bytes.length >= 12 && bytes.subarray(4, 8).toString('ascii') === 'ftyp') {
-    return 'image/webp';
-  }
-  return 'image/png';
+export interface GenerateImageOptions {
+  /** Live job phases — displayed on the generating card. */
+  onPhase?: (phase: NelthaiPhase) => void;
+  /**
+   * Source images for image→image generation. When present (and non-empty)
+   * the multipart image-to-image endpoint is used instead of text→image.
+   */
+  sourceImages?: NelthaiImageSource[];
 }
 
 /**
- * Generate an image with the built-in engine → raw image bytes.
+ * Generate an image with the built-in Nelthai engine → raw image bytes.
  *
- * Retries up to 3 times with backoff — the public endpoint occasionally
- * queues requests under load (HTTP 5xx / truncated bodies).
+ * Runs the async job to completion (polling every 1.5s) and downloads the
+ * first produced image before its CDN URL expires.
  */
 export async function generateSdImage(
   prompt: string,
-  size: string | null | undefined = null
+  _size: string | null | undefined = null,
+  options: GenerateImageOptions = {}
 ): Promise<GeneratedImage> {
   if (!prompt || !prompt.trim()) {
     throw new Error('Prompt is required for image generation');
   }
-  const normalized = normalizeSdSize(size);
-  const [width, height] = normalized.split('x').map((n) => parseInt(n, 10));
 
-  const params = new URLSearchParams({
-    width: String(width),
-    height: String(height),
-    nologo: 'true',
-    safe: 'false',
+  options.onPhase?.('sending');
+  const sources = (options.sourceImages ?? []).filter((s) =>
+    s && ((s.kind === 'url' && /^https?:\/\//i.test(s.url)) || (s.kind === 'bytes' && s.bytes?.length))
+  );
+
+  const jobId = sources.length
+    ? await submitNelthaiImageToImage(prompt, sources)
+    : await submitNelthaiTextToImage(prompt);
+
+  const urls = await waitForNelthaiImages(jobId, {
+    onPhase: (phase) => options.onPhase?.(phase),
   });
-  // No `model` param: the anonymous tier serves the default model only
-  // (any other value returns 402 Payment Required).
 
-  const url = `${IMAGE_ENGINE_BASE}/${encodeURIComponent(prompt.trim().slice(0, 1900))}?${params}`;
-
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, 1500 * attempt)); // backoff 1.5s / 3s
-    }
+  const lastError = new Error('The image service produced no downloadable image');
+  let lastErr: unknown = lastError;
+  for (const url of urls) {
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: { accept: 'image/jpeg, image/png, image/webp, */*' },
-        signal: AbortSignal.timeout(120_000),
-        redirect: 'follow',
-      });
-      if (!res.ok) {
-        lastError = new Error(`Image engine HTTP ${res.status}`);
-        continue; // retry
-      }
-      const bytes = Buffer.from(await res.arrayBuffer());
-      if (bytes.length < 1024) {
-        // Truncated / placeholder body — retry.
-        lastError = new Error('Image engine returned a truncated body');
-        continue;
-      }
-      const contentType = sniffContentType(bytes);
-      if (contentType === 'image/png' && bytes.length < 4096) {
-        // Tiny PNG = error placeholder from the endpoint.
-        lastError = new Error('Image engine returned a placeholder');
-        continue;
-      }
-      return { bytes, contentType };
-    } catch (err) {
-      lastError = err;
+      return await downloadNelthaiImage(url);
+    } catch (e) {
+      lastErr = e;
     }
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error('Image generation failed after retries');
+  throw lastErr instanceof Error ? lastErr : lastError;
 }
 
 function extensionFor(contentType: string): string {
@@ -151,9 +117,10 @@ export async function generateAndSaveImage(
   user: ApiUser,
   prompt: string,
   size: string | null | undefined = null,
-  metadata: Record<string, any> = {}
+  metadata: Record<string, any> = {},
+  options: GenerateImageOptions = {}
 ): Promise<SavedImageFile> {
-  const { bytes, contentType } = await generateSdImage(prompt, size);
+  const { bytes, contentType } = await generateSdImage(prompt, size, options);
   const { uploadFileHandler } = await import('@/server/routers/files');
   const fileItem = await uploadFileHandler(
     user,
@@ -178,3 +145,85 @@ export async function generateAndSaveImage(
     content_type: meta.content_type ?? contentType,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Source image resolution (chat attachments / edit-route inputs → bytes)
+// ---------------------------------------------------------------------------
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+
+/** A file reference as sent by the frontend (id, url, data URL or http URL). */
+export type FileRefInput = { id?: string; url?: string; type?: string; name?: string } | string;
+
+async function fileBytesFromFileRow(fileId: string): Promise<NelthaiImageSource | null> {
+  const row = await db.file.findUnique({ where: { id: fileId } });
+  if (!row) return null;
+  const parsed = row.data ? JSON.parse(row.data) : {};
+  const b64 = parsed.content_base64;
+  if (!b64) return null;
+  const meta = row.meta ? JSON.parse(row.meta) : {};
+  const contentType = meta.content_type ?? 'image/png';
+  return {
+    kind: 'bytes',
+    bytes: Buffer.from(b64, 'base64'),
+    filename: row.filename ?? `input${extensionFor(contentType)}`,
+    contentType,
+  };
+}
+
+/**
+ * Resolve image references (file ids, /api/v1/files URLs, data: URLs, remote
+ * http(s) URLs) into Nelthai image sources — the multipart `file` parts for
+ * local content, `image_url` fields for remote URLs.
+ */
+export async function resolveImageSources(
+  refs: FileRefInput[]
+): Promise<NelthaiImageSource[]> {
+  const out: NelthaiImageSource[] = [];
+  for (const ref of refs ?? []) {
+    if (!ref) continue;
+    const value = typeof ref === 'string' ? ref : ref.url || ref.id || '';
+    if (!value) continue;
+    const type = typeof ref === 'object' && ref.type ? String(ref.type) : '';
+    const name = typeof ref === 'object' && ref.name ? String(ref.name) : '';
+
+    if (value.startsWith('data:image')) {
+      const [header, encoded] = value.split(',', 2);
+      const contentType = header.split(';')[0].replace(/^data:/, '') || 'image/png';
+      out.push({
+        kind: 'bytes',
+        bytes: Buffer.from(encoded, 'base64'),
+        filename: name || `input${extensionFor(contentType)}`,
+        contentType,
+      });
+      continue;
+    }
+    if (/^https?:\/\//i.test(value)) {
+      // Remote URL: an explicit non-image type excludes it, otherwise the
+      // extension (or an 'image' type) decides.
+      if (type && type !== 'image' && !IMAGE_EXT.test(value)) continue;
+      out.push({ kind: 'url', url: value });
+      continue;
+    }
+    // Local file references (bare ids or /api/v1/files URLs): the frontend
+    // labels every chat attachment 'file', so the STORED content type is the
+    // source of truth — resolve the row and let its meta decide whether the
+    // attachment joins the image-to-image job (a PDF stays out, a PNG joins).
+    const fileId = value.includes('/api/v1/files')
+      ? value.split('/api/v1/files/')[1].split('/content')[0]
+      : value;
+    if (!fileId) continue;
+    try {
+      const source = await fileBytesFromFileRow(fileId);
+      if (!source) continue;
+      const isImage = /^image\//i.test(source.contentType);
+      if (isImage || type === 'image') out.push(source);
+    } catch {
+      /* unreadable file row — skip */
+    }
+  }
+  return out;
+}
+
+export { normalizePhase };
+export type { NelthaiPhase, NelthaiImageSource };

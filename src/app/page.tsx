@@ -32,8 +32,8 @@ import { useToast } from "@/hooks/use-toast";
 import {
   api,
   ApiError,
-  extractGeneratedTitle,
   getToken,
+  outputSnapshotText,
   setToken,
   streamChatCompletion,
 } from "@/lib/api-client";
@@ -118,18 +118,65 @@ function normalizeChatList(data: unknown): ChatSummary[] {
     .filter((chat) => chat.id.length > 0);
 }
 
+type HistoryMessage = {
+  id?: string;
+  parentId?: string | null;
+  role?: string;
+  content?: unknown;
+  files?: MessageFile[];
+  timestamp?: number;
+};
+
+/** Walk the current branch of chat.history (currentId → up to the root). */
+function threadFromHistory(history: unknown): HistoryMessage[] {
+  if (!history || typeof history !== "object") return [];
+  const map = (history as { messages?: Record<string, HistoryMessage> }).messages;
+  if (!map || typeof map !== "object") return [];
+  let currentId = (history as { currentId?: string | null }).currentId ?? null;
+  if (!currentId || !map[currentId]) {
+    // No current pointer — fall back to the newest message by timestamp.
+    const entries = Object.values(map).filter((m) => !!m);
+    if (entries.length === 0) return [];
+    currentId =
+      entries.reduce((newest, m) => ((m.timestamp ?? 0) > (newest?.timestamp ?? 0) ? m : newest), entries[0])
+        ?.id ?? null;
+    if (!currentId) return [];
+  }
+  const chain: HistoryMessage[] = [];
+  let cursor: HistoryMessage | undefined = map[currentId];
+  const guard = new Set<string>();
+  while (cursor && !guard.has(cursor.id ?? "")) {
+    guard.add(cursor.id ?? "");
+    chain.push(cursor);
+    cursor = cursor.parentId ? map[cursor.parentId] : undefined;
+  }
+  return chain.reverse();
+}
+
 function messagesFromChatDetail(detail: ChatDetail): UiMessage[] {
-  const raw = Array.isArray(detail.chat?.messages) ? detail.chat.messages : [];
+  // The canonical thread lives in chat.history (map + currentId) — follow-up
+  // turns upsert there. The flat chat.messages array only ever holds the
+  // first user message of an API-created chat, so it is the fallback.
+  const threaded = threadFromHistory((detail.chat as { history?: unknown })?.history);
+  const raw: HistoryMessage[] =
+    threaded.length > 0
+      ? threaded
+      : (Array.isArray(detail.chat?.messages) ? (detail.chat.messages as HistoryMessage[]) : []);
   return raw
     .filter((message) => !!message && typeof message.content === "string")
     .map((message, index) => ({
-      id: `${detail.id}-${index}`,
+      id: message.id ?? `${detail.id}-${index}`,
       role: message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user",
-      content: message.content,
+      content: message.content as string,
+      // Knowledge attachments carry an id; image-generation results carry
+      // a served `url` instead — both must survive the round-trip.
       files: Array.isArray(message.files)
-        ? (message.files as MessageFile[]).filter((file) => !!file && typeof file.id === "string")
+        ? (message.files as MessageFile[]).filter(
+            (file) => !!file && (typeof file.id === "string" || typeof file.url === "string")
+          )
         : undefined,
-    }));
+    }))
+    .filter((message) => message.content.length > 0 || (message.files?.length ?? 0) > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +350,23 @@ export default function Home() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      // Open WebUI wire ids: the assistant message id (`id`) + the user
+      // message (`user_message`) — the flow persists the exchange against
+      // them (history map + files), and reloads walk that history.
+      const assistantWireId = crypto.randomUUID();
+      const userWireId = crypto.randomUUID();
+
+      /** Patch the streaming assistant message (immutably, by local id). */
+      const patchAssistant = (patch: Partial<UiMessage> | ((message: UiMessage) => Partial<UiMessage>)) => {
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantId
+              ? { ...message, ...(typeof patch === "function" ? patch(message) : patch) }
+              : message
+          )
+        );
+      };
+
       await streamChatCompletion(
         {
           model,
@@ -322,68 +386,101 @@ export default function Home() {
           ],
           chat_id: chatId ?? undefined,
           signal: controller.signal,
+          // Open WebUI UI payload: wire ids for persistence + server-side
+          // background title generation (prompt-based for image chats).
+          id: assistantWireId,
+          user_message: {
+            id: userWireId,
+            role: "user",
+            content: text,
+            files: userMessage.files,
+          },
+          background_tasks: { title_generation: true },
         },
         {
           onDelta: (delta) => {
             accumulated += delta;
-            setMessages((prev) =>
-              prev.map((message) => (message.id === assistantId ? { ...message, content: accumulated } : message))
-            );
+            patchAssistant({ content: accumulated });
+          },
+          // Structured output snapshots (thinking models) replace the
+          // accumulated text wholesale — the visible answer is the `message`
+          // blocks' concatenation.
+          onOutputSnapshot: (output) => {
+            const text = outputSnapshotText(output);
+            if (text) {
+              accumulated = text;
+              patchAssistant({ content: accumulated });
+            }
+          },
+          // Live image-generation phases: "Generating image · sending|generating|image".
+          onStatus: (status) => {
+            if (status.action !== "image_generation") return;
+            const phase = status.description?.includes("·")
+              ? status.description.split("·").pop()?.trim() ?? null
+              : status.description ?? null;
+            patchAssistant((message) => ({
+              imageGeneration: {
+                active: !status.done && (message.files?.length ?? 0) === 0,
+                phase,
+                error: message.imageGeneration?.error,
+                completedAt: message.imageGeneration?.completedAt,
+              },
+            }));
+          },
+          // Generated images landing — flips the generation card to its reveal.
+          onFiles: (files) => {
+            patchAssistant((message) => ({
+              files: [
+                ...(message.files ?? []).filter((file) => file.type !== "image"),
+                ...files.map((file) => ({
+                  type: "image" as const,
+                  url: file.url,
+                  name: file.name,
+                })),
+              ],
+              imageGeneration: message.imageGeneration
+                ? { ...message.imageGeneration, active: false, completedAt: Date.now() }
+                : undefined,
+            }));
+            void refreshChats();
+          },
+          onTitle: (title) => {
+            setChatTitle(title);
+            setChats((prev) => prev.map((chat) => (chat.id === chatId ? { ...chat, title } : chat)));
           },
           onError: (message) => {
             toast({ title: "Generation error", description: message, variant: "destructive" });
+            patchAssistant((current) =>
+              current.imageGeneration?.active
+                ? { imageGeneration: { ...current.imageGeneration, active: false, error: message } }
+                : {}
+            );
           },
         }
       );
 
-      // Refresh the sidebar ordering (updated_at changed) and persist a title.
+      // Refresh the sidebar ordering (updated_at changed). The title itself
+      // arrives through the chat:title event — the server generates it from
+      // the prompt (image chats) or the exchange (text chats).
       void refreshChats();
-      if (isNewChat && accumulated.trim().length > 0 && chatId) {
-        void generateTitle(chatId, text, accumulated);
-      }
     } catch (err) {
       const message = err instanceof ApiError || err instanceof Error ? err.message : "Unknown error";
       if ((err as Error)?.name !== "AbortError") {
         toast({ title: "Chat failed", description: message, variant: "destructive" });
       }
-      setMessages((prev) => prev.filter((entry) => entry.id !== assistantId || entry.content.length > 0));
+      // Drop the placeholder unless something landed (text, images, error state).
+      setMessages((prev) =>
+        prev.filter(
+          (entry) =>
+            entry.id !== assistantId ||
+            entry.content.length > 0 ||
+            (entry.files?.length ?? 0) > 0 ||
+            !!entry.imageGeneration?.error
+        )
+      );
     } finally {
       streamingRef.current = false;
       setStreaming(false);
-    }
-  }
-
-  async function generateTitle(chatId: string, userText: string, assistantText: string) {
-    try {
-      const res = await api<{ choices?: Array<{ message?: { content?: string } }> }>(
-        "/api/v1/tasks/title/completions",
-        {
-          method: "POST",
-          body: {
-            model,
-            messages: [
-              { role: "user", content: userText },
-              { role: "assistant", content: assistantText },
-            ],
-            chat_id: chatId,
-          },
-        }
-      );
-      const raw = res?.choices?.[0]?.message?.content;
-      const title = extractGeneratedTitle(raw);
-      if (title) {
-        setChatTitle(title);
-        setChats((prev) =>
-          prev.map((chat) => (chat.id === chatId ? { ...chat, title } : chat))
-        );
-        await api(`/api/v1/chats/${chatId}`, {
-          method: "POST",
-          body: { title },
-        }).catch(() => undefined);
-        void refreshChats();
-      }
-    } catch {
-      /* title generation is best-effort */
     }
   }
 

@@ -1,0 +1,10 @@
+import { PrismaClient } from '@prisma/client';
+const url = (await Bun.file('.env').text()).match(/^DATABASE_URL=(.+)$/m)?.[1]?.trim();
+const db = new PrismaClient({ datasources: { db: { url } } });
+const users = await db.user.findMany({ select: { id: true, email: true, role: true } });
+const keys = await db.apiKey.findMany({ select: { user_id: true, id: true } });
+const configRows = await db.config.findMany({ select: { key: true } });
+console.log('USERS:', JSON.stringify(users, null, 1));
+console.log('API_KEYS count:', keys.length, JSON.stringify(keys.slice(0, 5)));
+console.log('CONFIG_KEYS:', JSON.stringify(configRows.map(r => r.key)));
+await db.$disconnect();

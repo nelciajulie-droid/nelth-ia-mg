@@ -1088,3 +1088,430 @@ html.nsrc-lock{overflow:hidden}
     start();
   }
 })();
+
+/* ====================================================================
+ * AI IMAGE GENERATION CARD — the scintillating-grid card that replaces
+ * the 'Generating image…' shimmer status text.
+ *
+ * The Nelthai metaai engine (lib/imagine/nelthai.ts) drives image jobs
+ * through three live phases — sending → generating → image — surfaced as
+ * status rows by the compiled frontend. This layer swaps that text row
+ * for the generation card:
+ *
+ *   • a canvas of 4px squares scintillating on desynchronized sine waves
+ *     (grid dissolve → reveal when the image lands),
+ *   • a live phase label (the job's 'sending' | 'generating' | 'image')
+ *     plus a seconds counter — the ARRIVAL of the image stops it,
+ *   • the reveal choreography: grid blurs out (scale 1.08, blur 14px),
+ *     image fades in from blur(20px), a diagonal light sweep, a brief
+ *     white flash, footer flips to 'Generated' + final duration,
+ *   • the card then stays as the image display (click → native lightbox
+ *     through the hidden original image button).
+ *
+ * Works with both event transports (native socket.io and the SSE bridge
+ * above): it watches the DOM, not the events.
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_IMG_CARD__) return;
+  window.__NELTH_IMG_CARD__ = true;
+
+  const IMG_STATUS_RE = /^Generating image/i;
+  const PHASE_RE = /Generating image\s*[·—–-]\s*([a-z]+)/i;
+  const FILE_IMG_RE = /\/api\/v1\/files\//;
+  const reduceMotionMq = window.matchMedia
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : { matches: false };
+
+  // ------------------------------------------------------------- styles
+  if (!document.getElementById('nelth-imgc-style')) {
+    const style = document.createElement('style');
+    style.id = 'nelth-imgc-style';
+    style.textContent = [
+      /* card shell — aspect-square, rounded-2xl, themed borders */
+      '.nelth-imgc{position:relative;width:min(100%,384px);aspect-ratio:1/1;border-radius:1rem;',
+      'overflow:hidden;background:#fff;border:1px solid #e5e5e5;',
+      'transition:border-color .3s ease;isolation:isolate;cursor:default}',
+      'html.dark .nelth-imgc{background:#171717;border-color:#262626}',
+
+      /* scintillating grid (canvas) — dissolves at the reveal */
+      '.nelth-imgc-grid{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;',
+      'transition:opacity 1s cubic-bezier(.22,1,.36,1),transform 1s cubic-bezier(.22,1,.36,1),',
+      'filter 1s cubic-bezier(.22,1,.36,1)}',
+      '.nelth-imgc-grid canvas{width:100%;height:100%;display:block}',
+      '.nelth-imgc.nelth-imgc-done .nelth-imgc-grid{opacity:0;transform:scale(1.08);',
+      'filter:blur(14px);pointer-events:none}',
+
+      /* revealed image — fade-in from blur + diagonal light sweep */
+      '.nelth-imgc-photo{position:absolute;inset:0;opacity:0;filter:blur(20px);',
+      'transition:opacity .9s cubic-bezier(.22,1,.36,1),filter .9s cubic-bezier(.22,1,.36,1)}',
+      '.nelth-imgc.nelth-imgc-done .nelth-imgc-photo{opacity:1;filter:blur(0)}',
+      '.nelth-imgc-photo img{width:100%;height:100%;object-fit:cover;display:block}',
+      '.nelth-imgc-sweep{position:absolute;inset:0;overflow:hidden;pointer-events:none}',
+      '.nelth-imgc-sweep-bar{position:absolute;top:0;bottom:0;left:0;width:33.333%;',
+      'background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);',
+      'transform:translateX(-115%) skewX(-12deg)}',
+      '.nelth-imgc.nelth-imgc-done .nelth-imgc-sweep-bar{',
+      'animation:nelth-imgc-sweep 1.1s cubic-bezier(.65,0,.35,1) .3s 1 both}',
+      '@keyframes nelth-imgc-sweep{from{transform:translateX(-115%) skewX(-12deg)}',
+      'to{transform:translateX(345%) skewX(-12deg)}}',
+
+      /* brief white flash at the reveal */
+      '.nelth-imgc-flash{position:absolute;inset:0;pointer-events:none;background:#fff;opacity:0}',
+      '.nelth-imgc.nelth-imgc-done .nelth-imgc-flash{',
+      'animation:nelth-imgc-flash .7s ease-out .05s 1 both}',
+      '@keyframes nelth-imgc-flash{0%{opacity:0}25%{opacity:.18}100%{opacity:0}}',
+
+      /* footer — gradient-masked, label + seconds */
+      '.nelth-imgc-footer{position:absolute;left:0;right:0;bottom:0;height:96px;',
+      'background:rgba(255,255,255,.4);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);',
+      '-webkit-mask-image:linear-gradient(to top,black 0%,transparent 100%);',
+      'mask-image:linear-gradient(to top,black 0%,transparent 100%);pointer-events:none}',
+      'html.dark .nelth-imgc-footer{background:rgba(0,0,0,.5)}',
+      '.nelth-imgc-row{position:absolute;bottom:12px;left:20px;right:20px;display:flex;',
+      'align-items:center;justify-content:space-between;gap:8px}',
+      '.nelth-imgc-label,.nelth-imgc-seconds{font-size:.875rem;font-weight:500;color:#171717;',
+      'font-variant-numeric:tabular-nums;line-height:1.25}',
+      'html.dark .nelth-imgc-label,html.dark .nelth-imgc-seconds{color:#fff;',
+      'text-shadow:0 1px 2px rgba(0,0,0,.25)}',
+      '.nelth-imgc-seconds{opacity:.9}',
+
+      /* hidden layers */
+      '.nelth-imgc-hide{display:none !important}',
+
+      /* reduced motion — settle instantly, no sweep/flash */
+      '.nelth-imgc.nelth-imgc-instant .nelth-imgc-grid{transition:none}',
+      '.nelth-imgc.nelth-imgc-instant .nelth-imgc-photo{transition:none}',
+      '.nelth-imgc.nelth-imgc-instant .nelth-imgc-sweep-bar{animation:none;opacity:0}',
+      '.nelth-imgc.nelth-imgc-instant .nelth-imgc-flash{animation:none;opacity:0}',
+      '@media (prefers-reduced-motion:reduce){.nelth-imgc-sweep-bar{animation:none !important;opacity:0}',
+      '.nelth-imgc-flash{animation:none !important}}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  // ------------------------------------------------------- grid canvas
+  /**
+   * Scintillating grid — carrés 4px, gap 2px, vagues sinusoïdales
+   * désynchronisées (per-cell random offset + speed). Dark-mode aware.
+   * Returns a stop() fn (cancels the rAF loop + resize listener).
+   */
+  function startGrid(canvas) {
+    const ctx = canvas.getContext('2d', { alpha: true });
+    if (!ctx) return () => {};
+    let raf = 0;
+    let width = 0;
+    let height = 0;
+    const size = 4;
+    const gap = 2;
+    const step = size + gap;
+    let cols = 0;
+    let rows = 0;
+    let offsets = [];
+    let speeds = [];
+
+    const resize = () => {
+      const parent = canvas.parentElement;
+      if (!parent) return;
+      width = parent.clientWidth;
+      height = parent.clientHeight;
+      canvas.width = width;
+      canvas.height = height;
+      cols = Math.ceil(width / step);
+      rows = Math.ceil(height / step);
+      offsets = Array.from({ length: cols }, () =>
+        Array.from({ length: rows }, () => Math.random() * Math.PI * 2)
+      );
+      speeds = Array.from({ length: cols }, () =>
+        Array.from({ length: rows }, () => 0.35 + Math.random() * 0.95)
+      );
+    };
+    window.addEventListener('resize', resize);
+    resize();
+
+    const draw = () => {
+      ctx.clearRect(0, 0, width, height);
+      const time = Date.now() * 0.001;
+      const isDark = document.documentElement.classList.contains('dark');
+      const r = isDark ? 129 : 110;
+      const g = isDark ? 129 : 110;
+      const b = isDark ? 137 : 120;
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+          const wave = Math.sin(time * speeds[i][j] + offsets[i][j]);
+          let opacity = 0.02; // point éteint
+          if (wave > 0.9) opacity = 0.1 + (wave - 0.9) * 3; // pics lumineux (max ~0.4)
+          else if (wave > 0.7) opacity = 0.05 + (wave - 0.7) * 0.5;
+          ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + opacity + ')';
+          ctx.fillRect(i * step, j * step, size, size);
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    draw();
+
+    return () => {
+      window.removeEventListener('resize', resize);
+      cancelAnimationFrame(raf);
+    };
+  }
+
+  // ----------------------------------------------------------- the card
+  function buildCard() {
+    const card = document.createElement('div');
+    card.className = 'nelth-imgc';
+    card.setAttribute('role', 'img');
+    card.setAttribute('aria-label', 'Generating image');
+    card.innerHTML =
+      '<div class="nelth-imgc-grid"><canvas aria-hidden="true"></canvas></div>' +
+      '<div class="nelth-imgc-photo"><img alt="AI generated image" />' +
+      '<div class="nelth-imgc-sweep" aria-hidden="true"><div class="nelth-imgc-sweep-bar"></div></div></div>' +
+      '<div class="nelth-imgc-flash" aria-hidden="true"></div>' +
+      '<div class="nelth-imgc-footer" aria-hidden="true"><div class="nelth-imgc-row">' +
+      '<span class="nelth-imgc-label">Generating image</span>' +
+      '<span class="nelth-imgc-seconds">0s</span></div></div>';
+    return card;
+  }
+
+  // ------------------------------------------------------------- states
+  // statusBox (the compiled status row container) → card state
+  const cards = new Map();
+
+  function stopGrid(state) {
+    if (state.stopGrid) {
+      state.stopGrid();
+      state.stopGrid = null;
+    }
+  }
+
+  function stopTimer(state) {
+    if (state.timerId) {
+      clearInterval(state.timerId);
+      state.timerId = null;
+    }
+  }
+
+  function setLabel(state, label) {
+    if (state.label === label) return;
+    state.label = label;
+    if (state.labelEl) state.labelEl.textContent = label;
+    state.card.setAttribute('aria-label', label === 'Generated' ? 'Generated image' : 'Generating image — ' + label);
+  }
+
+  /** Hide the native files grid of the generated image (the card is the display). */
+  function hideNativeFiles(state) {
+    if (!state.nativeImg || !state.nativeImg.isConnected) return;
+    const grid = state.nativeImg.closest('[class*="overflow-x-auto"]');
+    if (grid && grid.contains(state.nativeImg)) {
+      state.nativeGrid = grid;
+      grid.classList.add('nelth-imgc-hide');
+    }
+  }
+
+  /** Forward card clicks to the native image button (opens the lightbox). */
+  function forwardClicks(state) {
+    state.card.addEventListener('click', () => {
+      const img = state.nativeImg;
+      if (!img || !img.isConnected) return;
+      const btn = img.closest('button');
+      if (btn) {
+        try {
+          btn.click();
+        } catch (e) {
+          /* lightbox unavailable — nothing to do */
+        }
+      }
+    });
+    state.card.style.cursor = 'zoom-in';
+  }
+
+  /** The reveal: grid dissolves, image fades in, sweep + flash, footer flips. */
+  function reveal(state, src, nativeImg) {
+    if (state.revealed) return;
+    state.revealed = true;
+    state.nativeImg = nativeImg || null;
+
+    // freeze the chronometer at the arrival time
+    stopTimer(state);
+    if (state.secondsEl) state.secondsEl.textContent = state.seconds + 's';
+    setLabel(state, 'Generated');
+
+    const img = state.card.querySelector('.nelth-imgc-photo img');
+    const show = () => {
+      if (img && !img.src) img.src = src;
+      state.card.classList.add('nelth-imgc-done');
+      if (reduceMotionMq.matches) state.card.classList.add('nelth-imgc-instant');
+    };
+    // Preload so the reveal starts on a decoded frame (1.2s fallback).
+    const pre = new Image();
+    pre.onload = pre.onerror = show;
+    pre.src = src;
+    setTimeout(show, 1200);
+
+    stopGrid(state);
+    hideNativeFiles(state);
+    forwardClicks(state);
+  }
+
+  /** Remove a dead card (message re-render / navigation) — restore native. */
+  function dropCard(state) {
+    stopTimer(state);
+    stopGrid(state);
+    if (state.nativeGrid && state.nativeGrid.isConnected) {
+      state.nativeGrid.classList.remove('nelth-imgc-hide');
+    }
+    if (state.statusBox && state.statusBox.isConnected) {
+      state.statusBox.classList.remove('nelth-imgc-hide');
+      delete state.statusBox.dataset.nelthImgCard;
+    }
+    if (state.card.isConnected) state.card.remove();
+    if (state.msgObserver) {
+      try {
+        state.msgObserver.disconnect();
+      } catch (e) {
+        /* already gone */
+      }
+      state.msgObserver = null;
+    }
+  }
+
+  /** Create the card for an in-progress image generation status row. */
+  function createCard(statusBox) {
+    const card = buildCard();
+    statusBox.parentElement.insertBefore(card, statusBox.nextSibling);
+    statusBox.classList.add('nelth-imgc-hide'); // le texte shimmer est remplacé par la carte
+    statusBox.dataset.nelthImgCard = '1';
+
+    const state = {
+      card,
+      statusBox,
+      labelEl: card.querySelector('.nelth-imgc-label'),
+      secondsEl: card.querySelector('.nelth-imgc-seconds'),
+      startedAt: Date.now(),
+      seconds: 0,
+      label: 'Generating image',
+      revealed: false,
+      finishedAt: null,
+      stopGrid: startGrid(card.querySelector('canvas')),
+      timerId: null,
+      nativeImg: null,
+      nativeGrid: null,
+      msgObserver: null,
+    };
+    cards.set(statusBox, state);
+
+    // Chronomètre (0,25s tick) — c'est l'ARRIVÉE de l'image qui le coupe.
+    state.timerId = setInterval(() => {
+      if (state.revealed) return;
+      const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
+      if (elapsed !== state.seconds) {
+        state.seconds = elapsed;
+        if (state.secondsEl) state.secondsEl.textContent = elapsed + 's';
+      }
+    }, 250);
+
+    // Fast-path observer scoped to the message: catches the generated <img>
+    // the frame it lands (before paint → no flicker of the native grid).
+    const messageEl = statusBox.closest('[id^="message-"]') || statusBox.parentElement;
+    if (messageEl) {
+      state.msgObserver = new MutationObserver(() => checkReveal(state));
+      state.msgObserver.observe(messageEl, { childList: true, subtree: true });
+    }
+    return state;
+  }
+
+  /** Look for the generated image in the message → trigger the reveal. */
+  function checkReveal(state) {
+    if (state.revealed || !state.card.isConnected) return;
+    const messageEl = state.statusBox.closest('[id^="message-"]') || state.card.parentElement;
+    if (!messageEl) return;
+    const imgs = messageEl.querySelectorAll('img');
+    for (let i = 0; i < imgs.length; i++) {
+      const img = imgs[i];
+      if (state.card.contains(img)) continue;
+      const src = img.getAttribute('src') || '';
+      if (FILE_IMG_RE.test(src)) {
+        reveal(state, img.src, img);
+        return;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- scanning
+  function scan() {
+    // 1 — drop dead cards (chat switch, message re-render, navigation).
+    for (const [box, state] of cards) {
+      if (!state.card.isConnected || !box.isConnected) {
+        dropCard(state);
+        cards.delete(box);
+      }
+    }
+
+    // 2 — create cards for in-progress image generations. The live status
+    //     row carries the shimmer class while the job runs.
+    const shimmerEls = document.querySelectorAll('.shimmer');
+    for (let i = 0; i < shimmerEls.length; i++) {
+      const el = shimmerEls[i];
+      const text = (el.textContent || '').trim();
+      if (!IMG_STATUS_RE.test(text)) continue;
+      const btn = el.closest ? el.closest('button') : null;
+      const statusBox = btn ? btn.parentElement : null;
+      if (!statusBox || !statusBox.parentElement) continue;
+      if (statusBox.dataset.nelthImgCard) continue;
+      createCard(statusBox);
+    }
+
+    for (const state of cards.values()) {
+      if (!state.card.isConnected) continue;
+
+      // 3 — live phase label from the current status text. Once revealed the
+      //     footer stays on 'Generated' (the image arrival is final — the
+      //     trailing '· image' phase must not overwrite it).
+      const live = state.statusBox.querySelector('.shimmer');
+      if (live && !state.revealed) {
+        const text = (live.textContent || '').trim();
+        const m = text.match(PHASE_RE);
+        setLabel(state, m ? m[1].toLowerCase() : 'Generating image');
+      }
+
+      // 4 — reveal check (img may land between scans too — fast observer
+      //     covers it; this is the safety net).
+      checkReveal(state);
+
+      // 5 — generation ended without an image (error / abort): the shimmer
+      //     is gone, no file arrived → hand the message back to the native
+      //     error/status rendering after a short grace period.
+      if (!state.revealed && !live) {
+        if (state.finishedAt == null) state.finishedAt = Date.now();
+        if (Date.now() - state.finishedAt > 2500) {
+          dropCard(state);
+          cards.delete(state.statusBox);
+        }
+      } else if (state.revealed) {
+        // keep the native grid hidden across Svelte re-renders
+        hideNativeFiles(state);
+      }
+    }
+  }
+
+  let scanPending = false;
+  const scheduleScan = () => {
+    if (scanPending) return;
+    scanPending = true;
+    setTimeout(() => {
+      scanPending = false;
+      scan();
+    }, 250);
+  };
+
+  const start = () => {
+    const obs = new MutationObserver(scheduleScan);
+    obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+    scan();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();

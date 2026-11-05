@@ -122,6 +122,15 @@ function isBuiltInSdEngine(config: ImageConfig): boolean {
   );
 }
 
+/** Whether EDITS should be served by the built-in Nelthai engine (image→image). */
+function isBuiltInSdEditEngine(config: ImageConfig): boolean {
+  if (config.IMAGE_EDIT_ENGINE === 'sd') return true;
+  return (
+    (config.IMAGE_EDIT_ENGINE === 'openai' || config.IMAGE_EDIT_ENGINE === '') &&
+    !config.IMAGES_EDIT_OPENAI_API_KEY
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Image data loading (get_image_data port)
 // ---------------------------------------------------------------------------
@@ -475,6 +484,25 @@ export const routes: Route[] = [
       if (!form?.image || !form?.prompt) err(422, 'Field required');
 
       try {
+        // Built-in Nelthai engine — image→image through the multipart
+        // metaai endpoint (source images resolved from ids/URLs/data URLs).
+        if (isBuiltInSdEditEngine(config)) {
+          const { generateAndSaveImage, resolveImageSources } = await import('@/lib/image-generation');
+          const imagesInput = Array.isArray(form.image) ? form.image : [form.image];
+          const sourceImages = await resolveImageSources(imagesInput);
+          if (!sourceImages.length) {
+            throw new Error('Failed to load the source image(s) for the edit');
+          }
+          const file = await generateAndSaveImage(
+            user,
+            form.prompt,
+            form.size || config.IMAGE_EDIT_SIZE || null,
+            { model: 'stable-diffusion-xl', source: 'image_edit' },
+            { sourceImages }
+          );
+          return ctx.json([file]);
+        }
+
         if (config.IMAGE_EDIT_ENGINE === 'openai') {
           const headers: Record<string, string> = {
             authorization: `Bearer ${config.IMAGES_EDIT_OPENAI_API_KEY}`,

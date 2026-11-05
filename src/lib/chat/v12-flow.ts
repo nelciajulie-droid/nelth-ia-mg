@@ -681,11 +681,50 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     }
 
     const prompt = [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
-    await emit({ type: 'status', data: { description: 'Generating image...', done: false } });
+
+    // Image→image: when this turn's user message carries image attachments,
+    // they become the sources of the multipart image-to-image Nelthai job
+    // (JSON bodies are rejected by that endpoint — sources ride as multipart
+    // file parts, see lib/imagine/nelthai.ts).
+    let sourceImages: import('@/lib/imagine/nelthai').NelthaiImageSource[] = [];
+    try {
+      const { resolveImageSources } = await import('@/lib/image-generation');
+      const lastFormMessage = Array.isArray(form.messages) ? form.messages[form.messages.length - 1] : null;
+      const attached = [
+        ...(Array.isArray(userMessage?.files) ? userMessage.files : []),
+        ...(Array.isArray(lastFormMessage?.files) ? lastFormMessage.files : []),
+      ];
+      sourceImages = await resolveImageSources(attached);
+    } catch {
+      /* attachments unreadable → plain text→image */
+    }
+    if (sourceImages.length) {
+      console.log(`[v12-flow] image-to-image with ${sourceImages.length} source image(s)`);
+    }
+
+    // Live phase label: the status row text cycles through the Nelthai job
+    // phases — 'Generating image…' at submit, then 'Generating image ·
+    // sending | generating | image' on every phase change (the generating
+    // card in the UI parses the suffix as its live label).
+    const imagePhaseStatus = (phase: string | null) =>
+      emit({
+        type: 'status',
+        data: {
+          action: 'image_generation',
+          description: phase ? `Generating image · ${phase}` : 'Generating image…',
+          done: false,
+        },
+      });
+    await imagePhaseStatus(null);
     try {
       const { generateAndSaveImage } = await import('@/lib/image-generation');
       const size = await configGet<string>('image_generation.size', '1024x1024');
-      const file = await generateAndSaveImage(user, prompt, size, { chat_id: chatId });
+      const file = await generateAndSaveImage(user, prompt, size, { chat_id: chatId }, {
+        onPhase: (phase) => {
+          void imagePhaseStatus(phase);
+        },
+        sourceImages,
+      });
       const files = [{ type: 'image', url: file.url, name: file.name }];
 
       await emit({ type: 'chat:message:files', data: { files } });
