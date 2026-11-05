@@ -30,8 +30,6 @@ import {
   firebaseSignInWithPassword,
   firebaseSignUp,
   firebaseOauthLink,
-  mergeFirebaseOauth,
-  parseFirebaseUid,
 } from '@/lib/firebase-auth';
 
 /**
@@ -557,9 +555,18 @@ async function authenticateViaFirebase(
   // 1. Existing local account with this email → link it to the Firebase UID.
   const existing = await Users.getUserByEmail(email);
   if (existing) {
-    if (parseFirebaseUid(existing.oauth) !== uid) {
+    // UserModel.oauth is a PARSED object (toUserModel runs safeJson), so the
+    // link merge must operate on the object itself — passing it through
+    // mergeFirebaseOauth (which JSON.parse's its input) would both wipe the
+    // existing provider links (google/github…) and double-encode the column
+    // once updateUserById stringifies it again.
+    const oauthRecord =
+      existing.oauth && typeof existing.oauth === 'object'
+        ? (existing.oauth as Record<string, any>)
+        : {};
+    if ((oauthRecord.firebase?.uid ?? null) !== uid) {
       await Users.updateUserById(existing.id, {
-        oauth: mergeFirebaseOauth(existing.oauth, firebaseOauthLink(fb.account)),
+        oauth: { ...oauthRecord, firebase: firebaseOauthLink(fb.account) },
       }).catch(() => undefined);
     }
     const authRow = await Auths.getAuthById(existing.id);

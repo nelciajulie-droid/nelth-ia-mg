@@ -6,7 +6,12 @@ import { configGet } from '@/lib/config';
 import { getPasswordHash } from '@/lib/auth';
 import { Users, UserModel } from '@/lib/models/users';
 import { Auths, WEBUI_AUTH_COOKIE_SAME_SITE, WEBUI_AUTH_COOKIE_SECURE } from '@/lib/models/auths';
-import { FIREBASE_AUTH_ENABLED, firebaseSignInWithIdpGoogle } from '@/lib/firebase-auth';
+import {
+  FIREBASE_AUTH_ENABLED,
+  firebaseSignInWithIdpGoogle,
+  firebaseLookupGoogleIdentity,
+  firebaseOauthLink,
+} from '@/lib/firebase-auth';
 
 /**
  * Port of the Open WebUI v0.12.5 OAuth login flow (main.py app-level
@@ -246,6 +251,197 @@ function deletedTokenCookie(): string {
   return `token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=${WEBUI_AUTH_COOKIE_SAME_SITE}`;
 }
 
+/** JSON response carrying session cookies (used by the Firebase popup bridge). */
+function jsonWithCookies(data: unknown, cookies: string[], status = 200): Response {
+  const headers = new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' });
+  for (const cookie of cookies) headers.append('set-cookie', cookie);
+  return new Response(JSON.stringify(data), { status, headers });
+}
+
+// ---------------------------------------------------------------------------
+// Google popup bridge (Firebase Auth) — zero OAuth credentials required.
+// ---------------------------------------------------------------------------
+
+/** HTML sign-in page served at /oauth/google/login when GOOGLE_CLIENT_ID /
+ * GOOGLE_CLIENT_SECRET are absent but FIREBASE_API_KEY is configured.
+ *
+ * Instead of the classic OAuth2 code flow (which needs a Web client ID +
+ * secret from the Google Cloud Console), the page runs Firebase's official
+ * popup flow (signInWithPopup → Google-signed ID token) and posts the token
+ * to POST /oauth/google/firebase-token, which verifies it against the
+ * Identity Toolkit and issues the exact same session as the OAuth callback.
+ *
+ * Requirements — both already true for this deployment:
+ *   • FIREBASE_API_KEY set (server verifies the ID token);
+ *   • the current domain authorized in Firebase console (Authentication →
+ *     Settings → Authorized domains: localhost, preview and the Vercel
+ *     domain are all listed for this project).
+ */
+function firebaseBridgePage(): Response {
+  const apiKey = process.env.FIREBASE_API_KEY ?? '';
+  const projectId = process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah';
+  const config = {
+    apiKey,
+    authDomain: `${projectId}.firebaseapp.com`,
+    projectId,
+    ...(process.env.FIREBASE_APP_ID ? { appId: process.env.FIREBASE_APP_ID } : {}),
+    ...(process.env.FIREBASE_STORAGE_BUCKET
+      ? { storageBucket: process.env.FIREBASE_STORAGE_BUCKET }
+      : {}),
+  };
+  const configJson = JSON.stringify(config).replace(/</g, '\\u003c');
+  const html = `<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connexion Google — Nelth-AI</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background:#fafafa; color:#18181b; padding:16px; }
+  .card { width:100%; max-width:380px; background:#fff; border:1px solid #e4e4e7; border-radius:16px;
+          padding:32px 28px; text-align:center; box-shadow:0 8px 30px rgba(0,0,0,.06); }
+  .glogo { width:40px; height:40px; margin:0 auto 16px; display:block; }
+  h1 { font-size:18px; margin:0 0 6px; font-weight:600; }
+  p.status { color:#71717a; font-size:14px; margin:0 0 20px; min-height:20px; }
+  .spinner { width:22px; height:22px; border:3px solid #e4e4e7; border-top-color:#10b981;
+             border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 14px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .err { display:none; background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; border-radius:10px;
+         padding:10px 12px; font-size:13px; margin:0 0 16px; text-align:left; }
+  button { width:100%; padding:11px 16px; border-radius:10px; border:1px solid #d8d8dc; background:#fff;
+           font-size:14px; cursor:pointer; color:#18181b; }
+  button.primary { background:#10b981; color:#fff; border-color:#10b981; font-weight:600; }
+  button:hover { filter:brightness(.97); }
+  .links { margin-top:14px; font-size:13px; }
+  a { color:#0d9488; text-decoration:none; }
+</style>
+</head>
+<body>
+<main class="card" aria-label="Connexion Google">
+  <svg class="glogo" viewBox="0 0 48 48" role="img" aria-label="Google">
+    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+  </svg>
+  <h1>Connexion avec Google</h1>
+  <div class="spinner" id="spin"></div>
+  <p class="status" id="status">Préparation de la connexion…</p>
+  <div class="err" id="err" role="alert"></div>
+  <button class="primary" id="go" type="button">Continuer avec Google</button>
+  <div class="links"><a href="/auth">← Revenir à la connexion</a></div>
+</main>
+<script type="application/json" id="fb-config">${configJson}</script>
+<script type="module">
+const cfg = JSON.parse(document.getElementById('fb-config').textContent);
+const el = (id) => document.getElementById(id);
+let fbAuth = null;
+
+async function init() {
+  const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js');
+  const auth = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
+  const app = initializeApp(cfg);
+  fbAuth = auth.getAuth(app);
+  return auth;
+}
+
+async function finish(cred) {
+  el('status').textContent = 'Vérification de votre identité…';
+  const idToken = await cred.user.getIdToken();
+  const res = await fetch('/oauth/google/firebase-token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ idToken }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || 'La connexion a échoué.');
+  window.location.href = data.pending ? '/auth?pending=1' : '/auth';
+}
+
+function fail(message) {
+  el('spin').style.display = 'none';
+  el('status').textContent = '';
+  el('err').textContent = message;
+  el('err').style.display = 'block';
+}
+
+function messageFor(e) {
+  const code = e && e.code ? String(e.code) : '';
+  if (code === 'auth/unauthorized-domain')
+    return 'Ce domaine n\u2019est pas autorisé dans la console Firebase (Authentication \u2192 Settings \u2192 Authorized domains).';
+  if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found')
+    return 'Le fournisseur Google n\u2019est pas activé dans la console Firebase (Authentication \u2192 Sign-in method \u2192 Google).';
+  if (code === 'auth/popup-blocked')
+    return 'Le navigateur a bloqué la fenêtre Google. Autorisez les popups pour ce site puis cliquez sur « Continuer avec Google ».';
+  return (e && e.message ? e.message : 'Erreur inconnue.');
+}
+
+async function run(silent) {
+  try {
+    el('err').style.display = 'none';
+    el('spin').style.display = '';
+    el('status').textContent = 'Ouverture de la fenêtre Google…';
+    const auth = fbAuth ? null : await init();
+    const { GoogleAuthProvider, signInWithPopup, signInWithRedirect } = fbAuth
+      ? await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js')
+      : auth;
+    const provider = new GoogleAuthProvider();
+    try {
+      const cred = await signInWithPopup(fbAuth, provider);
+      await finish(cred);
+    } catch (e) {
+      if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment')) {
+        // Mobile / popup-blocked fallback: full-page redirect flow. The browser
+        // comes back to this URL and getRedirectResult() below picks it up.
+        await signInWithRedirect(fbAuth, provider);
+        return;
+      }
+      throw e;
+    }
+  } catch (e) {
+    if (e && (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request')) {
+      el('spin').style.display = 'none';
+      el('status').textContent = 'Fenêtre fermée — cliquez pour recommencer.';
+      return;
+    }
+    if (silent) {
+      el('spin').style.display = 'none';
+      el('status').textContent = 'Cliquez sur « Continuer avec Google ».';
+      return;
+    }
+    fail(messageFor(e));
+  }
+}
+
+document.getElementById('go').addEventListener('click', () => run(false));
+
+(async () => {
+  try {
+    const auth = await init();
+    // Resume the redirect flow (mobile): returning from accounts.google.com.
+    const { getRedirectResult } = auth;
+    getRedirectResult(fbAuth)
+      .then((cred) => { if (cred && cred.user) return finish(cred); })
+      .catch(() => undefined);
+    // Desktop: attempt the popup right away (the click on /auth counts as the
+    // user gesture); on popup-blocked we silently fall back to the button.
+    await run(true);
+  } catch (e) {
+    fail(messageFor(e));
+  }
+})();
+</script>
+</body>
+</html>`;
+  return new Response(html, {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
 function parseDuration(v: string | null | undefined): number | null {
   if (v === null || v === undefined) return null;
   const s = String(v).trim().toLowerCase();
@@ -357,6 +553,133 @@ function notFoundNull(ctx: Ctx): Response {
 }
 
 export const routes: Route[] = [
+  // ------------------- POST /google/firebase-token -------------------
+  // Google popup bridge endpoint: the HTML page at /oauth/google/login runs
+  // Firebase signInWithPopup in the browser and posts the resulting Google-
+  // signed ID token here. The token is verified server-side via the Identity
+  // Toolkit (accounts:lookup) — a cryptographic proof of the identity — and
+  // the exact same account-resolution + session logic as the OAuth callback
+  // runs (Google sub lookup → email merge → signup keyed by the Firebase UID).
+  {
+    method: 'POST',
+    path: 'google/firebase-token',
+    auth: 'none',
+    handler: async (ctx) => {
+      const authConfig = await getOAuthRuntimeConfig();
+      if (!authConfig.ENABLE_OAUTH) return notFoundNull(ctx);
+      if (!FIREBASE_AUTH_ENABLED) {
+        return ctx.json(
+          { detail: 'Pont Firebase indisponible : FIREBASE_API_KEY absente.' },
+          400
+        );
+      }
+
+      const body = await ctx.body<{ idToken?: unknown }>().catch(() => ({}) as { idToken?: unknown });
+      const idToken = typeof body?.idToken === 'string' ? body.idToken : '';
+      const identity = await firebaseLookupGoogleIdentity(idToken);
+      if (!identity) {
+        return ctx.json({ detail: OAUTH_LOGIN_FAILED }, 400);
+      }
+      const { uid, googleSub, email, displayName, photoUrl } = identity;
+
+      // Allowed-domain gate (same as the OAuth callback).
+      if (
+        !authConfig.OAUTH_ALLOWED_DOMAINS.includes('*') &&
+        !authConfig.OAUTH_ALLOWED_DOMAINS.includes(email.split('@').pop() ?? '')
+      ) {
+        return ctx.json({ detail: OAUTH_LOGIN_FAILED }, 400);
+      }
+
+      // User resolution mirrors the OAuth callback: Google sub → email merge → signup.
+      let user = await Users.getUserByOauthSub('google', googleSub);
+      if (!user && authConfig.OAUTH_MERGE_ACCOUNTS_BY_EMAIL) {
+        const byEmail = await Users.getUserByEmail(email);
+        if (byEmail) {
+          user = (await Users.updateUserOauthById(byEmail.id, 'google', googleSub)) ?? byEmail;
+        }
+      }
+      if (user) {
+        const oauthRecord =
+          user.oauth && typeof user.oauth === 'object' ? (user.oauth as Record<string, any>) : {};
+        if (oauthRecord.google && typeof oauthRecord.google === 'object' && oauthRecord.google.sub !== googleSub) {
+          // Lazy repair for legacy rows with mismatched subs
+          user = (await Users.updateUserOauthById(user.id, 'google', googleSub)) ?? user;
+        }
+        // Keep the Firebase identity link fresh — proper object merge so the
+        // password sign-in bridge can find the UID later (never a string that
+        // would double-encode the JSON column).
+        const currentRecord =
+          user.oauth && typeof user.oauth === 'object' ? (user.oauth as Record<string, any>) : {};
+        if (currentRecord.firebase?.uid !== uid) {
+          user =
+            (await Users.updateUserById(user.id, {
+              oauth: {
+                ...currentRecord,
+                google: { ...(currentRecord.google ?? {}), sub: googleSub },
+                firebase: firebaseOauthLink({ uid, email }),
+              },
+            })) ?? user;
+        }
+      } else if (authConfig.ENABLE_OAUTH_SIGNUP) {
+        const existingUser = await Users.getUserByEmail(email);
+        if (existingUser) return ctx.json({ detail: ERROR_MESSAGES.EMAIL_TAKEN }, 400);
+
+        const created = await Auths.insertNewAuth(
+          email,
+          await getPasswordHash(crypto.randomUUID()),
+          displayName || email,
+          photoUrl || '/user.png',
+          await configGet<string>('ui.default_user_role', env.DEFAULT_USER_ROLE),
+          { google: { sub: googleSub }, firebase: firebaseOauthLink({ uid, email }) },
+          uid
+        );
+        if (!created) return ctx.json({ detail: ERROR_MESSAGES.CREATE_USER_ERROR }, 500);
+        user = created;
+
+        if ((await Users.getNumUsers()) === 1) {
+          await Users.updateUserRoleById(user.id, 'admin');
+          user = (await Users.getUserById(user.id)) ?? user;
+        }
+      } else {
+        return ctx.json({ detail: ERROR_MESSAGES.ACCESS_PROHIBITED }, 403);
+      }
+
+      // Store the OAuth session (provider idToken — same pruning as the callback).
+      const nowSec = Math.floor(Date.now() / 1000);
+      try {
+        const existing = await db.oAuthSession.findMany({ where: { user_id: user.id, provider: 'google' } });
+        const sorted = existing.sort((a, b) => a.created_at - b.created_at).reverse();
+        if (sorted.length >= OAUTH_MAX_SESSIONS_PER_USER) {
+          for (const old of sorted.slice(OAUTH_MAX_SESSIONS_PER_USER - 1)) {
+            await db.oAuthSession.delete({ where: { id: old.id } }).catch(() => undefined);
+          }
+        }
+        await db.oAuthSession.create({
+          data: {
+            id: crypto.randomUUID(),
+            user_id: user.id,
+            provider: 'google',
+            token: JSON.stringify({ firebase_idToken: idToken.slice(0, 2048) }),
+            expires_at: nowSec + 3600,
+            created_at: nowSec,
+            updated_at: nowSec,
+          },
+        });
+      } catch {
+        // Failed session storage must not block sign-in (Python parity).
+      }
+
+      // Pending users cannot receive a session (create_signin_response next_step).
+      if (!['admin', 'user'].includes(user.role)) {
+        return jsonWithCookies({ pending: true }, [deletedTokenCookie()]);
+      }
+
+      const session = await issueSession(user);
+      const maxAge = session.expiresDelta ? Math.floor(session.expiresDelta) : null;
+      return jsonWithCookies({ ok: true }, [tokenCookie('token', session.token, maxAge, false)]);
+    },
+  },
+
   // ------------------- GET /login/{provider} -------------------
   {
     method: 'GET',
@@ -366,13 +689,17 @@ export const routes: Route[] = [
       const authConfig = await getOAuthRuntimeConfig();
       const provider = loadOAuthProviders()[ctx.params.provider];
 
-      // Google is always rendered on the auth page: when credentials are
-      // missing, redirect back with an actionable error instead of a bare 404
-      // so the toast on /auth explains exactly what to configure — including
-      // the deploy target (.env locally vs Vercel env vars in production) and
-      // the exact redirect URI that must be whitelisted in Google Cloud Console.
+      // Google is always rendered on the auth page. When credentials are
+      // missing, the Firebase popup bridge (FIREBASE_API_KEY) serves a
+      // zero-configuration sign-in page; only when neither is available do we
+      // redirect back with an actionable error — including the deploy target
+      // (.env locally vs Vercel env vars in production) and the exact redirect
+      // URI that must be whitelisted in Google Cloud Console.
       if (!authConfig.ENABLE_OAUTH || !provider) {
         if (ctx.params.provider === 'google') {
+          if (authConfig.ENABLE_OAUTH && !provider && FIREBASE_AUTH_ENABLED) {
+            return firebaseBridgePage();
+          }
           const base = ((await configGet<string>('webui.url', '')) || requestOrigin(ctx.req)).replace(/\/$/, '');
           const detail = !authConfig.ENABLE_OAUTH
             ? 'La connexion Google est désactivée (ENABLE_OAUTH=false)'

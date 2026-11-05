@@ -133,6 +133,48 @@ export async function firebaseSignInWithIdpGoogle(
   };
 }
 
+/** Verified Google identity decoded from a Firebase ID token (accounts:lookup).
+ *
+ * The Google popup bridge (signInWithPopup → idToken) ends here: Google itself
+ * signed the token, so a successful lookup is cryptographic proof of the
+ * identity — including the Google subject (providerUserInfo rawId) and the
+ * Firebase UID (localId), the exact pair the OAuth code flow stores.
+ */
+export async function firebaseLookupGoogleIdentity(
+  idToken: string
+): Promise<{
+  uid: string;
+  googleSub: string;
+  email: string;
+  displayName: string | null;
+  photoUrl: string | null;
+} | null> {
+  if (!FIREBASE_AUTH_ENABLED) return null;
+  if (!idToken || idToken.length > 4096 || idToken.split('.').length !== 3) return null;
+  const result = await identityRequest('accounts:lookup', { idToken });
+  if (!result.ok) return null;
+  const user = result.data?.users?.[0];
+  if (!user || !user.localId) return null;
+
+  const providers: Array<{ providerId?: string; rawId?: string }> = Array.isArray(
+    user.providerUserInfo
+  )
+    ? user.providerUserInfo
+    : [];
+  const google = providers.find((p) => p.providerId === 'google.com');
+  if (!google || !google.rawId) return null; // only Google sign-ins on this bridge
+
+  const email = String(user.email ?? '');
+  if (!email) return null; // Google accounts always carry a verified email
+  return {
+    uid: String(user.localId),
+    googleSub: String(google.rawId),
+    email: email.toLowerCase(),
+    displayName: user.displayName ? String(user.displayName) : null,
+    photoUrl: user.photoUrl ? String(user.photoUrl) : null,
+  };
+}
+
 /** Provision a new Firebase account (Email/Password provider). */
 export async function firebaseSignUp(
   email: string,
