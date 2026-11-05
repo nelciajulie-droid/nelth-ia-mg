@@ -355,20 +355,35 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     }
   }
 
-  // ---------------------------------------- 3.3bis Agent skills manifest
-  // (Claude.ai-style lazy loading): EVERY request carries only the skill
-  // names + trimmed descriptions (~3KB). The model must reply with
-  // `USE_SKILL(name)` as its FIRST line when — and only when — the task
-  // matches one; the streaming gate below then detects the marker, loads
-  // that ONE pack's full instructions and restarts the completion. The
-  // other 19 packs never enter the context (the user's ask: "prend le skill
-  // ce qu'il besoin à chaque tâche, comme claude.ai").
+  // ---------------------------------------- 3.3bis Agent skills (Claude.ai
+  // style, two layers of progressive disclosure):
+  //  1. DETERMINISTIC PRE-SELECTION: the user's own words are scored against
+  //     the skill library (hint regexes + curated keywords); the 1-3
+  //     clearly-matching skills are injected IN FULL into THIS turn's
+  //     context before the first token — no model decision required. This
+  //     is what makes "créer-moi une landing page ultra moderne" reliably
+  //     load frontend-design + landing-page-creation even on weak free
+  //     models that never emit the USE_SKILL marker on their own.
+  //  2. MODEL-DRIVEN FALLBACK (USE_SKILL protocol): the manifest (names +
+  //     descriptions only) still rides every request; if the task matches a
+  //     skill the pre-selector missed, the model can begin with
+  //     USE_SKILL(name) and the gates below restart with that pack injected.
+  // Either way, only the matched skills' full instructions ever enter the
+  // context — the rest of the library stays out.
   let skillsActive = false;
+  // Skills actually loaded this turn (persisted in message meta for UI/audit).
+  const usedSkills: string[] = [];
+  const preSelectedNames: string[] = [];
   {
     const { getSkillManifestPrompt } = await import('@/lib/skills/registry');
+    const { preselectSkills, buildPreLoadedSkillsMessage } = await import('@/lib/skills/selector');
     // rawLastUserText: the user's own words (web-search augmentation would
-    // false-positive the server-side skill hint with page keywords).
-    const skillManifest = await getSkillManifestPrompt(rawLastUserText);
+    // false-positive the selectors with page keywords).
+    const isImageModel =
+      modelId === 'stable-diffusion-xl' || modelId.startsWith('image_generation.');
+    const preSelected = isImageModel ? [] : await preselectSkills(rawLastUserText);
+    preSelectedNames.push(...preSelected.map((s) => s.name));
+    const skillManifest = await getSkillManifestPrompt(rawLastUserText, preSelectedNames);
     if (skillManifest) {
       skillsActive = true;
       const hasSkillsPrompt = llmMessages.some(
@@ -382,9 +397,39 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
         }
       }
     }
+    if (preSelected.length) {
+      usedSkills.push(...preSelectedNames);
+      // Insert right after the LAST user message — the tool-result position
+      // (like Claude reading the SKILL.md after deciding it is relevant).
+      // Lives only in this turn's request: never persisted into history.
+      let insertAt = llmMessages.length;
+      for (let i = llmMessages.length - 1; i >= 0; i--) {
+        if (llmMessages[i]?.role === 'user') {
+          insertAt = i + 1;
+          break;
+        }
+      }
+      llmMessages.splice(insertAt, 0, await buildPreLoadedSkillsMessage(preSelected));
+      console.log(
+        `[v12-flow] skills pre-selected for this turn: ${preSelected
+          .map((s) => `${s.name}(${s.score})`)
+          .join(', ')}`
+      );
+      // Visible chip per skill — the same status protocol as the USE_SKILL
+      // path (the frontend renders "Skill « x » chargé").
+      for (const s of preSelected) {
+        const label = s.label || s.name;
+        await emit({
+          type: 'status',
+          data: { action: 'skill', description: `Skill « ${label} » chargé`, done: false },
+        });
+        await emit({
+          type: 'status',
+          data: { action: 'skill', description: `Skill « ${label} » chargé`, done: true },
+        });
+      }
+    }
   }
-  // Skills actually loaded this turn (persisted in message meta for UI/audit).
-  const usedSkills: string[] = [];
 
   // ------------------------------------ 3.4 Web search (explicit toggle OR auto).
   // Python middleware: features.web_search → search engine + context/citation
@@ -994,7 +1039,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       const m = SKILL_MARKER_RE.exec(content);
       if (m) {
         const skill = getSkillByName(m[1]);
-        if (skill) {
+        if (skill && !usedSkills.includes(skill.name)) {
           usedSkills.push(skill.name);
           await emit({
             type: 'status',
@@ -1023,6 +1068,11 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
             type: 'status',
             data: { action: 'skill', description: `Skill « ${skill.label || skill.name} » chargé`, done: true },
           });
+        } else if (skill) {
+          // Pre-selected skill — its instructions are already in context, so
+          // pass-1 was generated WITH the skill loaded: keep the content, the
+          // marker is stripped just below.
+          console.log(`[v12-flow] skill marker for already-loaded "${skill.name}" — keeping pass-1 content`);
         }
       }
       content = stripSkillMarkers(content);
@@ -1161,6 +1211,9 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
           content: partial,
           done: false,
           model: modelId,
+          // Skills used this turn ride the checkpoints too — a serverless
+          // kill mid-generation still leaves the audit trail in meta.
+          ...(usedSkills.length ? { meta: { used_skills: usedSkills } } : {}),
         } as any);
       } catch {
         /* best-effort checkpoint */
@@ -1177,7 +1230,14 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     let skillGate: import('@/lib/skills/registry').SkillGate | null = null;
     if (skillsActive) {
       const { SkillGate, skillNames } = await import('@/lib/skills/registry');
-      skillGate = new SkillGate(skillNames());
+      // Pre-selected skills are excluded from the gate's valid names: if the
+      // model still opens with USE_SKILL(<pre-selected>), the marker is
+      // treated as unknown → stripped, and the pass continues seamlessly
+      // (the skill is already in context — no restart, no double injection).
+      const selectable = new Set(
+        [...skillNames()].filter((n) => !preSelectedNames.includes(n))
+      );
+      skillGate = new SkillGate(selectable);
     }
 
     const processReasoningDelta = async (reasoningDelta: string): Promise<void> => {
@@ -1532,6 +1592,8 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
                   content: aggregate,
                   done: false,
                   model: modelId,
+                  // Skills audit trail on checkpoints (serverless kills).
+                  ...(usedSkills.length ? { meta: { used_skills: usedSkills } } : {}),
                 } as any);
               } catch {
                 /* best-effort checkpoint */
@@ -1612,16 +1674,27 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
           const { getSkillByName, buildSkillInjectionMessages } = await import('@/lib/skills/registry');
           const skill = getSkillByName(restartName);
           if (skill) {
-            usedSkills.push(skill.name);
+            // A marker for a pre-selected skill means it is ALREADY in
+            // llmMessages — restart WITHOUT re-injecting it (no duplicate).
+            const alreadyLoaded = usedSkills.includes(skill.name);
+            if (!alreadyLoaded) usedSkills.push(skill.name);
             aggregate = ''; // the held pass-1 prefix (marker) is dropped
             let res2: Response | null = null;
             try {
-              res2 = await callUpstream({ ...reqBody, messages: await buildSkillInjectionMessages(llmMessages, skill) });
+              const messages2 = alreadyLoaded
+                ? llmMessages
+                : await buildSkillInjectionMessages(llmMessages, skill);
+              res2 = await callUpstream({ ...reqBody, messages: messages2 });
               if (isKilo && res2.status === 400) {
                 const probe = await res2.clone().text().catch(() => '');
                 if (/bad request|Provider returned error/i.test(probe)) {
                   console.warn('[v12-flow] 5c skill pass-2 gateway 400 flake — retrying');
-                  res2 = await callUpstream({ ...reqBody, messages: await buildSkillInjectionMessages(llmMessages, skill) });
+                  res2 = await callUpstream({
+                    ...reqBody,
+                    messages: alreadyLoaded
+                      ? llmMessages
+                      : await buildSkillInjectionMessages(llmMessages, skill),
+                  });
                 }
               }
             } catch (e) {

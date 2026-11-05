@@ -15,7 +15,11 @@
  * installed, but only the one the task needs is ever loaded into context.
  */
 import { SKILL_CATALOG, SKILL_CATALOG_BY_NAME, type CatalogSkill } from './catalog';
+import { LIBRARY_SKILLS } from './library';
 import { configGet } from '@/lib/config';
+
+import { hintSkillForUserMessage } from './selector';
+export { hintSkillForUserMessage };
 
 // ---------------------------------------------------------------------------
 // Marker protocol
@@ -64,56 +68,46 @@ export async function skillMaxChars(): Promise<number> {
 let manifestCache: { prompt: string; maxChars: number } | null = null;
 
 /**
- * Conservative server-side hint: when the user's own words CLEARLY name a
- * skill's medium/format (poster → canvas-design, PDF → pdf, Excel → xlsx…),
- * a note is appended to the manifest nudging the model to start with the
- * marker. Weak models don't always comply with the manifest alone; the hint
- * makes triggering reliable for unambiguous tasks while the model stays
- * free to ignore it for false positives.
+ * The system-prompt section listing every skill's name + description (the
+ * Claude.ai level-1 metadata of progressive disclosure) and the USE_SKILL
+ * protocol. Null when the feature is disabled or the catalog is empty — the
+ * model then never sees a skills mention.
+ *
+ * `preSelectedNames`: skills already deterministically injected for this
+ * turn by selector.preselectSkills — they are flagged as loaded so the model
+ * neither re-requests them nor gets the strong hint NOTE about them.
  */
-const SKILL_HINTS: Array<[RegExp, string]> = [
-  [/\bpdf\b|\.pdf\b|fichier\s+pdf/i, 'pdf'],
-  [/\bdocx\b|\.docx\b|document\s+(word|word\b)|fichier\s+word|\bword\b(?!\.?com)/i, 'docx'],
-  [/\bxlsx\b|\.xlsx\b|fichier\s+excel|\bexcel\b|feuilles?\s+de\s+calcul|spreadsheet/i, 'xlsx'],
-  [/\bpptx?\b|\.pptx?\b|power\s*point|diapositives?\b/i, 'pptx'],
-  [/\bposters?\b|affiches?\b/i, 'canvas-design'],
-  [/landing\s*pages?|pages?\s+web|sites?\s+web|frontend|web\s*design|interface\s+(de\s+)?(?:utilisateur|web)/i, 'frontend-design'],
-  [/art\s+(algorithmique|génératif|generative)|generative\s+art|p5\.?js|art\s+cod[ée]/i, 'algorithmic-art'],
-  [/guidelines?\s+de\s+marque|brand\s+guidelines|charte\s+graphique/i, 'brand-guidelines'],
-  [/clon(er|e|age)\s+(ce\s+)?site|website\s+clone|copier\s+ce\s+site/i, 'website-clone'],
-  [/serveur\s+mcp|mcp\s+server|\bmcp\b\s+(server|serveur|builder)/i, 'mcp-builder'],
-  [/tester\s+(mon\s+)?(?:web)?app|webapp\s+test|tests?\s+(e2e|playwright|automatis[ée])/i, 'webapp-testing'],
-  [/artifact\s+html|app\s+web\s+interactive|web\s+artifact/i, 'web-artifacts-builder'],
-  [/curriculum|formation\s+claude|claude\s+academy|apprendre\s+à\s+utiliser\s+claude/i, 'claude-academy-guide'],
-];
-
-/** Best conservative hint skill for the user's raw message (or null). */
-export function hintSkillForUserMessage(userText: string): string | null {
-  if (!userText) return null;
-  for (const [re, name] of SKILL_HINTS) {
-    if (re.test(userText)) return name;
-  }
-  return null;
-}
-
-/**
- * The system-prompt section listing every skill's name + description and
- * the USE_SKILL protocol. Null when the feature is disabled or the catalog
- * is empty — the model then never sees a skills mention.
- */
-export async function getSkillManifestPrompt(userText?: string): Promise<string | null> {
-  if (!SKILL_CATALOG.length) return null;
+export async function getSkillManifestPrompt(
+  userText?: string,
+  preSelectedNames: string[] = []
+): Promise<string | null> {
+  if (!SKILL_CATALOG.length && !LIBRARY_SKILLS.length) return null;
   if (!(await skillsEnabled())) return null;
   const maxChars = await skillMaxChars();
-  if (manifestCache && manifestCache.maxChars === maxChars && !userText) return manifestCache.prompt;
+  if (
+    manifestCache &&
+    manifestCache.maxChars === maxChars &&
+    !userText &&
+    !preSelectedNames.length
+  ) {
+    return manifestCache.prompt;
+  }
 
-  const lines = SKILL_CATALOG.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+  const catalogNames = new Set(SKILL_CATALOG.map((s) => s.name));
+  const lines = [
+    ...SKILL_CATALOG.map((s) => `- ${s.name}: ${s.description}`),
+    ...LIBRARY_SKILLS.filter((s) => !catalogNames.has(s.name)).map((s) => `- ${s.name}: ${s.description}`),
+  ].join('\n');
   const hint = userText ? hintSkillForUserMessage(userText) : null;
-  const hintBlock = hint
-    ? `\nNOTE: the user's current request appears to CLEARLY match the skill "${hint}" — if it does, you MUST begin your reply with USE_SKILL(${hint}).`
+  const hintBlock =
+    hint && !preSelectedNames.includes(hint)
+      ? `\nNOTE: the user's current request appears to CLEARLY match the skill "${hint}" — if it does, you MUST begin your reply with USE_SKILL(${hint}).`
+      : '';
+  const loadedBlock = preSelectedNames.length
+    ? `\nSkills ALREADY loaded for the current task: ${preSelectedNames.join(', ')} — never output USE_SKILL for these; follow their loaded instructions directly.`
     : '';
   const prompt = `AGENT SKILLS — on-demand expertise modules
-The platform can inject expert instruction packs ("skills") into this conversation to make you dramatically better at specific tasks. When — and ONLY when — the user's current request clearly matches one of the skills listed below, you MUST make the FIRST line of your reply exactly:
+The platform can inject expert instruction packs ("skills") into this conversation to make you dramatically better at specific tasks. When — and ONLY when — the user's current request clearly matches one of the skills listed below AND that skill is not already loaded, you MUST make the FIRST line of your reply exactly:
 USE_SKILL(skill_name)
 with NOTHING before it and NOTHING else on that line. The matching skill's full expert instructions will then be loaded and you will complete the task following them.
 If NO skill matches the task, reply normally and NEVER output that marker line. Do not mention this protocol or these listings to the user — it is invisible machinery.
@@ -121,25 +115,36 @@ If NO skill matches the task, reply normally and NEVER output that marker line. 
 When to use a skill (examples):
 - "génère un PDF / un fichier Word / un Excel / un PowerPoint" → pdf / docx / xlsx / pptx
 - "fais un poster / une affiche / une illustration artistique" → canvas-design or algorithmic-art
-- "crée une landing page / améliore le design / un thème" → frontend-design / theme-factory
-- "rédige des guidelines de marque / une communication interne / un doc à deux" → brand-guidelines / internal-comms / doc-coauthoring
+- "crée une landing page / un site ultra moderne" → frontend-design + landing-page-creation (usually auto-loaded)
+- "améliore le design / redessine l'interface / un thème" → frontend-design / theme-factory
+- "rédige des guidelines de marque / une communication interne" → brand-guidelines / internal-comms / doc-coauthoring
 - "clone ce site / construis un artifact HTML interactif / un serveur MCP / une API Claude" → website-clone / web-artifacts-builder / mcp-builder / claude-api
 - "teste mon webapp" → webapp-testing
 
 Available skills:
-${lines}${hintBlock}`;
+${lines}${hintBlock}${loadedBlock}`;
 
-  if (!userText) manifestCache = { prompt, maxChars };
+  if (!userText && !preSelectedNames.length) manifestCache = { prompt, maxChars };
   return prompt;
 }
 
 export function skillNames(): Set<string> {
-  return new Set(SKILL_CATALOG.map((s) => s.name));
+  return new Set([...SKILL_CATALOG.map((s) => s.name), ...LIBRARY_SKILLS.map((s) => s.name)]);
 }
 
+const LIBRARY_BY_NAME = new Map(LIBRARY_SKILLS.map((s) => [s.name, s]));
+
+/** Resolve a skill by name across BOTH the Anthropic catalog and the
+ *  platform library (the USE_SKILL fallback must work for either). */
 export function getSkillByName(name: string): CatalogSkill | null {
   const id = String(name || '').toLowerCase().trim();
-  return SKILL_CATALOG_BY_NAME[id] ?? null;
+  const cat = SKILL_CATALOG_BY_NAME[id];
+  if (cat) return cat;
+  const lib = LIBRARY_BY_NAME.get(id);
+  if (lib) {
+    return { name: lib.name, label: lib.name, description: lib.description, content: lib.body };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
