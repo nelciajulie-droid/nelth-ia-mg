@@ -128,17 +128,40 @@ function loadOAuthProviders(): Record<string, OAuthProvider> {
  *
  * Google is ALWAYS advertised: the auth page renders the official Google
  * button (multi-colour G logo shipped in the Open WebUI build) even before
- * credentials are set. /oauth/google/login then redirects back to /auth with
- * an actionable error explaining that GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
- * are still missing, instead of a bare 404.
+ * credentials are set. When classic OAuth credentials are absent but the
+ * Firebase bridge is available, the google entry carries mode='firebase-popup'
+ * plus the public Firebase web config so /static/google-bridge.js can open the
+ * Google popup DIRECTLY on the auth page (one click, no intermediate page).
  */
-export function publicOAuthProviders(): Record<string, { name: string }> {
+export function publicOAuthProviders(): Record<
+  string,
+  {
+    name: string;
+    mode?: string;
+    firebase?: { apiKey: string; authDomain: string; projectId: string };
+  }
+> {
   const configured = loadOAuthProviders();
-  const providers: Record<string, { name: string }> = {};
+  const providers: Record<
+    string,
+    { name: string; mode?: string; firebase?: { apiKey: string; authDomain: string; projectId: string } }
+  > = {};
   for (const [key, value] of Object.entries(configured)) {
     providers[key] = { name: value.displayName ?? key };
   }
-  if (!providers.google) providers.google = { name: 'Google' };
+  if (!providers.google) {
+    providers.google = FIREBASE_AUTH_ENABLED
+      ? {
+          name: 'Google',
+          mode: 'firebase-popup',
+          firebase: {
+            apiKey: process.env.FIREBASE_API_KEY ?? '',
+            authDomain: `${process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah'}.firebaseapp.com`,
+            projectId: process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah',
+          },
+        }
+      : { name: 'Google' };
+  }
   return providers;
 }
 
@@ -441,6 +464,15 @@ document.getElementById('resume').addEventListener('click', resume);
 
 (async () => {
   try {
+    // Paramètres de repli depuis l'intercepteur un-clic (google-bridge.js) :
+    //   ?auto=1 → le popup était bloqué : enchaîner immédiatement en
+    //             redirection pleine page (aucun geste requis pour ça) ;
+    //   ?err=<msg> → erreur du popup côté /auth : l'afficher.
+    const params = new URLSearchParams(window.location.search);
+    const auto = params.get('auto') === '1';
+    const errParam = params.get('err');
+    if (errParam) fail(errParam);
+
     const { getRedirectResult } = await init();
     // Returning from accounts.google.com (signInWithRedirect fallback):
     // consume the redirect result FIRST and exclusively — nothing else may
@@ -455,6 +487,13 @@ document.getElementById('resume').addEventListener('click', resume);
       }
     } catch (e) {
       if (e && e.code && !String(e.code).includes('cancelled')) fail(messageFor(e));
+    }
+    if (auto) {
+      el('status').textContent = 'Redirection vers Google…';
+      const { GoogleAuthProvider, signInWithRedirect } =
+        await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
+      await signInWithRedirect(fbAuth, new GoogleAuthProvider());
+      return;
     }
     // Session Google encore active côté client ? Reprendre en un clic.
     const current = fbAuth.currentUser;
