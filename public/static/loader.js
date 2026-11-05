@@ -1012,3 +1012,79 @@ html.nsrc-lock{overflow:hidden}
     });
   };
 })();
+
+/* ====================================================================
+ * THINKING BLOCK AUTO-OPEN — show the model's chain-of-thought while it
+ * streams.
+ *
+ * Why: the compiled frontend renders reasoning / tool-execution detail
+ * blocks COLLAPSED unless the user enabled the "expandDetails" setting
+ * (default off). With the backend's paced reasoning reveal (the gateway
+ * delivers the whole chain-of-thought in one burst; the backend re-emits it
+ * progressively o1-style), a collapsed block would still hide the thinking
+ * text behind a bare "Thinking…" line for the whole generation.
+ *
+ * Fix, entirely in this layer (compiled frontend untouched): while an
+ * item is in_progress its header button carries a `shimmer` descendant and
+ * an aria-expanded state — simulate ONE click on any still-collapsed
+ * shimmering header (exactly what a manual click does) so the block opens
+ * the moment the thinking phase starts. Completed blocks (no shimmer) are
+ * never touched; the user remains free to collapse it again by hand.
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_THINKING_OPEN__) return;
+  window.__NELTH_THINKING_OPEN__ = true;
+
+  const OPENED_FLAG = 'nelthAutoOpen';
+
+  const scanAndOpen = () => {
+    let buttons;
+    try {
+      buttons = document.querySelectorAll('button[aria-expanded="false"]');
+    } catch (e) {
+      return;
+    }
+    for (let i = 0; i < buttons.length; i++) {
+      const btn = buttons[i];
+      if (btn.dataset[OPENED_FLAG]) continue;
+      let shimmer = null;
+      try {
+        shimmer = btn.querySelector('.shimmer');
+      } catch (e) {
+        continue;
+      }
+      if (!shimmer) continue;
+      btn.dataset[OPENED_FLAG] = '1';
+      try {
+        btn.click();
+      } catch (e) {
+        /* header not clickable yet — retried on the next scan */
+        delete btn.dataset[OPENED_FLAG];
+      }
+    }
+  };
+
+  // Debounced observer — the chat DOM mutates heavily while streaming; a
+  // 250ms coalescing window keeps the scan cost negligible.
+  let scanPending = false;
+  const scheduleScan = () => {
+    if (scanPending) return;
+    scanPending = true;
+    setTimeout(() => {
+      scanPending = false;
+      scanAndOpen();
+    }, 250);
+  };
+
+  const start = () => {
+    const obs = new MutationObserver(scheduleScan);
+    obs.observe(document.body, { childList: true, subtree: true });
+    scanAndOpen();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();

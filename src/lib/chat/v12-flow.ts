@@ -172,6 +172,17 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     return emitSocketEvent(`user:${user.id}`, envelope);
   };
 
+  // Paced-reasoning-reveal timer (driven inside the streaming flow, cleared
+  // on every exit path below): a live setInterval would keep the serverless
+  // function's event loop alive after the response ends.
+  let revealTimerHandle: ReturnType<typeof setInterval> | null = null;
+  const stopRevealTicker = () => {
+    if (revealTimerHandle !== null) {
+      clearInterval(revealTimerHandle);
+      revealTimerHandle = null;
+    }
+  };
+
   // ------------------------------------------------- 2. Chat bookkeeping (DB)
   let historyMap: Record<string, any> | null = null;
   if (isSavedChatId(chatId) && userMessageId && userMessage) {
@@ -1196,6 +1207,24 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       await emitNative(true);
     }
 
+    // Paced reveal driver: when the reasoning burst lands, re-emit it
+    // progressively (~1-1.5s) so the user watches the thinking text type out
+    // o1-style instead of a block that fills in a single frame. Incremental
+    // providers are unaffected — the reveal catches up with the buffer within
+    // a tick or two. The interval self-stops once the reveal is complete; the
+    // transport wrappers guarantee it is cleared on exit.
+    const startRevealTicker = () => {
+      if (revealTimerHandle !== null) return;
+      revealTimerHandle = setInterval(() => {
+        if (!nativeReasoning.revealPending) {
+          stopRevealTicker();
+          return;
+        }
+        nativeReasoning.advanceReveal();
+        emitNative(true).catch(() => {});
+      }, 90);
+    };
+
     // Incremental persistence (serverless hardening): hosts that hard-kill
     // functions at a max duration (Vercel 60s by default) never reach the
     // final persist below — the streamed answer the user just WATCHED for a
@@ -1261,6 +1290,13 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     const processReasoningDelta = async (reasoningDelta: string): Promise<void> => {
       const wasActive = nativeReasoning.active;
       nativeReasoning.pushReasoning(reasoningDelta);
+      // Burst detected (hidden text pending) → drive the paced reveal; the
+      // first slice is revealed immediately so the switch frame already
+      // shows text instead of an empty block.
+      if (nativeReasoning.revealPending) {
+        nativeReasoning.advanceReveal();
+        startRevealTicker();
+      }
       await emitNative(!wasActive); // first chunk → force the switch
     };
 
@@ -1269,6 +1305,9 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       if (nativeReasoning.active) {
         // Structured snapshots only (plain deltas would double-append).
         nativeReasoning.pushContent(delta);
+        // Safety: content pushes also advance the paced reveal — the reveal
+        // must never stall behind a starved timer (tab throttling, freeze).
+        if (nativeReasoning.revealPending) nativeReasoning.advanceReveal();
         await emitNative();
       } else {
         if (nativeReasoning.announced) {
@@ -1824,6 +1863,9 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
         } finally {
           closed = true;
           sseSink = null;
+          // A live reveal ticker would hold the serverless function's event
+          // loop open past the response end — always clear it here.
+          stopRevealTicker();
           try {
             controller.close();
           } catch {
@@ -1842,7 +1884,13 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     });
   }
 
-  return await runCompletionFlow();
+  // Native socket transport (self-hosted topology): same guarantee — the
+  // paced-reveal ticker must never outlive the completion flow.
+  try {
+    return await runCompletionFlow();
+  } finally {
+    stopRevealTicker();
+  }
 }
 
 // ---------------------------------------------------------------------------

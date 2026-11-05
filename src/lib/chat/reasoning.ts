@@ -303,6 +303,11 @@ export function parseCompleteOutput(content: string, startedAt = Date.now()): Ou
  */
 export class NativeReasoningAccumulator {
   private reasoningText = '';
+  /** Chars of the buffered chain-of-thought currently visible in snapshots
+   *  (paced reveal — the Kilo-style gateways deliver the whole reasoning in
+   *  ONE burst, so the emission is decoupled from the ingestion: see
+   *  advanceReveal()). */
+  private revealedChars = 0;
   private contentText = '';
   /** Request-send timestamp — anchors the reasoning phase (see announceThinking). */
   private requestStartedAt: number | null = null;
@@ -316,6 +321,18 @@ export class NativeReasoningAccumulator {
   get active(): boolean {
     return this.reasoningText.length > 0;
   }
+
+  /** True while buffered reasoning text is still hidden by the paced reveal. */
+  get revealPending(): boolean {
+    return this.revealedChars < this.reasoningText.length;
+  }
+
+  /** True when the reasoning channel opened BEFORE any content flowed (the
+   *  burst pattern) — the message item is then held back until the paced
+   *  reveal completes so the "Thinking…" header (shimmer) lives for the
+   *  whole replay instead of flipping to "Thought for 0 seconds" the
+   *  instant the concurrent content stream adds a second output item. */
+  private reasoningLedContent = false;
 
   /** True while the synthetic "Thinking…" placeholder is the only reasoning
    *  item on screen (announced, nothing real received yet). */
@@ -345,11 +362,40 @@ export class NativeReasoningAccumulator {
     this.thinkingAnnounced = false;
   }
 
+  /**
+   * Paced reveal step. Kilo-style gateways buffer the ENTIRE chain-of-thought
+   * server-side and deliver it in a single burst the instant the content
+   * starts (verified live: all reasoning chunks share the arrival timestamp
+   * of the first content chunk). Emitting the burst as-is produces an empty
+   * "Thinking…" block that fills and completes within a single frame — the
+   * user never sees the reasoning live. Instead the burst is re-emitted
+   * progressively (~16 ticks regardless of length ≈ 1.5s at a 90ms tick),
+   * giving the o1-style "watch it think" experience. Incremental providers
+   * are unaffected: their deltas are small, the reveal catches up with the
+   * buffer within a tick or two. Returns true while text remains hidden.
+   */
+  advanceReveal(): boolean {
+    const total = this.reasoningText.length;
+    if (this.revealedChars >= total) return false;
+    // ~24 steps of the buffer: with the ticker (90ms) plus content-push
+    // advancement both driving it, the replay spans roughly 1-1.5s — long
+    // enough to read as live typing, short enough to never feel like a delay.
+    const step = Math.max(8, Math.ceil(total / 24));
+    this.revealedChars = Math.min(total, this.revealedChars + step);
+    return this.revealedChars < total;
+  }
+
+  /** Reveal everything at once (final done event, persistence, non-streaming). */
+  flushReveal(): void {
+    this.revealedChars = this.reasoningText.length;
+  }
+
   pushReasoning(delta: string, now = Date.now()): void {
     if (!delta) return;
     // Backdate the phase start to the request send — the gateway was silent
     // because the model was thinking server-side all along.
     if (this.reasoningFirstAt === null) this.reasoningFirstAt = this.requestStartedAt ?? now;
+    if (!this.contentText) this.reasoningLedContent = true;
     this.reasoningText += delta;
     // content already flowing → reasoning re-opened after the message
     if (this.contentFirstAt !== null && this.reasoningEndedAt === null) {
@@ -369,13 +415,20 @@ export class NativeReasoningAccumulator {
     this.contentText += delta;
   }
 
-  /** Structured snapshot (full output array). */
+  /** Structured snapshot (full output array — reasoning text is the REVEALED
+   *  slice; the item stays in_progress (shimmer, "Thinking…" header) until
+   * the paced reveal completes, then flips to completed with its duration). */
   snapshot(now = Date.now(), allDone = false): OutputItem[] {
     if (!this.active && !this.contentText && !this.thinkingAnnounced) return [];
     const items: OutputItem[] = [];
     const startedMs = this.reasoningFirstAt ?? this.requestStartedAt ?? now;
-    const endedMs =
-      this.reasoningEndedAt ?? (allDone && this.reasoningFirstAt !== null ? now : undefined);
+    const revealDone = this.revealedChars >= this.reasoningText.length;
+    let endedMs: number | undefined;
+    if (revealDone && this.reasoningEndedAt !== null) {
+      endedMs = this.reasoningEndedAt;
+    } else if (allDone && this.reasoningFirstAt !== null) {
+      endedMs = this.reasoningEndedAt ?? now;
+    }
     if (this.reasoningText) {
       items.push({
         type: 'reasoning',
@@ -384,7 +437,7 @@ export class NativeReasoningAccumulator {
         start_tag: '<thinking>',
         end_tag: '</thinking>',
         attributes: { type: 'reasoning_content' },
-        content: [{ type: 'output_text', text: this.reasoningText }],
+        content: [{ type: 'output_text', text: this.reasoningText.slice(0, this.revealedChars) }],
         summary: null,
         started_at: startedMs / 1000,
         ...(endedMs !== undefined
@@ -407,7 +460,7 @@ export class NativeReasoningAccumulator {
         started_at: startedMs / 1000,
       });
     }
-    if (this.contentText) {
+    if (this.contentText && (revealDone || allDone || !this.reasoningLedContent)) {
       items.push({
         type: 'message',
         id: 'msg_native',
@@ -423,6 +476,8 @@ export class NativeReasoningAccumulator {
     if (!this.active) {
       return { usedStructured: false, output: null, content: this.contentText };
     }
+    // The final done event (and persistence) always carries the FULL text.
+    this.flushReveal();
     return { usedStructured: true, output: this.snapshot(now, true), content: this.contentText };
   }
 }
@@ -441,5 +496,6 @@ export function nativeReasoningOutputItems(
   const acc = new NativeReasoningAccumulator();
   acc.pushReasoning(reasoning, at);
   acc.pushContent(content, contentAt);
+  acc.flushReveal(); // non-streaming: the whole text is visible immediately
   return acc.snapshot(contentAt, true);
 }
