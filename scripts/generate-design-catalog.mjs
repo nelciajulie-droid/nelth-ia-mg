@@ -105,6 +105,42 @@ const KEYWORDS = {
 };
 
 // ---------------------------------------------------------------------------
+// Verified guardrails — hallucinated CDN import paths are the #1 killer of
+// generated single-file 3D pages (one 404 import = whole module script fails
+// silently = blank page). Verified against unpkg three@0.160.0 on 2025-11-05.
+// ---------------------------------------------------------------------------
+
+const THREE_GUARDRAIL = `CRITICAL — THREE.JS IMPORT DISCIPLINE (verified against the CDN):
+A single wrong import path in a module script makes the ENTIRE file fail SILENTLY — the user gets a blank page with no error. Apply these rules strictly:
+
+1. ONLY these addon paths exist (exact, case-sensitive — verified on unpkg three@0.160.0):
+   controls/: OrbitControls.js, PointerLockControls.js, TrackballControls.js, DragControls.js, TransformControls.js
+   loaders/: GLTFLoader.js, DRACOLoader.js, FontLoader.js, OBJLoader.js, STLLoader.js, FBXLoader.js
+   postprocessing/: EffectComposer.js, RenderPass.js, ShaderPass.js, UnrealBloomPass.js, SSAOPass.js, OutlinePass.js, AfterimagePass.js, BokehPass.js, BloomPass.js, FilmPass.js, GlitchPass.js, HalftonePass.js, SMAAPass.js, TAARenderPass.js
+   shaders/: RGBShiftShader.js, FXAAShader.js (use them THROUGH ShaderPass)
+   lines/: Line2.js, LineMaterial.js · utils/: BufferGeometryUtils.js · environments/: RoomEnvironment.js
+
+2. NEVER invent module names. These DO NOT EXIST: postprocessing/RGBShift.js, postprocessing/FXAAPass.js, postprocessing/GlutPass.js, postprocessing/GodRaysPass.js, interaction/PointerRaycaster.js. If an effect you want is not in the list above, implement it with ShaderPass + an existing shader, or with plain scene techniques (fog, emissive materials, sprites) instead.
+
+3. SELF-CHECK before finishing: re-read every line 'import ... from "three/addons/..."' in your output and confirm each path appears in the list in rule 1. If any does not, remove or replace it.
+
+4. Pin the import map exactly: "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/". NEVER use <script src="...three.min.js"> (removed since r150) and never a bare 'three' import without an import map.
+
+5. Degrade gracefully: the scene must render even if an optional effect fails — wrap purely decorative postprocessing setup in try/catch and fall back to renderer.render() directly.
+
+6. KEEP IT COMPACT — target under ~350 lines total. A modest scene that WORKS beats an ambitious one with a single broken line. Prefer plain scene techniques (fog, emissive materials, sprites, vertex colors, gradient backgrounds) over postprocessing chains; each pass you remove eliminates a failure surface and tokens spent on boilerplate instead of quality.`;
+
+/** Skills whose instructions must carry the three.js import guardrail. */
+const GUARDED_SKILLS = new Set([
+  'threejs-webgl',
+  'threejs-scene-setup',
+  'threejs-materials-lighting',
+  'threejs-gltf-loading',
+  'game-development',
+  'blender-web-pipeline',
+]);
+
+// ---------------------------------------------------------------------------
 // Description / name overrides (platform-oriented rewrites)
 // ---------------------------------------------------------------------------
 
@@ -165,7 +201,7 @@ function trimDescription(d) {
 const PLATFORM_NOTE =
   'NOTE — platform adaptation: this skill was authored for a file-based coding agent. The `references/` and `scripts/` files it mentions are unavailable here; the guidance in this document is self-sufficient, rely on it and on code the user shares. When it says to read or load another skill, emit USE_SKILL(name) only if that skill exists in the platform\'s index; otherwise adapt using the engine-neutral patterns below.';
 
-function capContent(body) {
+function capContent(body, guardrail) {
   let out = body.replace(/\r\n/g, '\n').trim();
   if (out.length > MAX_CONTENT_CHARS) {
     const cut = out.slice(0, MAX_CONTENT_CHARS);
@@ -173,7 +209,7 @@ function capContent(body) {
     out = (nl > MAX_CONTENT_CHARS / 2 ? cut.slice(0, nl) : cut).trimEnd() +
       '\n\n[--- skill instructions truncated for length ---]';
   }
-  return `${PLATFORM_NOTE}\n\n${out}`;
+  return `${PLATFORM_NOTE}\n\n${guardrail ? THREE_GUARDRAIL + '\n\n' : ''}${out}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +232,7 @@ function addSkill(id, path, fallbackLabel) {
     name: finalId,
     label,
     description: trimDescription(desc),
-    content: capContent(body),
+    content: capContent(body, GUARDED_SKILLS.has(id) || GUARDED_SKILLS.has(finalId)),
     keywords: KEYWORDS[id] || KEYWORDS[finalId] || [],
   });
   console.log(`- ${finalId} (${Math.round(raw.length / 1024)}K → content ${entries[entries.length - 1].content.length} chars, ${entries[entries.length - 1].keywords.length} keywords)`);
