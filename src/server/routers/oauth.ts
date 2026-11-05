@@ -314,6 +314,7 @@ function firebaseBridgePage(): Response {
   button { width:100%; padding:11px 16px; border-radius:10px; border:1px solid #d8d8dc; background:#fff;
            font-size:14px; cursor:pointer; color:#18181b; }
   button.primary { background:#10b981; color:#fff; border-color:#10b981; font-weight:600; }
+  button.resume { margin-top:10px; }
   button:hover { filter:brightness(.97); }
   .links { margin-top:14px; font-size:13px; }
   a { color:#0d9488; text-decoration:none; }
@@ -332,6 +333,7 @@ function firebaseBridgePage(): Response {
   <p class="status" id="status">Préparation de la connexion…</p>
   <div class="err" id="err" role="alert"></div>
   <button class="primary" id="go" type="button">Continuer avec Google</button>
+  <button class="resume" id="resume" type="button" style="display:none"></button>
   <div class="links"><a href="/auth">← Revenir à la connexion</a></div>
 </main>
 <script type="application/json" id="fb-config">${configJson}</script>
@@ -339,6 +341,7 @@ function firebaseBridgePage(): Response {
 const cfg = JSON.parse(document.getElementById('fb-config').textContent);
 const el = (id) => document.getElementById(id);
 let fbAuth = null;
+let finishing = false;
 
 async function init() {
   const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js');
@@ -348,17 +351,25 @@ async function init() {
   return auth;
 }
 
-async function finish(cred) {
+async function finish(user) {
+  if (finishing) return;
+  finishing = true;
+  el('spin').style.display = '';
   el('status').textContent = 'Vérification de votre identité…';
-  const idToken = await cred.user.getIdToken();
-  const res = await fetch('/oauth/google/firebase-token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ idToken }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || 'La connexion a échoué.');
-  window.location.href = data.pending ? '/auth?pending=1' : '/auth';
+  try {
+    const idToken = await user.getIdToken();
+    const res = await fetch('/oauth/google/firebase-token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || 'La connexion a échoué.');
+    window.location.href = data.pending ? '/auth?pending=1' : '/auth';
+  } catch (e) {
+    finishing = false;
+    fail((e && e.message) || 'La connexion a échoué.');
+  }
 }
 
 function fail(message) {
@@ -376,26 +387,35 @@ function messageFor(e) {
     return 'Le fournisseur Google n\u2019est pas activé dans la console Firebase (Authentication \u2192 Sign-in method \u2192 Google).';
   if (code === 'auth/popup-blocked')
     return 'Le navigateur a bloqué la fenêtre Google. Autorisez les popups pour ce site puis cliquez sur « Continuer avec Google ».';
+  if (code === 'auth/network-request-failed')
+    return 'Réseau indisponible — vérifiez votre connexion puis réessayez.';
   return (e && e.message ? e.message : 'Erreur inconnue.');
 }
 
-async function run(silent) {
+function ready(statusText) {
+  el('spin').style.display = 'none';
+  el('status').textContent = statusText || 'Cliquez sur « Continuer avec Google ».';
+}
+
+// Button click (real user gesture): popup first, full-page redirect fallback
+// for browsers that block popups (mobile / in-app browsers). The redirect flow
+// returns to this exact URL and is consumed by getRedirectResult() on load —
+// NEVER auto-started, only from this click handler.
+async function start() {
+  if (finishing) return;
   try {
     el('err').style.display = 'none';
     el('spin').style.display = '';
     el('status').textContent = 'Ouverture de la fenêtre Google…';
-    const auth = fbAuth ? null : await init();
-    const { GoogleAuthProvider, signInWithPopup, signInWithRedirect } = fbAuth
-      ? await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js')
-      : auth;
+    const { GoogleAuthProvider, signInWithPopup, signInWithRedirect } =
+      await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
     const provider = new GoogleAuthProvider();
     try {
       const cred = await signInWithPopup(fbAuth, provider);
-      await finish(cred);
+      await finish(cred.user);
     } catch (e) {
       if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment')) {
-        // Mobile / popup-blocked fallback: full-page redirect flow. The browser
-        // comes back to this URL and getRedirectResult() below picks it up.
+        el('status').textContent = 'Redirection vers Google…';
         await signInWithRedirect(fbAuth, provider);
         return;
       }
@@ -403,32 +423,48 @@ async function run(silent) {
     }
   } catch (e) {
     if (e && (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request')) {
-      el('spin').style.display = 'none';
-      el('status').textContent = 'Fenêtre fermée — cliquez pour recommencer.';
-      return;
-    }
-    if (silent) {
-      el('spin').style.display = 'none';
-      el('status').textContent = 'Cliquez sur « Continuer avec Google ».';
+      ready('Fenêtre fermée — cliquez pour recommencer.');
       return;
     }
     fail(messageFor(e));
   }
 }
 
-document.getElementById('go').addEventListener('click', () => run(false));
+// One-click resume when Firebase still has the Google session client-side
+// (localStorage persistence) — no Google round-trip needed at all.
+async function resume() {
+  if (fbAuth && fbAuth.currentUser) await finish(fbAuth.currentUser);
+}
+
+document.getElementById('go').addEventListener('click', start);
+document.getElementById('resume').addEventListener('click', resume);
 
 (async () => {
   try {
-    const auth = await init();
-    // Resume the redirect flow (mobile): returning from accounts.google.com.
-    const { getRedirectResult } = auth;
-    getRedirectResult(fbAuth)
-      .then((cred) => { if (cred && cred.user) return finish(cred); })
-      .catch(() => undefined);
-    // Desktop: attempt the popup right away (the click on /auth counts as the
-    // user gesture); on popup-blocked we silently fall back to the button.
-    await run(true);
+    const { getRedirectResult } = await init();
+    // Returning from accounts.google.com (signInWithRedirect fallback):
+    // consume the redirect result FIRST and exclusively — nothing else may
+    // start a new sign-in here, otherwise the user is bounced back to the
+    // Google account chooser in an infinite loop (auto popup without a user
+    // gesture is blocked → signInWithRedirect → chooser → return → …).
+    try {
+      const cred = await getRedirectResult(fbAuth);
+      if (cred && cred.user) {
+        await finish(cred.user);
+        return;
+      }
+    } catch (e) {
+      if (e && e.code && !String(e.code).includes('cancelled')) fail(messageFor(e));
+    }
+    // Session Google encore active côté client ? Reprendre en un clic.
+    const current = fbAuth.currentUser;
+    if (current) {
+      const label = current.displayName || current.email || 'votre compte Google';
+      el('resume').textContent = 'Continuer en tant que ' + label;
+      el('resume').style.display = '';
+      el('go').textContent = 'Choisir un autre compte Google';
+    }
+    ready();
   } catch (e) {
     fail(messageFor(e));
   }
