@@ -24,6 +24,7 @@
  * Nothing is persisted — the injection lives only in this turn's request.
  */
 import { SKILL_CATALOG } from './catalog';
+import { DESIGN_SKILL_CATALOG } from './design-catalog';
 import { LIBRARY_SKILLS } from './library';
 import { configGet } from '@/lib/config';
 
@@ -48,6 +49,12 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
   [/\bxlsx\b|\.xlsx\b|fichier\s+excel|\bexcel\b|feuilles?\s+de\s+calcul|spreadsheet/i, 'xlsx'],
   [/\bpptx?\b|\.pptx?\b|power\s*point|diapositives?\b/i, 'pptx'],
   [/\bposters?\b|affiches?\b/i, 'canvas-design'],
+  // 3D / animation / game engines — specific first, umbrella last.
+  [/\bphaser\b/i, 'phaser-core'],
+  [/\bgsap\b|greensock|scroll\s*trigger/i, 'gsap-scrolltrigger'],
+  [/framer\s*motion/i, 'motion-framer'],
+  [/\bthree\.?js\b|\bwebgl\b|\bwebgpu\b|\bbabylon(?:\.?js)?\b|\b3d\b|rendu\s+3d|sc[èe]ne\s+3d|monde\s+3d|objet\s+3d|mod[èe]le\s+3d|jeu\s+3d/i, 'threejs-webgl'],
+  [/\bjeu(?:x)?\b|\bgames?\b|gameplay|game\s*design|game\s*jam/i, 'game-development'],
   [
     /landing\s*pages?|pages?\s+web|sites?\s+web|sites?\s+vitrines?|front[ -]?end|web\s*design|ui\s*design|design\s+(?:tr[èe]s\s+|ultra\s+)?(?:moderne|modern\w*)|moderne\s+(?:web|site|page|interface)|modernis(?:er|e[rs]?)|redesign\w*|interface\s+(?:de\s+)?(?:utilisateur|web)|am[ée]lior\w*\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|look)|am[ée]lior\w*.{0,80}\b(?:design|ui\b|apparence|interface)|(?:refaire|relooker|moderniser)\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|site|page|app)|rend\w*.{0,40}\b(?:design|ui\b|apparence|interface)|design\s+(?:de|du)\s?(?:mon|ma|mes|l['’]?|le|la|ce(?:tte)?|notre|votre)\s?(?:application|app|site|page|web|interface|profil|portfolio|jeu)/i,
     'frontend-design',
@@ -89,6 +96,13 @@ const CANDIDATES: Candidate[] = [
     description: s.description,
     content: s.content,
     keywords: [] as string[],
+  })),
+  ...DESIGN_SKILL_CATALOG.map((s) => ({
+    name: s.name,
+    label: s.label,
+    description: s.description,
+    content: s.content,
+    keywords: (s.keywords ?? []) as string[],
   })),
   ...LIBRARY_SKILLS.map((s) => ({
     name: s.name,

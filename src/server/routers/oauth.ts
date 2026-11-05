@@ -289,10 +289,18 @@ function jsonWithCookies(data: unknown, cookies: string[], status = 200): Respon
  * GOOGLE_CLIENT_SECRET are absent but FIREBASE_API_KEY is configured.
  *
  * Instead of the classic OAuth2 code flow (which needs a Web client ID +
- * secret from the Google Cloud Console), the page runs Firebase's official
- * popup flow (signInWithPopup → Google-signed ID token) and posts the token
- * to POST /oauth/google/firebase-token, which verifies it against the
- * Identity Toolkit and issues the exact same session as the OAuth callback.
+ * secret from the Google Cloud Console), this page runs Firebase's Google
+ * flow and posts the resulting Google-signed ID token to
+ * POST /oauth/google/firebase-token, which verifies it against the Identity
+ * Toolkit and issues the exact same session as the OAuth callback.
+ *
+ * UX — UN SEUL CLIC de bout en bout (comme un vrai endpoint OAuth) : au
+ * chargement la page consomme d'abord le résultat d'un éventuel retour de
+ * redirection, finit silencieusement si une session Google client existe,
+ * et sinon redirige DIRECTEMENT vers accounts.google.com en pleine page
+ * (signInWithRedirect n'exige aucun geste utilisateur, seuls les popups en
+ * exigent un). L'UI manuelle n'apparaît qu'en cas d'erreur ou de garde
+ * anti-boucle déclenchée — jamais dans le flux nominal.
  *
  * Requirements — both already true for this deployment:
  *   • FIREBASE_API_KEY set (server verifies the ID token);
@@ -363,6 +371,7 @@ function firebaseBridgePage(): Response {
 <script type="module">
 const cfg = JSON.parse(document.getElementById('fb-config').textContent);
 const el = (id) => document.getElementById(id);
+const FB_AUTO_KEY = 'nelthFbAutoRedirectAt';
 let fbAuth = null;
 let finishing = false;
 
@@ -420,10 +429,10 @@ function ready(statusText) {
   el('status').textContent = statusText || 'Cliquez sur « Continuer avec Google ».';
 }
 
-// Button click (real user gesture): popup first, full-page redirect fallback
-// for browsers that block popups (mobile / in-app browsers). The redirect flow
-// returns to this exact URL and is consumed by getRedirectResult() on load —
-// NEVER auto-started, only from this click handler.
+// Button click (real user gesture, UI manuelle de secours) : popup d'abord,
+// redirection pleine page en repli pour les navigateurs qui bloquent les
+// popups. Le sélecteur de compte Google est forcé ici — c'est le chemin
+// « changer de compte » quand une session client existe déjà.
 async function start() {
   if (finishing) return;
   try {
@@ -433,6 +442,7 @@ async function start() {
     const { GoogleAuthProvider, signInWithPopup, signInWithRedirect } =
       await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
     const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
     try {
       const cred = await signInWithPopup(fbAuth, provider);
       await finish(cred.user);
@@ -464,46 +474,65 @@ document.getElementById('resume').addEventListener('click', resume);
 
 (async () => {
   try {
-    // Paramètres de repli depuis l'intercepteur un-clic (google-bridge.js) :
-    //   ?auto=1 → le popup était bloqué : enchaîner immédiatement en
-    //             redirection pleine page (aucun geste requis pour ça) ;
-    //   ?err=<msg> → erreur du popup côté /auth : l'afficher.
+    // Paramètre de repli depuis l'intercepteur un-clic (google-bridge.js) :
+    //   ?err=<msg> → erreur du popup côté /auth : l'afficher et ne rien
+    //   démarrer automatiquement. (?auto=1 est désormais superflu : toute
+    //   visite fraîche de la page enchaîne automatiquement en redirection.)
     const params = new URLSearchParams(window.location.search);
-    const auto = params.get('auto') === '1';
     const errParam = params.get('err');
     if (errParam) fail(errParam);
 
     const { getRedirectResult } = await init();
-    // Returning from accounts.google.com (signInWithRedirect fallback):
-    // consume the redirect result FIRST and exclusively — nothing else may
-    // start a new sign-in here, otherwise the user is bounced back to the
-    // Google account chooser in an infinite loop (auto popup without a user
-    // gesture is blocked → signInWithRedirect → chooser → return → …).
+
+    // 1. Retour de accounts.google.com (signInWithRedirect) : consommer le
+    //    résultat D'ABORD et exclusivement — rien d'autre ne doit démarrer
+    //    une nouvelle connexion ici, sinon l'utilisateur rebondit vers le
+    //    account chooser dans une boucle infinie.
     try {
       const cred = await getRedirectResult(fbAuth);
       if (cred && cred.user) {
+        sessionStorage.removeItem(FB_AUTO_KEY);
         await finish(cred.user);
         return;
       }
     } catch (e) {
       if (e && e.code && !String(e.code).includes('cancelled')) fail(messageFor(e));
     }
-    if (auto) {
+
+    // 2. Session Google encore active côté client (persistance Firebase
+    //    locale) → finition SILENCIEUSE : le clic « Continue with Google »
+    //    de /auth reste un seul clic, sans même repasser par Google.
+    const current = fbAuth.currentUser;
+    if (current && !errParam) {
+      await finish(current);
+      return;
+    }
+
+    // 3. Visite fraîche (le clic vient de /auth, l'intercepteur popup n'a pas
+    //    abouti) → redirection pleine page DIRECTE vers Google. Aucun geste
+    //    requis pour signInWithRedirect, donc zéro page intermédiaire.
+    //    Garde anti-boucle : pas de nouvelle auto-redirection si la précédente
+    //    date de moins de 60 s (retour sans résultat ≠ recommencer en boucle).
+    const last = Number(sessionStorage.getItem(FB_AUTO_KEY) || 0);
+    const recent = last > 0 && Date.now() - last < 60000;
+    if (!errParam && !recent) {
+      sessionStorage.setItem(FB_AUTO_KEY, String(Date.now()));
       el('status').textContent = 'Redirection vers Google…';
       const { GoogleAuthProvider, signInWithRedirect } =
         await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
       await signInWithRedirect(fbAuth, new GoogleAuthProvider());
       return;
     }
-    // Session Google encore active côté client ? Reprendre en un clic.
-    const current = fbAuth.currentUser;
+
+    // 4. Garde anti-boucle déclenchée ou erreur affichée → UI manuelle
+    //    (popup au clic, sélecteur de compte forcé).
     if (current) {
       const label = current.displayName || current.email || 'votre compte Google';
       el('resume').textContent = 'Continuer en tant que ' + label;
       el('resume').style.display = '';
       el('go').textContent = 'Choisir un autre compte Google';
     }
-    ready();
+    ready(recent ? 'Connexion interrompue — cliquez pour recommencer.' : undefined);
   } catch (e) {
     fail(messageFor(e));
   }

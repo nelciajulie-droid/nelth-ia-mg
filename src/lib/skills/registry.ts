@@ -15,6 +15,7 @@
  * installed, but only the one the task needs is ever loaded into context.
  */
 import { SKILL_CATALOG, SKILL_CATALOG_BY_NAME, type CatalogSkill } from './catalog';
+import { DESIGN_SKILL_CATALOG, DESIGN_SKILL_BY_NAME } from './design-catalog';
 import { LIBRARY_SKILLS } from './library';
 import { configGet } from '@/lib/config';
 
@@ -81,7 +82,7 @@ export async function getSkillManifestPrompt(
   userText?: string,
   preSelectedNames: string[] = []
 ): Promise<string | null> {
-  if (!SKILL_CATALOG.length && !LIBRARY_SKILLS.length) return null;
+  if (!SKILL_CATALOG.length && !LIBRARY_SKILLS.length && !DESIGN_SKILL_CATALOG.length) return null;
   if (!(await skillsEnabled())) return null;
   const maxChars = await skillMaxChars();
   if (
@@ -96,6 +97,7 @@ export async function getSkillManifestPrompt(
   const catalogNames = new Set(SKILL_CATALOG.map((s) => s.name));
   const lines = [
     ...SKILL_CATALOG.map((s) => `- ${s.name}: ${s.description}`),
+    ...DESIGN_SKILL_CATALOG.filter((s) => !catalogNames.has(s.name)).map((s) => `- ${s.name}: ${s.description}`),
     ...LIBRARY_SKILLS.filter((s) => !catalogNames.has(s.name)).map((s) => `- ${s.name}: ${s.description}`),
   ].join('\n');
   const hint = userText ? hintSkillForUserMessage(userText) : null;
@@ -120,6 +122,9 @@ When to use a skill (examples):
 - "rédige des guidelines de marque / une communication interne" → brand-guidelines / internal-comms / doc-coauthoring
 - "clone ce site / construis un artifact HTML interactif / un serveur MCP / une API Claude" → website-clone / web-artifacts-builder / mcp-builder / claude-api
 - "teste mon webapp" → webapp-testing
+- "crée une scène 3D / un objet 3D / du WebGL" → threejs-webgl (react-three-fiber si React)
+- "fais-moi un jeu / un jeu de cartes / un platformer / un jeu Phaser" → game-development + le skill du genre/engine
+- "une animation GSAP / au scroll / Framer Motion / fond animé" → gsap-scrolltrigger / motion-framer / lightweight-3d-effects
 
 Available skills:
 ${lines}${hintBlock}${loadedBlock}`;
@@ -129,17 +134,26 @@ ${lines}${hintBlock}${loadedBlock}`;
 }
 
 export function skillNames(): Set<string> {
-  return new Set([...SKILL_CATALOG.map((s) => s.name), ...LIBRARY_SKILLS.map((s) => s.name)]);
+  return new Set([
+    ...SKILL_CATALOG.map((s) => s.name),
+    ...DESIGN_SKILL_CATALOG.map((s) => s.name),
+    ...LIBRARY_SKILLS.map((s) => s.name),
+  ]);
 }
 
 const LIBRARY_BY_NAME = new Map(LIBRARY_SKILLS.map((s) => [s.name, s]));
 
-/** Resolve a skill by name across BOTH the Anthropic catalog and the
- *  platform library (the USE_SKILL fallback must work for either). */
+/** Resolve a skill by name across the Anthropic catalog, the design/game
+ *  catalog, and the platform library (the USE_SKILL fallback must work for
+ *  any of them). */
 export function getSkillByName(name: string): CatalogSkill | null {
   const id = String(name || '').toLowerCase().trim();
   const cat = SKILL_CATALOG_BY_NAME[id];
   if (cat) return cat;
+  const design = DESIGN_SKILL_BY_NAME[id];
+  if (design) {
+    return { name: design.name, label: design.label, description: design.description, content: design.content };
+  }
   const lib = LIBRARY_BY_NAME.get(id);
   if (lib) {
     return { name: lib.name, label: lib.name, description: lib.description, content: lib.body };
