@@ -253,6 +253,11 @@ export default function Home() {
   const streamingRef = React.useRef(false);
   const abortRef = React.useRef<AbortController | null>(null);
 
+  // ---- imagine tool ----
+  // Image generation is a TOOL toggled per message (features.image_generation
+  // on the request) — deliberately NOT a model in the picker.
+  const [imageTool, setImageTool] = React.useState(false);
+
   // -------------------------------------------------------------------------
   // Chat lifecycle
   // -------------------------------------------------------------------------
@@ -396,6 +401,9 @@ export default function Home() {
             files: userMessage.files,
           },
           background_tasks: { title_generation: true },
+          // Imagine tool toggle — routes this turn through the Nelthai image
+          // engine (text→image, or image→image with image attachments).
+          ...(imageTool ? { features: { image_generation: true } } : {}),
         },
         {
           onDelta: (delta) => {
@@ -584,6 +592,8 @@ export default function Home() {
                 onModelChange={setModel}
                 onRefreshModels={() => void refreshModels()}
                 streaming={streaming}
+                imageTool={imageTool}
+                onImageToolChange={setImageTool}
                 onSend={(text, files) => void sendMessage(text, files)}
               />
             </div>

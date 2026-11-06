@@ -7,7 +7,7 @@
  */
 
 import * as React from "react";
-import { FileText, Loader2, Paperclip, Send, X } from "lucide-react";
+import { FileText, Image as ImageIcon, Loader2, Paperclip, Send, X } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { uploadFile, ApiError } from "@/lib/api-client";
 import type { AttachedFile, ModelItem } from "@/lib/types";
@@ -17,12 +17,25 @@ import { ModelPicker } from "@/components/app/ModelPicker";
 
 const MAX_TEXTAREA_HEIGHT = 200;
 
+const IMAGE_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif";
+const DOC_ACCEPT = ".txt,.md,.csv,.json,.pdf,.docx,.pptx,.xlsx,.html,.xml,.epub,.rst";
+
+/** Chat attachments: documents feed the RAG pipeline, images join the
+ * image-to-image generation when the imagine tool is on. */
+const ACCEPT_LIST = `${DOC_ACCEPT},${IMAGE_ACCEPT}`;
+
+function isImageName(name: string): boolean {
+  return /\.(png|jpe?g|webp|gif)$/i.test(name);
+}
+
 export function ChatInput({
   models,
   model,
   onModelChange,
   onRefreshModels,
   streaming,
+  imageTool,
+  onImageToolChange,
   onSend,
 }: {
   models: ModelItem[];
@@ -30,6 +43,9 @@ export function ChatInput({
   onModelChange: (modelId: string) => void;
   onRefreshModels?: () => void;
   streaming: boolean;
+  /** Imagine tool toggle — generates an image from this message (tool, not a model). */
+  imageTool: boolean;
+  onImageToolChange: (enabled: boolean) => void;
   onSend: (text: string, files: AttachedFile[]) => void;
 }) {
   const { toast } = useToast();
@@ -112,7 +128,11 @@ export function ChatInput({
               key={file.id}
               className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 py-1 pl-2.5 pr-1.5 text-xs text-emerald-900"
             >
-              <FileText className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
+              {isImageName(file.name) ? (
+                <ImageIcon className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
+              ) : (
+                <FileText className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
+              )}
               <span className="max-w-[160px] truncate font-medium">{file.name}</span>
               {file.uploading ? (
                 <Loader2 className="size-3.5 shrink-0 animate-spin text-emerald-500" aria-hidden />
@@ -148,8 +168,31 @@ export function ChatInput({
           multiple
           hidden
           onChange={(event) => void attachFiles(event.target.files)}
-          accept=".txt,.md,.csv,.json,.pdf,.docx,.pptx,.xlsx,.html,.xml,.epub,.rst"
+          accept={ACCEPT_LIST}
         />
+
+        {/* Imagine tool — image generation toggle (a TOOL, deliberately NOT a
+            model in the picker). With image attachments it runs image→image. */}
+        <button
+          type="button"
+          onClick={() => onImageToolChange(!imageTool)}
+          disabled={streaming}
+          aria-pressed={imageTool}
+          aria-label={imageTool ? "Disable image generation" : "Enable image generation"}
+          title={
+            imageTool
+              ? "Image generation ON — this message generates an image"
+              : "Generate an image from this message (image generation tool)"
+          }
+          className={
+            "flex size-9 shrink-0 items-center justify-center rounded-xl transition-colors disabled:pointer-events-none disabled:opacity-40 " +
+            (imageTool
+              ? "bg-emerald-100 text-emerald-600 hover:bg-emerald-200"
+              : "text-zinc-400 hover:bg-zinc-100 hover:text-emerald-600")
+          }
+        >
+          <ImageIcon className="size-4.5" aria-hidden />
+        </button>
 
         <label htmlFor="chat-textarea" className="sr-only">
           Message
@@ -159,7 +202,13 @@ export function ChatInput({
           id="chat-textarea"
           rows={1}
           value={text}
-          placeholder={streaming ? "Generating response…" : "Send a message… (Enter to send, Shift+Enter for a new line)"}
+          placeholder={
+            streaming
+              ? "Generating response…"
+              : imageTool
+                ? "Describe the image to generate… (Enter to send)"
+                : "Send a message… (Enter to send, Shift+Enter for a new line)"
+          }
           disabled={streaming}
           onKeyDown={handleKeyDown}
           onChange={(event) => setText(event.target.value)}
@@ -189,9 +238,15 @@ export function ChatInput({
           onRefresh={onRefreshModels}
           disabled={streaming}
         />
-        <p className="hidden text-[11px] text-zinc-400 sm:block">
-          Attached files are used as retrieval (RAG) context
-        </p>
+        {imageTool ? (
+          <p className="hidden text-[11px] text-emerald-600 sm:block">
+            Imagine tool active — the message generates an image
+          </p>
+        ) : (
+          <p className="hidden text-[11px] text-zinc-400 sm:block">
+            Attached files are used as retrieval (RAG) context
+          </p>
+        )}
       </div>
     </div>
   );

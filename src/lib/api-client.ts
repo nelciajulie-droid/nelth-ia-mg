@@ -169,6 +169,8 @@ export interface StreamChatOptions {
   };
   /** Server-side background tasks (title generation, …). */
   background_tasks?: Record<string, unknown>;
+  /** Feature toggles for this turn (image_generation, web_search, …). */
+  features?: Record<string, boolean>;
 }
 
 /**
@@ -216,6 +218,7 @@ export async function streamChatCompletion(
       ...(options.id ? { id: options.id } : {}),
       ...(options.user_message ? { user_message: options.user_message } : {}),
       ...(options.background_tasks ? { background_tasks: options.background_tasks } : {}),
+      ...(options.features ? { features: options.features } : {}),
       // UI event transport: the whole socket event flow (status, files,
       // deltas, titles) is serialized into this SSE response.
       session_id: crypto.randomUUID(),

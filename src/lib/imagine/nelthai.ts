@@ -67,7 +67,10 @@ export function normalizePhase(raw: string | null | undefined): NelthaiPhase | n
     case 'finalizing':
       return 'image';
     default:
-      return null;
+      // Observed live: the job flips to phase 'text' (with image_urls already
+      // attached in progress) right before status 'done' — that is the
+      // images-are-ready moment, i.e. the card's "Finalizing" label.
+      return raw === 'text' ? 'image' : null;
   }
 }
 
@@ -217,6 +220,17 @@ export async function waitForNelthaiImages(
       if (phase && phase !== lastPhase) {
         lastPhase = phase;
         options.onPhase?.(phase);
+      }
+
+      // Early resolve — observed live: the job flips to phase 'text' with the
+      // final image_urls already attached to progress a beat BEFORE status
+      // becomes 'done'. The URLs are complete and downloadable at that point:
+      // return them immediately instead of burning another poll cycle.
+      if (
+        phase === 'image' &&
+        (job.progress?.image_urls ?? []).some((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
+      ) {
+        return imageUrlsOf(job);
       }
 
       if (job.status === 'done' || job.status === 'completed' || job.status === 'succeeded') {
