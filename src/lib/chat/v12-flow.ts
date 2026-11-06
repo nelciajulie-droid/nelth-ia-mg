@@ -119,6 +119,38 @@ type ModelRoute = {
   apiKey: string;
 };
 
+/**
+ * Internal-analysis narration detector. The dots-3 "note" model sometimes
+ * opens its answer with its deliberation process — English meta-narration on
+ * ambiguous search-augmented questions: "The user is asking…", "Looking at
+ * the sources…", "Source 1 shows…", "Cette question est ambiguë…". The stream
+ * holds such a prefix back and a repair call rewrites it into the direct
+ * final answer. High-confidence markers only: a missed detection merely
+ * keeps the cosmetic narration, a false positive still gets repaired into a
+ * clean answer.
+ */
+const NARRATION_START_RE = new RegExp(
+  '^(?:' +
+    [
+      "the\\s+user(?:'?s|\\s+is|\\s+was|\\s+has)?\\s*(?:is\\s+)?(?:asking|wants|needs|question|message|wrote|said)",
+      'looking\\s+at\\s+(?:the|these|my|your)\\s+(?:sources?|results?|context|search)',
+      'analy(?:zing|sons|sons\\s+les)\\b',
+      'based\\s+on\\s+(?:the|these)\\s+(?:sources?|results?|search)',
+      'sources?\\s*\\d',
+      "l'utilisateur\\s+(?:demande|pose|veut|a\\s+demandé|interroge)",
+      'la\\s+question\\s+(?:demande|est\\s+de|porte\\s+sur|demandait)',
+      'en\\s+(?:regardant|analysant)\\s+(?:les|ces)\\s+(?:sources?|résultats)',
+      'je\\s+(?:vois|lis)\\s+(?:que\\s+)?(?:les|ces)\\s+(?:sources?|résultats)',
+      'i\\s+(?:see|note|can\\s+see)\\s+(?:that\\s+)?(?:the|these|sources?|multiple|several)',
+      'the\\s+(?:search|web)\\s+(?:results?|sources?)\\s+(?:show|are|mention|indicate)',
+      'this\\s+(?:question|query)\\s+is\\s+(?:ambiguous|asking)',
+      'cette\\s+question\\s+(?:est\\s+ambiguë|peut\\s+signifier|demandait)',
+      'il\\s+y\\s+a\\s+(?:deux|plusieurs)\\s+(?:façons|interprétations|sens\\s+possibles)',
+    ].join('|') +
+    ')',
+  'i'
+);
+
 export async function handleChatCompletionV12(user: ApiUser, form: any): Promise<Response> {
   const json = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data === null ? 'null' : data === undefined ? 'null' : data), {
@@ -991,6 +1023,29 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           signal,
         });
 
+  /**
+   * Narration repair (flow scope): one corrective call converting the model's
+   * held-back internal analysis into the direct final answer. The full
+   * llmMessages context rides along (web sources included) so [N] citation
+   * markers stay meaningful in the rewritten answer.
+   */
+  const repairNarration = async (narrationText: string): Promise<string> => {
+    const messages = [
+      ...llmMessages,
+      { role: 'assistant', content: narrationText.slice(0, 8000) },
+      {
+        role: 'user',
+        content:
+          'These were your internal analysis notes, not an answer. Write now the FINAL ANSWER to my original question: direct and concise, in MY language. Keep the [N] citation markers where a source supports a claim. Never mention "the user", the sources, your reading process, or these notes — just answer me directly.',
+      },
+    ];
+    const res = await callUpstream({ ...reqBody, messages, stream: false, max_tokens: 800 });
+    if (!res.ok) throw new Error(`repair upstream ${res.status}`);
+    const data = await res.json().catch(() => null);
+    const repaired: string = data?.choices?.[0]?.message?.content ?? '';
+    return repaired.trim();
+  };
+
   let upstream: Response;
   /** Request-send timestamp — anchors the thinking duration (Kilo-style
    *  gateways buffer the whole chain-of-thought server-side; without this
@@ -1264,6 +1319,22 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       content = stripSkillMarkers(content);
     }
 
+    // Narration repair (non-streaming API clients): same dots-3 "note"
+    // behavior — the model answered with its internal analysis. Detect +
+    // rewrite into the direct final answer.
+    if (NARRATION_START_RE.test(content.trimStart())) {
+      try {
+        const repaired = await repairNarration(content);
+        if (repaired) {
+          console.log('[v12-flow] narration repaired (non-streaming) —', repaired.length, 'chars');
+          content = repaired;
+          if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
+        }
+      } catch (e) {
+        console.error('[v12-flow] narration repair failed (non-streaming)', e);
+      }
+    }
+
     // Reasoning tags → structured output items (frontend collapsible block).
     let reasoningOutput = parseCompleteOutput(content);
     if (reasoningOutput.length) {
@@ -1471,6 +1542,30 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       await emitNative(!wasActive); // first chunk → force the switch
     };
 
+    // Narration hold-back (dots-3 "note" behavior): on ambiguous
+    // search-augmented questions the model opens with its internal analysis
+    // ("The user is asking… Looking at the sources…"). Hold the first ~60
+    // chars until narration vs answer is decidable: narration is fully held
+    // back (the UI shows no text meanwhile) and rewritten by the repair call
+    // at stream end; a clean answer is released untouched.
+    let narrationBuf = '';
+    let narrationMode: 'buffering' | 'suppressing' | 'passthrough' = 'buffering';
+    const narrationPush = (delta: string): string => {
+      if (narrationMode === 'passthrough') return delta;
+      narrationBuf += delta;
+      const lead = narrationBuf.trimStart();
+      if (narrationMode === 'buffering' && lead.length >= 60) {
+        if (NARRATION_START_RE.test(lead)) {
+          narrationMode = 'suppressing';
+          console.log('[v12-flow] narration prefix detected — holding content until the repair pass');
+        } else {
+          narrationMode = 'passthrough';
+          return narrationBuf;
+        }
+      }
+      return '';
+    };
+
     const processContentDelta = async (delta: string): Promise<void> => {
       aggregate += delta;
       if (nativeReasoning.active) {
@@ -1501,14 +1596,17 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
             await emitStructured();
           }
         } else if (r.plainDelta) {
-          await emit({
-            type: 'chat:completion',
-            data: {
-              id: completionId,
-              done: false,
-              choices: [{ index: 0, delta: { content: r.plainDelta } }],
-            },
-          });
+          const visible = narrationPush(r.plainDelta);
+          if (visible) {
+            await emit({
+              type: 'chat:completion',
+              data: {
+                id: completionId,
+                done: false,
+                choices: [{ index: 0, delta: { content: visible } }],
+              },
+            });
+          }
         }
       }
     };
@@ -1575,14 +1673,17 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
               await emitStructured();
             }
           } else if (r.plainDelta) {
-            await emit({
-              type: 'chat:completion',
-              data: {
-                id: completionId,
-                done: false,
-                choices: [{ index: 0, delta: { content: r.plainDelta } }],
-              },
-            });
+            const visible = narrationPush(r.plainDelta);
+            if (visible) {
+              await emit({
+                type: 'chat:completion',
+                data: {
+                  id: completionId,
+                  done: false,
+                  choices: [{ index: 0, delta: { content: visible } }],
+                },
+              });
+            }
           }
         }
       }
@@ -1737,6 +1838,26 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     if (finalContent.includes('USE_SKILL')) {
       const { stripSkillMarkers } = await import('@/lib/skills/registry');
       finalContent = stripSkillMarkers(finalContent);
+    }
+
+    // Narration repair: the stream-time filter held the model's internal
+    // analysis (English "note" narration on ambiguous search questions) out
+    // of the UI the whole stream. Convert it into the clean final answer —
+    // the done event below carries `content`, which REPLACES the message
+    // content on the frontend, so the user goes straight from the generating
+    // state to the clean answer. On repair failure the raw narration is the
+    // fallback (same content the old behavior displayed, minus the stream).
+    if (narrationMode === 'suppressing' && finalContent.trim()) {
+      try {
+        const repaired = await repairNarration(finalContent);
+        if (repaired) {
+          console.log('[v12-flow] narration repaired —', repaired.length, 'chars');
+          finalContent = repaired;
+          finalOutput = null;
+        }
+      } catch (e) {
+        console.error('[v12-flow] narration repair failed — falling back to the raw content', e);
+      }
     }
 
     // Document blocks → downloadable file cards (before the final completion
