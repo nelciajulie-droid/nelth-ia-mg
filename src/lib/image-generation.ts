@@ -51,6 +51,8 @@ export type GeneratedImage = { bytes: Buffer; contentType: string };
 export interface GenerateImageOptions {
   /** Live job phases — displayed on the generating card. */
   onPhase?: (phase: NelthaiPhase) => void;
+  /** Fired when an attempt failed and another one starts (UI transparency). */
+  onRetry?: (attemptIndex: number, totalAttempts: number) => void;
   /**
    * Source images for image→image generation. When present (and non-empty)
    * the multipart image-to-image endpoint is used instead of text→image.
@@ -59,10 +61,37 @@ export interface GenerateImageOptions {
 }
 
 /**
+ * Transient-failure tolerance for the Nelthai engine (observed live on the
+ * gateway): the upstream sometimes rejects a perfectly fine job with a bare
+ * status 'error' and NO detail whatsoever — the raw word that used to reach
+ * users as "Image generation failed: error". Two distinct failure modes:
+ *
+ *   • transient blips — the SAME prompt fails once then succeeds minutes
+ *     later (verified: « voiture rouge »);
+ *   • short/trivial prompts — « chat », « maison », a single letter… are
+ *     rejected deterministically, while the same prompt enriched with a
+ *     light descriptive suffix goes through (verified live);
+ *   • genuinely filtered subjects (« logo », explicit content) fail every
+ *     time — only a clear error message helps there.
+ *
+ * ChatGPT-like behavior: retry invisibly. The chain runs up to three
+ * attempts — the user's prompt, the user's prompt again (transient blips),
+ * then the enriched prompt (short-prompt rejections) — under a global
+ * deadline that keeps the whole flow inside the serverless budget (Vercel
+ * maxDuration 300s: ~220s of attempts + download + persist). Every attempt
+ * restarts the live phases so the generating card keeps moving.
+ */
+const PROMPT_ENRICHMENT = ' — image détaillée et de haute qualité';
+const RETRY_GLOBAL_DEADLINE_MS = 220_000;
+const ATTEMPT_POLL_TIMEOUT_MS = 90_000;
+const RETRY_MIN_REMAINING_MS = 15_000;
+
+/**
  * Generate an image with the built-in Nelthai engine → raw image bytes.
  *
- * Runs the async job to completion (polling every 1.5s) and downloads the
- * first produced image before its CDN URL expires.
+ * Runs the async job to completion (polling every 1.5s), retries on the
+ * transient failure modes above, and downloads the first produced image
+ * before its CDN URL expires.
  */
 export async function generateSdImage(
   prompt: string,
@@ -73,29 +102,75 @@ export async function generateSdImage(
     throw new Error('Prompt is required for image generation');
   }
 
-  options.onPhase?.('sending');
   const sources = (options.sourceImages ?? []).filter((s) =>
     s && ((s.kind === 'url' && /^https?:\/\//i.test(s.url)) || (s.kind === 'bytes' && s.bytes?.length))
   );
 
-  const jobId = sources.length
-    ? await submitNelthaiImageToImage(prompt, sources)
-    : await submitNelthaiTextToImage(prompt);
+  const original = prompt.trim();
+  const attempts: string[] =
+    original.endsWith(PROMPT_ENRICHMENT) || original.length + PROMPT_ENRICHMENT.length > 4000
+      ? [original]
+      : [original, original, `${original}${PROMPT_ENRICHMENT}`];
 
-  const urls = await waitForNelthaiImages(jobId, {
-    onPhase: (phase) => options.onPhase?.(phase),
-  });
+  const deadline = Date.now() + RETRY_GLOBAL_DEADLINE_MS;
+  let lastFailure: unknown = null;
 
-  const lastError = new Error('The image service produced no downloadable image');
-  let lastErr: unknown = lastError;
-  for (const url of urls) {
+  for (let attempt = 0; attempt < attempts.length; attempt++) {
+    const remaining = deadline - Date.now();
+    if (attempt > 0 && remaining < RETRY_MIN_REMAINING_MS) {
+      console.warn('[image-generation] retry budget exhausted — surfacing the failure');
+      break;
+    }
+
     try {
-      return await downloadNelthaiImage(url);
+      // Live label reset: the card shows the job starting over instead of
+      // freezing on the failed attempt's last phase.
+      options.onPhase?.('sending');
+      const jobId = sources.length
+        ? await submitNelthaiImageToImage(attempts[attempt], sources)
+        : await submitNelthaiTextToImage(attempts[attempt]);
+      const urls = await waitForNelthaiImages(jobId, {
+        onPhase: (phase) => options.onPhase?.(phase),
+        timeoutMs: Math.max(RETRY_MIN_REMAINING_MS, Math.min(ATTEMPT_POLL_TIMEOUT_MS, remaining)),
+      });
+
+      // The CDN URLs are short-lived — a download blip retries the whole job
+      // (regenerating is ~20s, far better than surfacing a download error).
+      let lastErr: unknown = new Error('The image service produced no downloadable image');
+      for (const url of urls) {
+        try {
+          return await downloadNelthaiImage(url);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      lastFailure = lastErr;
     } catch (e) {
-      lastErr = e;
+      lastFailure = e;
+    }
+
+    if (attempt < attempts.length - 1) {
+      const retryingIndex = attempt + 1;
+      console.warn(
+        `[image-generation] attempt ${attempt + 1}/${attempts.length} failed` +
+          ` (${lastFailure instanceof Error ? lastFailure.message : String(lastFailure)})` +
+          (attempts[retryingIndex] !== attempts[attempt]
+            ? ' — retrying with an enriched prompt'
+            : ' — retrying the same prompt')
+      );
+      try {
+        options.onRetry?.(retryingIndex, attempts.length);
+      } catch {
+        /* UI callback must never break the retry chain */
+      }
     }
   }
-  throw lastErr instanceof Error ? lastErr : lastError;
+
+  // Every attempt failed (or the budget ran out): a French, actionable
+  // message instead of the gateway's bare "error" word.
+  throw new Error(
+    'La génération d’image a échoué après plusieurs tentatives. Le service d’images a probablement refusé ce sujet (politique de contenu) ou est momentanément indisponible. Essayez de reformuler votre demande avec un peu plus de détails — par exemple « un chat orange qui dort sur un canapé » plutôt que « chat » — puis relancez.'
+  );
 }
 
 function extensionFor(contentType: string): string {

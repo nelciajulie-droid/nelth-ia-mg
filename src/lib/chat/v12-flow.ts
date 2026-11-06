@@ -843,6 +843,19 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         onPhase: (phase) => {
           void imagePhaseStatus(phase);
         },
+        // Transient upstream failures retry invisibly (see image-generation.ts)
+        // — the status row tells the user another attempt started instead of
+        // the phase label silently cycling back.
+        onRetry: (attemptIndex, totalAttempts) => {
+          void emit({
+            type: 'status',
+            data: {
+              action: 'image_generation',
+              description: `Nouvelle tentative de génération (${attemptIndex + 1}/${totalAttempts})…`,
+              done: false,
+            },
+          });
+        },
         sourceImages,
       });
       const files = [{ type: 'image', url: file.url, name: file.name }];
