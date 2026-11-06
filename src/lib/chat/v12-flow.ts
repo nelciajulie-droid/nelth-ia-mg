@@ -456,6 +456,13 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // context injection and citations run — the user never has to touch the
   // globe button. Gated by `web.search.auto` (default true) and the same
   // enable/permission checks as the explicit toggle.
+  //
+  // The SAME auto engagement exists for image generation (see auto-image.ts,
+  // gated by `image_generation.auto` default true): "dessine-moi…" or "fais-le
+  // en bleu" trigger the Nelthai engine even with the image toggle OFF —
+  // exactly the "the model decides" behavior the web search auto has. Both
+  // decision calls run IN PARALLEL (see below) so the second auto adds ~zero
+  // wall-clock latency.
   const isSdModel = modelId === 'stable-diffusion-xl' || modelId.startsWith('image_generation.');
   let webCitations: any[] | null = null;
   const wantsWebSearch =
@@ -636,6 +643,13 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     }
   };
 
+  // Auto image engagement result — set by the parallel decision block below,
+  // consumed by section 3.5 (the image flow then runs exactly like an
+  // explicit toggle turn). `autoImageEdit` flags ITERATION turns: the most
+  // recent generated image of the conversation feeds the image-to-image job.
+  let autoImage = false;
+  let autoImageEdit = false;
+
   if (wantsWebSearch) {
     if (await webSearchAllowed()) {
       const query = lastUserContent();
@@ -643,31 +657,49 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     }
   } else if (!isSdModel && form.features?.image_generation !== true) {
     // ---- Auto engagement: the model decides, the user doesn't have to. ----
+    // Both autos (image + web search) decide IN PARALLEL — the added latency
+    // of the second auto is ~zero. When the image decision claims the turn,
+    // the (possibly simultaneous) search decision is simply ignored: an
+    // image turn never streams an LLM answer, so search context would be
+    // entirely wasted.
     const { configGet } = await import('@/lib/config');
-    const autoEnabled = await configGet<boolean>('web.search.auto', true);
-    if (autoEnabled && (await webSearchAllowed())) {
-      const query = lastUserContent();
-      if (query) {
-        const { decideAutoWebSearch } = await import('@/lib/chat/auto-web-search');
-        const decision = await decideAutoWebSearch(llmMessages);
-        console.log(
-          '[v12-flow] auto web search decision =',
-          decision ? JSON.stringify(decision) : 'null (no decision)'
-        );
-        if (decision?.search && decision.query) {
-          // Same status label as the explicit toggle — the user shouldn't be
-          // able to tell an auto engagement apart from a manual one.
-          await performWebSearch(decision.query, 'Recherche web en cours');
-        }
+    const imageAuto = await configGet<boolean>('image_generation.auto', true);
+    const imageEnabled = await configGet<boolean>('image_generation.enable', true);
+    const searchAuto = await configGet<boolean>('web.search.auto', true);
+    const query = lastUserContent();
+
+    if (query && (imageAuto || searchAuto)) {
+      const [imageDecision, searchDecision] = await Promise.all([
+        imageAuto && imageEnabled
+          ? import('@/lib/chat/auto-image').then((m) => m.decideAutoImageGeneration(llmMessages))
+          : Promise.resolve(null),
+        searchAuto && (await webSearchAllowed())
+          ? import('@/lib/chat/auto-web-search').then((m) => m.decideAutoWebSearch(llmMessages))
+          : Promise.resolve(null),
+      ]);
+      console.log(
+        '[v12-flow] auto decisions — image:',
+        imageDecision ? JSON.stringify(imageDecision) : 'null',
+        '| search:',
+        searchDecision ? JSON.stringify(searchDecision) : 'null'
+      );
+      autoImage = imageDecision?.image === true;
+      autoImageEdit = autoImage && imageDecision?.edit === true;
+      if (!autoImage && searchDecision?.search && searchDecision.query) {
+        // Same status label as the explicit toggle — the user shouldn't be
+        // able to tell an auto engagement apart from a manual one.
+        await performWebSearch(searchDecision.query, 'Recherche web en cours');
       }
     }
   }
 
   // ------------------------------------ 3.5 Image generation (features toggle /
-  // built-in SD model). Python main.py: features.image_generation →
+  // built-in SD model / AUTO engagement). Python main.py: features.image_generation →
   // generate_image + __event_emitter__ chat:message:files; the TS port adds
-  // the built-in `stable-diffusion-xl` model that routes here directly.
-  const wantsImageGeneration = form.features?.image_generation === true || isSdModel;
+  // the built-in `stable-diffusion-xl` model that routes here directly, and
+  // the auto engagement path (decideAutoImageGeneration) for image requests
+  // phrased naturally ("dessine-moi…") with the toggle OFF.
+  const wantsImageGeneration = form.features?.image_generation === true || isSdModel || autoImage;
   if (wantsImageGeneration) {
     const { configGet } = await import('@/lib/config');
     const { ERROR_MESSAGES } = await import('@/lib/constants');
@@ -698,6 +730,39 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     } catch {
       /* attachments unreadable → plain text→image */
     }
+
+    // Iteration source (auto engagement): when the decision flagged an EDIT
+    // ("fais-le en bleu", "make it blue"…) and the user attached nothing,
+    // the conversation's most recent generated image becomes the
+    // image-to-image source — the edit transforms the ACTUAL previous visual
+    // instead of re-rolling from a context-free prompt.
+    if (autoImageEdit && sourceImages.length === 0 && isSavedChatId(chatId) && userMessageId) {
+      try {
+        const chat = await getChatById(chatId);
+        const map = ((chat?.chat as any)?.history as any)?.messages;
+        if (map && typeof map === 'object') {
+          const chain = getMessageList(map, userMessageId); // newest→oldest from this user msg
+          for (const m of chain) {
+            const imageFiles = (Array.isArray(m?.files) ? m.files : []).filter(
+              (f: any) => f?.type === 'image' && (f?.url || f?.id)
+            );
+            if (m?.role === 'assistant' && imageFiles.length) {
+              const { resolveImageSources } = await import('@/lib/image-generation');
+              sourceImages = await resolveImageSources(imageFiles);
+              if (sourceImages.length) {
+                console.log(
+                  `[v12-flow] auto edit — image-to-image with the previous generated image (${imageFiles[0]?.name ?? 'unnamed'})`
+                );
+              }
+              break;
+            }
+          }
+        }
+      } catch {
+        /* history unreadable → plain text→image */
+      }
+    }
+
     if (sourceImages.length) {
       console.log(`[v12-flow] image-to-image with ${sourceImages.length} source image(s)`);
     }
@@ -772,6 +837,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
     isKiloModel,
     kiloModelWantsThinking,
     kiloAvailable,
+    kiloFallbackActive,
     KILO_GATEWAY_BASE_URL,
     KILO_GATEWAY_API_KEY,
     KILO_REASONING_MODEL_ID,
@@ -780,6 +846,10 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
   if (isKilo && !kiloAvailable()) {
     return json({ detail: `Model ${modelId} not found (Kilo gateway not configured)` }, 404);
   }
+  // Keyless fallback: no gateway key → the built-in z-ai engine answers in
+  // place of the gateway (callUpstream synthesizes the OpenAI-shaped upstream
+  // Response locally; the route/url below stay unused in that mode).
+  const kiloFallback = isKilo && kiloFallbackActive();
   const route: ModelRoute | null = isKilo
     ? { type: 'openai', model: modelId, baseUrl: KILO_GATEWAY_BASE_URL, apiKey: KILO_GATEWAY_API_KEY }
     : await resolveModelRoute(modelId);
@@ -851,13 +921,30 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
   // skill messages).
   const timeoutSignal = AbortSignal.timeout(600_000);
   const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
-  const callUpstream = (body: Record<string, any>) =>
-    fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
+  const callUpstream = (body: Record<string, any>): Promise<Response> =>
+    kiloFallback
+      ? (async () => {
+          // z-ai engine bridge: same two models, OpenAI-compatible Response —
+          // reasoning flags map onto the SDK's thinking switch.
+          const { zaiUpstreamResponse } = await import('@/lib/zai-llm');
+          return zaiUpstreamResponse({
+            messages: body.messages ?? [],
+            stream: body.stream === true,
+            temperature: body.temperature,
+            top_p: body.top_p,
+            max_tokens: body.max_tokens,
+            thinking:
+              body.reasoning?.enabled === true || body.include_reasoning === true
+                ? 'enabled'
+                : 'disabled',
+          });
+        })()
+      : fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
 
   let upstream: Response;
   /** Request-send timestamp — anchors the thinking duration (Kilo-style
@@ -1941,6 +2028,15 @@ async function generateChatTitle(route: ModelRoute, messages: { role: string; co
     const last2 = messages.filter((m) => m.role !== 'system').slice(-2);
     const history = last2.map((m) => `${m.role === 'assistant' ? 'assistant' : 'user'}: ${m.content}`).join('\n');
     const prompt = TITLE_TEMPLATE.replace('{{MESSAGES:END:2}}', history.slice(0, 4000));
+
+    // Keyless fallback: the direct helper bridges to the z-ai engine when
+    // the Kilo gateway is not configured.
+    {
+      const { isKiloModel, kiloFallbackActive, kiloGenerateTitle } = await import('@/lib/kilo-llm');
+      if (route.type === 'openai' && isKiloModel(route.model) && kiloFallbackActive()) {
+        return await kiloGenerateTitle(prompt);
+      }
+    }
 
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     const url = route.type === 'openai' ? `${route.baseUrl.replace(/\/+$/, '')}/chat/completions` : `${route.baseUrl}/api/chat`;

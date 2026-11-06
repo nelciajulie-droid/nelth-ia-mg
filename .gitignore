@@ -64,3 +64,4 @@ tool-results/
 
 # runtime uploads (sandbox)
 /upload/
+prisma/schema.sqlite.prisma

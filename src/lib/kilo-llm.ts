@@ -16,6 +16,10 @@
  * fields — the chat pipeline (v12-flow) converts them into the structured
  * Open WebUI v0.12.5 `output` items that the compiled frontend renders as
  * the collapsible "Thinking… / Thought for N seconds" block.
+ *
+ * Without a gateway key the SAME interface is served by the built-in z-ai
+ * SDK engine (see kiloFallbackActive) — callers never need to care which
+ * engine is live.
  */
 
 /** Kilo AI Gateway base URL (OpenAI-compatible routes under /api/v1). */
@@ -25,9 +29,21 @@ export const KILO_GATEWAY_BASE_URL =
 /** Gateway API key (kilo.ai → Settings → API Keys, JWT with kiloUserId). */
 export const KILO_GATEWAY_API_KEY = process.env.KILO_GATEWAY_API_KEY || '';
 
-/** True when the gateway is configured (models registered in the selector). */
+/**
+ * Keyless fallback engine: when no gateway key is configured, the built-in
+ * z-ai SDK engine (lib/zai-llm.ts) serves the SAME two models without any
+ * key — local development and self-hosted installs get a working chat out
+ * of the box. The gateway stays the primary path wherever
+ * KILO_GATEWAY_API_KEY is set (Vercel, Docker, VPS…).
+ */
+export function kiloFallbackActive(): boolean {
+  return KILO_GATEWAY_API_KEY.length === 0;
+}
+
+/** True when the built-in models can be served (gateway key OR keyless
+ *  z-ai fallback) — the model selector always lists them. */
 export function kiloAvailable(): boolean {
-  return KILO_GATEWAY_API_KEY.length > 0;
+  return true;
 }
 
 /** Built-in standard chat model — Kilo gateway Dots3-Note Preview, shown as "Nelth-3.5". */
@@ -118,6 +134,20 @@ function buildBody(params: KiloChatParams): Record<string, any> {
 
 /** Non-streaming chat completion → OpenAI-compatible JSON object. */
 export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
+  // Keyless fallback: the built-in z-ai engine answers in place of the
+  // gateway (same wire format — decisions, titles, autocompletions…).
+  if (kiloFallbackActive()) {
+    const { zaiChatCompletion } = await import('@/lib/zai-llm');
+    const thinking = params.thinking ?? kiloModelWantsThinking(params.model ?? KILO_MODEL_ID);
+    return zaiChatCompletion({
+      messages: params.messages,
+      stream: false,
+      temperature: params.temperature,
+      top_p: params.top_p,
+      max_tokens: params.max_tokens,
+      thinking: thinking ? 'enabled' : 'disabled',
+    });
+  }
   const res = await fetch(kiloChatUrl(), {
     method: 'POST',
     headers: kiloGatewayHeaders(),
