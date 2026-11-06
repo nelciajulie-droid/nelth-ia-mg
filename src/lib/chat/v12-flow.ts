@@ -1039,7 +1039,24 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           'These were your internal analysis notes, not an answer. Write now the FINAL ANSWER to my original question: direct and concise, in MY language. Keep the [N] citation markers where a source supports a claim. Never mention "the user", the sources, your reading process, or these notes — just answer me directly.',
       },
     ];
-    const res = await callUpstream({ ...reqBody, messages, stream: false, max_tokens: 800 });
+    // stream_options MUST go: strict OpenAI-compatible gateways reject it
+    // alongside stream:false (400) — that silently killed the repair and
+    // surfaced the raw narration as the fallback.
+    const body: Record<string, any> = {
+      ...reqBody,
+      messages,
+      stream: false,
+      max_tokens: 800,
+      stream_options: undefined,
+    };
+    delete body.stream_options;
+    let res = await callUpstream(body);
+    if (!res.ok) {
+      // Provider flake retry (same guard as the main call — the free dots
+      // model occasionally 400s a perfectly valid request).
+      await new Promise((r) => setTimeout(r, 600));
+      res = await callUpstream(body);
+    }
     if (!res.ok) throw new Error(`repair upstream ${res.status}`);
     const data = await res.json().catch(() => null);
     const repaired: string = data?.choices?.[0]?.message?.content ?? '';
