@@ -198,6 +198,12 @@
                                                 import("/_app/immutable/entry/app.jSN9ebxr.js")
                                         ]).then(([kit, app]) => {
                                                 kit.start(app, element);
+                                        }).catch((err) => {
+                                                // Module fetch/parse failed (flaky mobile network,
+                                                // browser too old for the compiled bundles) — hand
+                                                // the failure to the boot watchdog below instead of
+                                                // leaving an endless blinking splash logo.
+                                                if (window.__nelthBootFail) window.__nelthBootFail(err);
                                         });
                                 }
                         </script>
@@ -271,6 +277,167 @@
                                 Footer content
                         </span> -->
                 </div>
+
+                <script>
+                        /* ================================================================
+                           BOOT WATCHDOG — ES5 only (parses on every browser, even ones
+                           too old to run the compiled SPA bundles above).
+
+                           The app removes #splash-screen once booted. When the boot
+                           dies instead (module fetch dropped on a flaky mobile
+                           network, browser too old for the compiled JS, or a hung
+                           startup await), the user otherwise gets an endless
+                           blinking logo with zero feedback. After the delay below,
+                           replace it with an explicit error panel + Retry (clears
+                           caches / service workers, reloads). The panel lives INSIDE
+                           the splash container, so a late-but-successful boot removes
+                           it automatically.
+                           ================================================================ */
+                        (function () {
+                                var SPLASH_ID = 'splash-screen';
+                                var DELAY_SLOW = 30000;    // hung/slow boot checkpoint
+                                var DELAY_OLD = 6000;      // old-browser notice grace
+                                var DELAY_PATIENCE = 120000; // after "keep waiting"
+                                var timerId = null;
+                                var panel = null;
+
+                                function splashGone() {
+                                        return !document.getElementById(SPLASH_ID);
+                                }
+
+                                /* Boot-tier features of the compiled bundles: the root
+                                   layout calls Array.prototype.at(); lazy routes add
+                                   Object.hasOwn / replaceAll / structuredClone. A browser
+                                   missing these cannot run the app reliably. */
+                                function bootTierModern() {
+                                        try {
+                                                return (
+                                                        typeof Array.prototype.at === 'function' &&
+                                                        typeof Object.hasOwn === 'function' &&
+                                                        typeof String.prototype.replaceAll === 'function'
+                                                );
+                                        } catch (e) {
+                                                return false;
+                                        }
+                                }
+
+                                function arm(delay) {
+                                        if (timerId) clearTimeout(timerId);
+                                        timerId = setTimeout(fire, delay);
+                                }
+
+                                function fire() {
+                                        if (splashGone()) return; // booted — nothing to do
+                                        if (panel && panel.parentNode) return; // already shown
+                                        var reason = !bootTierModern()
+                                                ? 'old-browser'
+                                                : window.__nelthBootError
+                                                        ? 'load-failed'
+                                                        : 'slow';
+                                        show(reason);
+                                }
+
+                                function show(reason) {
+                                        var splash = document.getElementById(SPLASH_ID);
+                                        if (!splash) return;
+
+                                        var dark = /(^|\s)dark(\s|$)/.test(document.documentElement.className);
+                                        var isOld = reason === 'old-browser';
+                                        var title = isOld
+                                                ? 'Navigateur trop ancien'
+                                                : reason === 'load-failed'
+                                                        ? 'Impossible de charger l\u2019application'
+                                                        : 'Chargement tr\u00e8s lent';
+                                        var body = isOld
+                                                ? 'Cette application n\u00e9cessite un navigateur r\u00e9cent. Mettez \u00e0 jour Chrome ou Android System WebView (Play Store), ou iOS (R\u00e9glages \u2192 G\u00e9n\u00e9ral \u2192 Mise \u00e0 jour logicielle), puis rouvrez la page.'
+                                                : reason === 'load-failed'
+                                                        ? 'Le t\u00e9l\u00e9chargement a \u00e9chou\u00e9 \u2014 connexion instable ? Appuyez sur R\u00e9essayer.'
+                                                        : 'La connexion semble instable. Vous pouvez patienter ou r\u00e9essayer.';
+
+                                        panel = document.createElement('div');
+                                        panel.setAttribute('role', 'alert');
+                                        panel.style.cssText =
+                                                'position:absolute;left:50%;transform:translateX(-50%);top:62%;width:22rem;max-width:calc(100vw - 2.5rem);box-sizing:border-box;padding:1rem 1.25rem;border-radius:0.75rem;text-align:center;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:0.9rem;line-height:1.45;z-index:2;' +
+                                                (dark
+                                                        ? 'background:rgba(38,38,38,.95);color:#fafafa;border:1px solid #404040;'
+                                                        : 'background:rgba(255,255,255,.96);color:#404040;border:1px solid #e5e5e5;box-shadow:0 4px 16px rgba(0,0,0,.08);');
+
+                                        var h = document.createElement('div');
+                                        h.style.cssText = 'font-weight:600;font-size:1rem;margin-bottom:0.5rem;';
+                                        h.textContent = title;
+
+                                        var p = document.createElement('div');
+                                        p.style.cssText = 'margin-bottom:1rem;opacity:.9;';
+                                        p.textContent = body;
+
+                                        var retry = document.createElement('button');
+                                        retry.type = 'button';
+                                        retry.textContent = isOld ? 'R\u00e9essayer quand m\u00eame' : 'R\u00e9essayer';
+                                        retry.style.cssText =
+                                                'display:inline-block;min-height:44px;padding:0.5rem 1.25rem;border-radius:0.5rem;font-weight:600;font-size:0.9rem;cursor:pointer;-webkit-tap-highlight-color:transparent;' +
+                                                (dark
+                                                        ? 'background:#fafafa;color:#171717;border:1px solid #fafafa;'
+                                                        : 'background:#171717;color:#fafafa;border:1px solid #171717;');
+                                        retry.onclick = function () {
+                                                window.__nelthBootRetry();
+                                                return false;
+                                        };
+
+                                        panel.appendChild(h);
+                                        panel.appendChild(p);
+                                        panel.appendChild(retry);
+
+                                        if (reason === 'slow') {
+                                                var wait = document.createElement('button');
+                                                wait.type = 'button';
+                                                wait.textContent = 'Continuer \u00e0 patienter';
+                                                wait.style.cssText =
+                                                        'display:inline-block;min-height:44px;margin-left:0.5rem;padding:0.5rem 1rem;border-radius:0.5rem;font-size:0.9rem;cursor:pointer;-webkit-tap-highlight-color:transparent;background:transparent;' +
+                                                        (dark ? 'color:#fafafa;border:1px solid #525252;' : 'color:#404040;border:1px solid #d4d4d4;');
+                                                wait.onclick = function () {
+                                                        if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+                                                        panel = null;
+                                                        arm(DELAY_PATIENCE);
+                                                        return false;
+                                                };
+                                                panel.appendChild(wait);
+                                        }
+
+                                        splash.appendChild(panel);
+                                }
+
+                                /* Called by the .catch() on the SvelteKit import above. */
+                                window.__nelthBootFail = function (err) {
+                                        try {
+                                                console.error('[boot] application modules failed to load', err);
+                                        } catch (e) {}
+                                        window.__nelthBootError = true;
+                                        if (!splashGone()) fire();
+                                };
+
+                                /* Retry: drop caches + service workers, then reload. */
+                                window.__nelthBootRetry = function () {
+                                        try {
+                                                if (window.caches && window.caches.keys) {
+                                                        window.caches.keys().then(function (keys) {
+                                                                for (var i = 0; i < keys.length; i++) window.caches.delete(keys[i]);
+                                                        });
+                                                }
+                                                if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                                                        navigator.serviceWorker.getRegistrations().then(function (regs) {
+                                                                for (var j = 0; j < regs.length; j++) regs[j].unregister();
+                                                        });
+                                                }
+                                        } catch (e) {}
+                                        setTimeout(function () {
+                                                location.reload();
+                                        }, 400);
+                                };
+
+                                if (!bootTierModern()) arm(DELAY_OLD);
+                                else arm(DELAY_SLOW);
+                        })();
+                </script>
         </body>
 
         <style type="text/css" nonce="">
