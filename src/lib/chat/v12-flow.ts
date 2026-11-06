@@ -545,9 +545,20 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
           );
         }
         // Inject the sources into the last user message (Python parity).
+        // Framing matters for small models: bare <source> blocks before the
+        // question read as "analyze these documents" — the model then dumps
+        // its analysis ("The user is asking… Looking at the sources…") as
+        // the answer. The explicit frame keeps the roles straight: sources
+        // are CONTEXT for answering the user's question, never the task.
         for (let li = llmMessages.length - 1; li >= 0; li--) {
           if (llmMessages[li].role === 'user') {
-            llmMessages[li].content = `${webResultsToContext(results, pageTexts)}\n\n${llmMessages[li].content}`;
+            const retrievalDate = new Date().toISOString().slice(0, 10);
+            const framedContext =
+              `The following web search results were retrieved on ${retrievalDate} for the query "${query}".\n` +
+              `They are CONTEXT to help you answer the user's question — not a task to analyze, summarize, or describe. Never mention the retrieval, the sources' structure, or your reading process in your answer.\n\n` +
+              webResultsToContext(results, pageTexts) +
+              `\n\n---\nAnswer the user's question below using the context above (cite it with [N] markers). Write the final answer only, in the user's language.\n\n`;
+            llmMessages[li].content = `${framedContext}${llmMessages[li].content}`;
             break;
           }
         }
