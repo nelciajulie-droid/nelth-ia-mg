@@ -850,6 +850,20 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
   }
 
   // --------------------------------------------------- 4. Resolve and call
+  // Spelling tolerance (ChatGPT-like): real users often write phonetically
+  // or with mistakes — the model must reconstruct the intent silently and
+  // answer normally, instead of stalling on the errors or echoing them.
+  // Injected AFTER the auto decisions so their prompts stay untouched, and
+  // after the image section (image turns never reach here).
+  {
+    const misspellHint =
+      "\n\nNOTE: The user may write with spelling mistakes or phonetic approximations. Silently reconstruct their intent, answer it directly, and never correct or comment on their spelling unless they explicitly ask for it. Always answer in the user's language.";
+    if (llmMessages.length && llmMessages[0].role === 'system') {
+      llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}${misspellHint}` };
+    } else {
+      llmMessages.unshift({ role: 'system', content: misspellHint.trim() });
+    }
+  }
   const { resolveModelRoute } = await import('@/lib/models-registry');
   const {
     isKiloModel,

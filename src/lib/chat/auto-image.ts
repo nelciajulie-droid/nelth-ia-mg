@@ -24,6 +24,8 @@ export type AutoImageDecision = { image: boolean; edit: boolean };
 
 const SYSTEM_PROMPT = `You decide whether the latest user message is a request to CREATE or EDIT a visual (to be produced by an image-generation tool), rather than a normal chat message.
 
+The user may write with SPELLING MISTAKES or phonetic approximations (any language, often French — e.g. "desine moi", "fait un logo", "cre une image"). First silently reconstruct what they MEAN, then decide on the corrected intent.
+
 Reply STRICTLY with a single JSON object, no other text:
 {"image": true|false, "edit": true|false}
 
