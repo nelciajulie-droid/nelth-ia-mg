@@ -1128,10 +1128,12 @@ html.nsrc-lock{overflow:hidden}
     const style = document.createElement('style');
     style.id = 'nelth-imgc-style';
     style.textContent = [
-      /* card shell — aspect-square, rounded-2xl, themed borders */
+      /* card shell — square placeholder while generating; at the reveal it
+         takes the image's NATURAL aspect ratio (ChatGPT-style, no forced crop) */
       '.nelth-imgc{position:relative;width:min(100%,384px);aspect-ratio:1/1;border-radius:1rem;',
       'overflow:hidden;background:#fff;border:1px solid #e5e5e5;',
-      'transition:border-color .3s ease;isolation:isolate;cursor:default}',
+      'transition:border-color .3s ease,width .55s cubic-bezier(.22,1,.36,1),',
+      'aspect-ratio .55s cubic-bezier(.22,1,.36,1);isolation:isolate;cursor:default}',
       'html.dark .nelth-imgc{background:#171717;border-color:#262626}',
 
       /* scintillating grid (canvas) — dissolves at the reveal */
@@ -1179,13 +1181,15 @@ html.nsrc-lock{overflow:hidden}
       /* hidden layers */
       '.nelth-imgc-hide{display:none !important}',
 
-      /* reduced motion — settle instantly, no sweep/flash */
+      /* reduced motion — settle instantly, no sweep/flash, no resize morph */
       '.nelth-imgc.nelth-imgc-instant .nelth-imgc-grid{transition:none}',
       '.nelth-imgc.nelth-imgc-instant .nelth-imgc-photo{transition:none}',
+      '.nelth-imgc.nelth-imgc-instant{transition:border-color .3s ease !important}',
       '.nelth-imgc.nelth-imgc-instant .nelth-imgc-sweep-bar{animation:none;opacity:0}',
       '.nelth-imgc.nelth-imgc-instant .nelth-imgc-flash{animation:none;opacity:0}',
       '@media (prefers-reduced-motion:reduce){.nelth-imgc-sweep-bar{animation:none !important;opacity:0}',
-      '.nelth-imgc-flash{animation:none !important}}',
+      '.nelth-imgc-flash{animation:none !important}',
+      '.nelth-imgc{transition:border-color .3s ease !important}}',
     ].join('');
     document.head.appendChild(style);
   }
@@ -1325,6 +1329,34 @@ html.nsrc-lock{overflow:hidden}
     state.card.style.cursor = 'zoom-in';
   }
 
+  /** ChatGPT-style sizing: as soon as the real dimensions are measurable, the
+   *  card adopts the image's natural aspect ratio — width capped at 384px,
+   *  height at 512px, never upscaled. Until then the square placeholder stays. */
+  function applyImageRatio(state) {
+    if (state.ratioApplied) return;
+    var w = 0;
+    var h = 0;
+    var cardImg = state.card.querySelector('.nelth-imgc-photo img');
+    var sources = [state.preImg, cardImg, state.nativeImg];
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i];
+      if (s && s.naturalWidth > 0 && s.naturalHeight > 0) {
+        w = s.naturalWidth;
+        h = s.naturalHeight;
+        break;
+      }
+    }
+    if (!w || !h) return; // dimensions unknown yet — keep the square placeholder
+    state.ratioApplied = true;
+    var maxW = 384;
+    var parent = state.card.parentElement;
+    if (parent && parent.clientWidth > 0) maxW = Math.min(parent.clientWidth, 384);
+    var maxH = 512;
+    var scale = Math.min(maxW / w, maxH / h, 1);
+    state.card.style.width = 'min(100%, ' + Math.round(w * scale) + 'px)';
+    state.card.style.aspectRatio = w + ' / ' + h;
+  }
+
   /** The reveal: grid dissolves, image fades in, sweep + flash, footer flips. */
   function reveal(state, src, nativeImg) {
     if (state.revealed) return;
@@ -1337,13 +1369,19 @@ html.nsrc-lock{overflow:hidden}
     setLabel(state, 'Generated');
 
     const img = state.card.querySelector('.nelth-imgc-photo img');
+    if (img) {
+      // the card adopts the image's ratio as soon as it is measurable
+      img.addEventListener('load', () => applyImageRatio(state));
+      if (!img.src) img.src = src;
+    }
     const show = () => {
-      if (img && !img.src) img.src = src;
+      applyImageRatio(state); // preloaded → ratio known before the fade starts
       state.card.classList.add('nelth-imgc-done');
       if (reduceMotionMq.matches) state.card.classList.add('nelth-imgc-instant');
     };
     // Preload so the reveal starts on a decoded frame (1.2s fallback).
     const pre = new Image();
+    state.preImg = pre;
     pre.onload = pre.onerror = show;
     pre.src = src;
     setTimeout(show, 1200);
@@ -1392,6 +1430,8 @@ html.nsrc-lock{overflow:hidden}
       label: 'Generating image',
       revealed: false,
       finishedAt: null,
+      ratioApplied: false,
+      preImg: null,
       stopGrid: startGrid(card.querySelector('canvas')),
       timerId: null,
       nativeImg: null,
