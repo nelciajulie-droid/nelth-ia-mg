@@ -72,6 +72,16 @@ function messageContent(m: any): string {
       .map((f: any) => (f && typeof f.name === 'string' ? f.name : null))
       .filter((n: any): n is string => !!n);
     if (names.length) {
+      // Image-only legacy turns (no text, no llm_content): a NATURAL
+      // assistant sentence. A mechanical bracket note as the ENTIRE turn
+      // gets echoed verbatim by the model on the next "ok merci" — the
+      // sentence keeps the same signal (an image exists, editable) in a
+      // voice the model treats as conversation.
+      if (!base.trim() && m.files.every((f: any) => f?.type === 'image')) {
+        return names.length === 1
+          ? `Voici l'image générée (${names[0]}). Dites-moi si vous souhaitez des ajustements.`
+          : `Voici les images générées (${names.join(', ')}). Dites-moi si vous souhaitez des ajustements.`;
+      }
       return `${base}\n\n[Fichiers générés précédemment et joints à ce message : ${names.join(', ')}]`;
     }
   }
@@ -795,6 +805,14 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
       await emit({ type: 'chat:message:files', data: { files } });
 
       if (isSavedChatId(chatId) && assistantMessageId) {
+        // meta.llm_content — what the NEXT turn's LLM context sees for this
+        // image turn. A natural assistant sentence, NOT a mechanical bracket
+        // note: small chat models echo bare annotations verbatim on the next
+        // "ok merci", and the sentence keeps the edit-iteration signal (the
+        // auto-image decision reads the same history) that an image exists.
+        const llmContent = sourceImages.length
+          ? `Voici la nouvelle version de l'image (${file.name}). Dites-moi si vous souhaitez d'autres ajustements.`
+          : `Voici l'image générée (${file.name}). Dites-moi si vous souhaitez des ajustements.`;
         await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
           parentId: userMessageId,
           role: 'assistant',
@@ -802,7 +820,7 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
           done: true,
           model: modelId,
           files,
-          meta: { response_ended_at: nowSec() },
+          meta: { response_ended_at: nowSec(), llm_content: llmContent },
         } as any);
       }
 
