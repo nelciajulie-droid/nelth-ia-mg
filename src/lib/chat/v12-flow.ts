@@ -626,7 +626,9 @@ Attach a citation marker to each factual claim that is DIRECTLY supported by the
 - Place each marker IMMEDIATELY AFTER the specific claim it supports — this may be in the MIDDLE of a paragraph, right after a list item, or just before the sentence's final period. Never systematically close every sentence or paragraph with a marker.
 - A claim with no supporting source gets NO marker (your own analysis, opinions, math and conversation summaries are not cited). Never invent sources.
 - One source may support several different claims — cite it at each of them. Several sources supporting one claim merge into a single [N,M] group.
-- Never write markers inside code blocks, tables' headers, or headings. Do NOT add a bibliography or source list at the end — the interface renders sources automatically.`;
+- Never write markers inside code blocks, tables' headers, or headings. Do NOT add a bibliography or source list at the end — the interface renders sources automatically.
+
+ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as the user's message. Never narrate your reasoning process, never analyze or enumerate the sources, never describe what you are reading ("The user is asking…", "Looking at the sources…", "Source 1 shows…") — those are internal steps, not the answer. Start directly with the answer to the user's question.`;
           if (llmMessages.length && llmMessages[0].role === 'system') {
             llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}${citationPrompt}` };
           } else {
