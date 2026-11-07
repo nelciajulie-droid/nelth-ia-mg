@@ -688,7 +688,9 @@ async function* downloadFileStream(
   const headers: Record<string, string> = {};
   if (currentSize > 0) headers.range = `bytes=${currentSize}-`;
 
-  const res = await fetch(fileUrl, { headers, signal: AbortSignal.timeout(600_000) });
+  // 285s: aligned with the 300s platform maxDuration — resumable via the
+  // Range header above, so a re-run picks up where this attempt stopped.
+  const res = await fetch(fileUrl, { headers, signal: AbortSignal.timeout(285_000) });
   if (!res.ok && res.status !== 206) throw new Error(`HTTP Error: ${res.status}`);
   if (!res.body) throw new Error('Empty download response body');
 

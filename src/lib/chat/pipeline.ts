@@ -173,7 +173,9 @@ export async function generateChatCompletionInternal(
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600_000),
+      // 285s: just under the 300s platform maxDuration — a hung backend
+      // returns the 502 below instead of Vercel's hard function kill.
+      signal: AbortSignal.timeout(285_000),
     });
   } catch (e) {
     return new Response(

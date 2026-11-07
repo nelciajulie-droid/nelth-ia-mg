@@ -152,7 +152,9 @@ export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
     method: 'POST',
     headers: kiloGatewayHeaders(),
     body: JSON.stringify(buildBody({ ...params, stream: false })),
-    signal: AbortSignal.timeout(300_000),
+    // 285s: just under the 300s platform maxDuration so a hung gateway
+    // surfaces as a JSON error instead of Vercel's hard function kill.
+    signal: AbortSignal.timeout(285_000),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');

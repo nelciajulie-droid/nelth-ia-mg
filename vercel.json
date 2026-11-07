@@ -5,7 +5,7 @@
   "installCommand": "bun install",
   "functions": {
     "src/app/api/**/route.ts": {
-      "maxDuration": 800
+      "maxDuration": 300
     }
   }
 }

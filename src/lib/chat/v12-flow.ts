@@ -1051,11 +1051,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // Shared upstream caller (flow scope): used by pass 1 AND the agent-skill
   // pass 2 (runStreamBody / the SSE API path re-call it with the injected
   // skill messages).
-  // 780s: just under the 800s Vercel maxDuration (vercel.json) so a runaway
-  // upstream surfaces as a clean socket error instead of the platform's hard
-  // kill — while leaving ~13 minutes of streaming for long Thinking code
-  // generations that the old 600s cut mid-file.
-  const timeoutSignal = AbortSignal.timeout(780_000);
+  // 285s: just under the 300s maxDuration ceiling the Vercel plan allows
+  // (vercel.json — the platform rejects anything above 300 on this plan) so a
+  // runaway upstream surfaces as a clean socket error instead of the
+  // platform's hard kill. Long Thinking code generations get the full ~4¾
+  // minutes of streaming the plan permits; more requires a plan upgrade.
+  const timeoutSignal = AbortSignal.timeout(285_000);
   const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
   const callUpstream = (body: Record<string, any>): Promise<Response> =>
     kiloFallback
