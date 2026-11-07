@@ -310,6 +310,31 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // bundled with the first content chunk after a 10-30s silent wait.
   const runCompletionFlow = async (): Promise<Response> => {
   // ---------------------------------------- 3. Build LLM messages (middleware)
+  // Instant typing feedback (streaming UX): the user's message lands, then
+  // NOTHING is visible for seconds on the free upstream — the auto-engagement
+  // decisions (~2s of LLM calls) plus the gateway's first-token queue (~1.5s)
+  // are silent. A shimmer "Réflexion…" status row appears immediately (the
+  // SSE stream is already open) and clears the moment real content or
+  // reasoning starts flowing. Image turns replace it with their own phase
+  // statuses; search turns with "Recherche web en cours".
+  let thinkingStatusShown = false;
+  const showThinkingStatus = async () => {
+    if (thinkingStatusShown) return;
+    thinkingStatusShown = true;
+    await emit({
+      type: 'status',
+      data: { action: 'chat', description: 'Réflexion…', done: false },
+    });
+  };
+  const clearThinkingStatus = async () => {
+    if (!thinkingStatusShown) return;
+    thinkingStatusShown = false;
+    await emit({
+      type: 'status',
+      data: { action: 'chat', description: 'Réflexion…', done: true },
+    });
+  };
+  if (sessionId) await showThinkingStatus();
   let llmMessages: { role: string; content: string }[];
   if (historyMap && userMessageId) {
     // load_messages_from_db: chain up to user_message_id (getMessageList walks
@@ -530,6 +555,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   /** Run the search chain + context/citation injection (shared by the
    *  explicit toggle and the auto engagement path). */
   const performWebSearch = async (query: string, runningLabel: string): Promise<void> => {
+    await clearThinkingStatus(); // the search status row takes over
     await emit({
       type: 'status',
       data: { action: 'web_search', description: runningLabel, query, done: false },
@@ -836,6 +862,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         },
       });
     await imagePhaseStatus(null);
+    await clearThinkingStatus(); // the generation card's status takes over
     try {
       const { generateAndSaveImage } = await import('@/lib/image-generation');
       const size = await configGet<string>('image_generation.size', '1024x1024');
@@ -1126,6 +1153,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     }
     const detail = e instanceof Error ? e.message : 'Connection error';
     if (sessionId && chatId) {
+      await clearThinkingStatus();
       await emit({ type: 'chat:message:error', data: { error: { content: detail }, done: true } });
       return nullJson();
     }
@@ -1136,6 +1164,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     finishTask();
     const errText = await upstream.text().catch(() => '');
     if (sessionId && chatId) {
+      await clearThinkingStatus();
       await emit({
         type: 'chat:message:error',
         data: { error: { content: errText.slice(0, 500) || `Upstream error ${upstream.status}` }, done: true },
@@ -1409,6 +1438,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       if (docResult.files.length) {
         await emit({ type: 'chat:message:files', data: { files: docResult.files } });
       }
+      await clearThinkingStatus(); // non-streaming: content arrives whole
       await emit({
         type: 'chat:completion',
         data: {
@@ -1569,6 +1599,9 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         nativeReasoning.advanceReveal();
         startRevealTicker();
       }
+      // Visible reasoning = live feedback: the "Réflexion…" status row
+      // hands over to the real thinking block.
+      await clearThinkingStatus();
       await emitNative(!wasActive); // first chunk → force the switch
     };
 
@@ -1594,6 +1627,37 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         }
       }
       return '';
+    };
+
+    // Typing-smoothness valve (streaming UX): the free upstream + the SSE
+    // hop deliver content in coarse bursts — measured live: 167 chars in a
+    // single frame at first token, then ~50-char hops every ~200ms. That
+    // reads as "flashes", not as ChatGPT-style typing. The valve re-slices
+    // every outgoing content delta into ≤24-char pieces paced 24ms apart
+    // (~1000 chars/s ceiling — above the model's natural rate, so it only
+    // engages on bursts), with instant catch-up whenever the upstream is
+    // slower than the pace (no artificial delay is ever added: the wait is
+    // skipped entirely when we are already behind).
+    let lastContentEmitAt = 0;
+    const CONTENT_PACE_MS = 24;
+    const CONTENT_PACE_CHUNK = 24;
+    const emitContentDelta = async (text: string): Promise<void> => {
+      let buf = text;
+      while (buf.length) {
+        const wait = lastContentEmitAt + CONTENT_PACE_MS - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        const piece = buf.slice(0, CONTENT_PACE_CHUNK);
+        buf = buf.slice(CONTENT_PACE_CHUNK);
+        lastContentEmitAt = Date.now();
+        await emit({
+          type: 'chat:completion',
+          data: {
+            id: completionId,
+            done: false,
+            choices: [{ index: 0, delta: { content: piece } }],
+          },
+        });
+      }
     };
 
     const processContentDelta = async (delta: string): Promise<void> => {
@@ -1628,14 +1692,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         } else if (r.plainDelta) {
           const visible = narrationPush(r.plainDelta);
           if (visible) {
-            await emit({
-              type: 'chat:completion',
-              data: {
-                id: completionId,
-                done: false,
-                choices: [{ index: 0, delta: { content: visible } }],
-              },
-            });
+            await clearThinkingStatus();
+            await emitContentDelta(visible);
           }
         }
       }
@@ -1705,14 +1763,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           } else if (r.plainDelta) {
             const visible = narrationPush(r.plainDelta);
             if (visible) {
-              await emit({
-                type: 'chat:completion',
-                data: {
-                  id: completionId,
-                  done: false,
-                  choices: [{ index: 0, delta: { content: visible } }],
-                },
-              });
+              await clearThinkingStatus();
+              await emitContentDelta(visible);
             }
           }
         }
@@ -1755,6 +1807,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           console.log('[v12-flow] generation aborted by user');
         } else {
           console.error('[v12-flow] stream error', e);
+          await clearThinkingStatus();
           await emit({
             type: 'chat:message:error',
             data: { error: { content: 'Chat completion stream failed' }, done: true },
@@ -1862,6 +1915,23 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       finalContent = finalReasoning.usedStructured ? finalReasoning.content : aggregate;
     }
 
+    // Short-answer flush: an answer under the 60-char narration threshold
+    // never left the hold-back buffer — the user watched a bare generating
+    // state and got the whole text in one block with the done event (the
+    // measured "bonjour" case: zero content deltas). Release it through the
+    // paced valve so even a one-liner types out; a short NARRATION prefix
+    // still routes to the repair pass below.
+    if (narrationMode === 'buffering' && narrationBuf.trim()) {
+      if (NARRATION_START_RE.test(narrationBuf.trimStart())) {
+        narrationMode = 'suppressing';
+      } else {
+        narrationMode = 'passthrough';
+        await clearThinkingStatus();
+        await emitContentDelta(narrationBuf);
+      }
+      narrationBuf = '';
+    }
+
     // Agent-skill marker hygiene: the gate consumed the leading USE_SKILL
     // marker; strip any late/mid-text leak so neither the UI nor the next
     // turn's LLM context ever sees the protocol.
@@ -1922,6 +1992,9 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // churns an existing title. Just await it so the done event can carry it.
     const title = await titlePromise;
 
+    // Last-resort clear: covers empty answers / aborted streams that never
+    // emitted a single content or reasoning delta.
+    await clearThinkingStatus();
     await emit({
       type: 'chat:completion',
       data: {
