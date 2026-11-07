@@ -1572,3 +1572,81 @@ html.nsrc-lock{overflow:hidden}
     start();
   }
 })();
+
+/* ====================================================================
+ * Thinking-status cleanup — « Réflexion… »
+ *
+ * The backend now shows a shimmer "Réflexion…" status row the instant a
+ * message is sent (instant feedback during the ~3s silent phase before
+ * the free model's first token) and clears it when content starts. The
+ * frontend keeps every status entry in the message's status history —
+ * right for INFORMATIVE labels (« 10 résultats trouvés », « Generated »)
+ * but the transient thinking label must not linger on finished messages
+ * like a stray log line.
+ *
+ * Rule: once a message is DONE (its action toolbar — Copy / Read Aloud —
+ * has rendered, which only happens on completion), any status toggle row
+ * whose text is exactly the thinking label is hidden. While the message
+ * is still generating the row stays: it IS the live feedback.
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_THINK_CLEAN__) return;
+  window.__NELTH_THINK_CLEAN__ = true;
+
+  const THINKING_LABEL = 'Réflexion…';
+
+  if (!document.getElementById('nelth-think-style')) {
+    const style = document.createElement('style');
+    style.id = 'nelth-think-style';
+    style.textContent = '.nelth-think-hide{display:none !important}';
+    document.head.appendChild(style);
+  }
+
+  function cleanMessage(msgEl) {
+    // Done marker: the action toolbar only renders on completed messages.
+    if (!msgEl.querySelector('button[aria-label="Copy"], button[aria-label="Read Aloud"]')) {
+      return; // still generating — keep the live shimmer row
+    }
+    const toggles = msgEl.querySelectorAll('button[aria-label="Toggle status history"]');
+    for (let i = 0; i < toggles.length; i++) {
+      const toggle = toggles[i];
+      if ((toggle.textContent || '').trim() === THINKING_LABEL) {
+        toggle.classList.add('nelth-think-hide');
+      }
+    }
+    // Expanded history rows of the same label (panel open at completion).
+    const rows = msgEl.querySelectorAll('.shimmer');
+    for (let i = 0; i < rows.length; i++) {
+      if ((rows[i].textContent || '').trim() === THINKING_LABEL) {
+        rows[i].classList.add('nelth-think-hide');
+      }
+    }
+  }
+
+  function scan() {
+    const msgs = document.querySelectorAll('[id^="message-"]');
+    for (let i = 0; i < msgs.length; i++) cleanMessage(msgs[i]);
+  }
+
+  let pending = false;
+  const scheduleScan = () => {
+    if (pending) return;
+    pending = true;
+    setTimeout(() => {
+      pending = false;
+      scan();
+    }, 300);
+  };
+
+  const start = () => {
+    const obs = new MutationObserver(scheduleScan);
+    obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+    scan();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
