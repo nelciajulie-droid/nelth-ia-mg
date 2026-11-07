@@ -13,12 +13,14 @@ FROM oven/bun:1 AS base
 WORKDIR /app
 
 # ── Dépendances (couche cachable) ────────────────────────────────────────
+# Schémas + scripts prisma AVANT l'install : le postinstall (scripts/prisma.mjs)
+# lit prisma/ pour générer le client (sqlite par défaut — pas de DATABASE_URL
+# au build ; les déploiements Postgres sont corrigés au démarrage par
+# scripts/serve.mjs → prisma.mjs `ensure`).
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
-
-# Génération du client Prisma (nécessaire à la compilation TypeScript)
 COPY prisma ./prisma
-RUN bunx prisma generate
+COPY scripts ./scripts
+RUN bun install --frozen-lockfile
 
 # Service socket.io : dépendances propres
 COPY mini-services/socket-service/package.json mini-services/socket-service/bun.lock* ./mini-services/socket-service/

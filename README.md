@@ -41,11 +41,21 @@ Le repo est déjà configuré (`vercel.json` : build `prisma generate && next bu
 ## Développement local / auto-hébergement
 
 ```bash
-bun install                       # dépendances + prisma generate
+bun install                       # dépendances + client Prisma (auto : sqlite en local)
 cp .env.example .env              # remplir les valeurs
-bun run db:push                   # crée les 45 tables Postgres
+bun run db:push                   # crée les 45 tables (SQLite ou Postgres selon l'URL)
 bun run dev                       # app (3000) + socket-service (3001) supervisés
 ```
+
+> **SQLite ↔ Postgres — sélection automatique.** Deux variantes du schéma Prisma :
+> `prisma/schema.prisma` (sqlite) et `prisma/schema.postgres.prisma` (postgresql).
+> `scripts/prisma.mjs` résout `DATABASE_URL` (env puis `.env`, même logique que
+> `src/lib/db.ts`) et génère le bon client vers l'emplacement par défaut
+> (`@prisma/client`) — aucune configuration manuelle. En local avec
+> `DATABASE_URL=file:…` → SQLite ; sur Vercel/Supabase avec `postgres://…` →
+> Postgres. Au démarrage, `scripts/serve.mjs` vérifie la cohérence
+> (sous-commande `ensure`) et régénère si nécessaire (déploiements Docker où
+> l'URL n'est connue qu'au runtime).
 
 Docker : `docker compose up -d --build` (Caddy TLS inclus). Guide complet : [`DEPLOYMENT.md`](./DEPLOYMENT.md).
 
@@ -56,9 +66,9 @@ src/app/          API Next.js (routes /api/v1, /ws proxy, /ollama, /openai, /oau
 src/lib/          pipeline chat v12 (SSE), Kilo LLM, retrieval/RAG, auth Firebase, TTS/STT
 src/server/       routeurs portés de open_webui (chats, files, models, knowledge…)
 public/           build Open WebUI original (SvelteKit statique) + couche loader.js/custom.css
-prisma/           schéma Postgres (parité Python, 45 tables)
+prisma/           schémas 45 tables — schema.prisma (sqlite) + schema.postgres.prisma (déploiement)
 mini-services/    socket-service (temps réel, optionnel) + llm-bridge (dev)
-scripts/          superviseur serve.mjs, postinstall, utilitaires
+scripts/          superviseur serve.mjs, sélecteur Prisma prisma.mjs, utilitaires
 ```
 
 ## Deployments

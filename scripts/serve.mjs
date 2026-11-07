@@ -15,7 +15,7 @@
  * required. Browsers only ever see the web app origin; it proxies /ws/* to
  * the co-located socket service (see src/app/ws/[...path]/route.ts).
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,9 +99,32 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+/**
+ * Prisma client self-heal — the generated client must match the runtime
+ * DATABASE_URL provider (sqlite ↔ postgresql). On Docker/VPS the URL is
+ * only known at container start (env_file), so scripts/prisma.mjs `ensure`
+ * regenerates the client when the baked-in provider mismatches. Best-effort:
+ * a failure logs a warning and the stack still boots.
+ */
+function ensurePrismaClient() {
+  try {
+    const res = spawnSync(BUN, ['scripts/prisma.mjs', 'ensure'], {
+      cwd: ROOT,
+      env: process.env,
+      stdio: 'inherit',
+    });
+    if (res.status !== 0) {
+      console.warn('[serve] prisma ensure exited non-zero — continuing with the existing client');
+    }
+  } catch (err) {
+    console.warn(`[serve] prisma ensure failed: ${err?.message ?? err} — continuing`);
+  }
+}
+
 console.log(
   `[serve] mode=${mode} — web app on :${APP_PORT}, socket-service on :${SOCKET_PORT}`
 );
 
+ensurePrismaClient();
 startSocket();
 startApp();

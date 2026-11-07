@@ -1,24 +1,27 @@
-// Open WebUI v0.12.5 — Prisma schema ported from the Python SQLModel/SQLAlchemy
-// table definitions in backend/open_webui/models/*.py (SQLite).
+// Open WebUI v0.12.5 — Prisma schema (Supabase Postgres) ported from the Python
+// SQLModel/SQLAlchemy table definitions in backend/open_webui/models/*.py.
 //
-// Porting conventions (see task notes for rationale):
+// This is the DEPLOYMENT variant (provider = postgresql) — selected by
+// scripts/prisma.mjs whenever DATABASE_URL resolves to postgres://…
+// (Vercel/Supabase/Docker-with-Postgres). It generates to the DEFAULT client
+// location (@prisma/client), so src/lib/db.ts works unchanged.
+//
+// Model surface is IDENTICAL to prisma/schema.prisma (the SQLite variant used
+// by the local sandbox) — keep both in sync. Porting conventions:
 //   • Table names (@@map) are EXACT — the DB is shared with the original Python app.
 //   • Column names are EXACT Python column names.
 //   • JSON columns (SQLAlchemy JSON/JSONField) → String (TEXT). App code owns
 //     JSON.stringify / JSON.parse.
-//   • Columns whose Python writers use time.time_ns() (nanoseconds, ~1.7e18) are
-//     typed Float: Prisma 6.x SQLite cannot read i64-range values through Int or
-//     BigInt ("does not fit in an INT column"), while Float reads them fine.
-//     Seconds-based epoch columns stay Int. Marked with "// time_ns".
-//   • user.date_of_birth is an SQLAlchemy Date column stored as 'YYYY-MM-DD' TEXT —
-//     Prisma DateTime cannot parse that format, so it is String.
+//   • time_ns columns (nanoseconds, ~1.7e18) stay Float: readable on both
+//     SQLite and Postgres (double precision).
+//   • user.date_of_birth is stored as 'YYYY-MM-DD' TEXT — Prisma DateTime
+//     cannot parse that format, so it is String.
 //   • No Prisma relations / FK constraints: the app does its own joins.
 //   • String ids have NO default — routers generate uuids.
 //   • Nullable-ness mirrors SQLAlchemy DDL exactly (nullable=False → required).
 
 generator client {
   provider = "prisma-client-js"
-  output   = "../src/generated/postgres"
 }
 
 datasource db {

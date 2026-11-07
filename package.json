@@ -5,14 +5,14 @@
   "scripts": {
     "dev": "bun scripts/serve.mjs dev",
     "build": "next build",
-    "vercel-build": "prisma generate && next build",
-    "postinstall": "prisma generate",
+    "vercel-build": "bun scripts/prisma.mjs generate && next build",
+    "postinstall": "bun scripts/prisma.mjs generate",
     "start": "bun scripts/serve.mjs start",
     "lint": "eslint .",
-    "db:push": "prisma db push --accept-data-loss",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "db:push": "bun scripts/prisma.mjs db push --accept-data-loss",
+    "db:generate": "bun scripts/prisma.mjs generate",
+    "db:migrate": "bun scripts/prisma.mjs migrate dev",
+    "db:reset": "bun scripts/prisma.mjs migrate reset"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
