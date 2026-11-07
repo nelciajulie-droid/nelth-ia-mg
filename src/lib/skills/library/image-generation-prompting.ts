@@ -5,12 +5,12 @@ export const imageGenerationPrompting: Skill = {
   description:
     'Prompt engineering for AI image generation: the subject-action-environment-lighting-style-camera formula, style keyword vocabulary per look (photorealistic, illustration, 3D, watercolor), negative prompt technique, aspect ratio by use case, and one-variable-at-a-time iteration. Use when the user wants to generate or improve an image, illustration, logo, avatar, banner, miniature or any visual with AI generators (Midjourney, DALL-E, Stable Diffusion style tools).',
   keywords: [
-    'image', 'generer une image', 'image generation', 'ia', 'ai art',
+    'image', 'generer une image', 'image generation', 'ai art',
     'midjourney', 'dalle', 'stable diffusion', 'prompt', 'prompts',
     'prompt engineering', 'creer une image', 'illustration', 'generer un logo',
-    'photo ia', 'ai image', 'art generatif', "generateur d'images", 'style',
-    'aspect ratio', "format d'image", 'negative prompt', 'rendu', 'visuel',
-    'banniere', 'avatar', 'fond', 'dessin', 'image ia', 'texte to image'
+    'photo ia', 'ai image', 'art generatif', "generateur d'images",
+    'aspect ratio', "format d'image", 'negative prompt',
+    'banniere', 'avatar', 'image ia', 'texte to image', 'visuel'
   ],
   body: `# Image Generation Prompting
 

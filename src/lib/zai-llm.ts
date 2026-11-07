@@ -67,7 +67,14 @@ function buildBody(params: ZaiChatParams): Record<string, any> {
   };
   if (typeof params.temperature === 'number') body.temperature = params.temperature;
   if (typeof params.top_p === 'number') body.top_p = params.top_p;
-  if (typeof params.max_tokens === 'number' && params.max_tokens > 0) body.max_tokens = params.max_tokens;
+  if (typeof params.max_tokens === 'number' && params.max_tokens > 0) {
+    // SDK hard ceiling: it rejects max_tokens above 98 304
+    // ("max_tokens参数非法：限制数值范围[1,98304]") — clamp here so the
+    // generous no-ceiling defaults of the chat pipeline (65 536 / 131 072
+    // per gateway model) stay valid on this local engine too. Values below
+    // the ceiling pass through untouched.
+    body.max_tokens = Math.min(params.max_tokens, 98_304);
+  }
   return body;
 }
 

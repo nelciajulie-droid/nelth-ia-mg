@@ -14,8 +14,12 @@
  * scored against the full library — Anthropic catalog + platform library:
  *
  *   +4  multi-word keyword phrase ("landing page", "lettre de motivation")
- *   +3  single keyword ("html", "traduire"); word-boundary match for very
- *       short acronyms (cv, seo, ux, kpi) to avoid substring false positives
+ *   +2  single SHORT keyword/acronym ("cv", "seo", "ux", "ia") — word-boundary
+ *       match, and deliberately UNDER the selection threshold: a two-letter
+ *       acronym alone must never load a skill ("actualités IA" used to load
+ *       image-generation-prompting on every AI-news question)
+ *   +3  single long keyword ("html", "traduire", "illustration") — substring
+ *       match for real words
  *   +4  the skill's own name spelled out in the message
  *   +5  unambiguous medium/format hint regex (pdf, xlsx, poster…)
  *   +1  significant word shared with name+description (capped at +3)
@@ -44,6 +48,7 @@ export interface PreSelectedSkill {
 const SKILL_HINTS: Array<[RegExp, string]> = [
   // Most specific first — the first match wins the +5 hint boost.
   [/\bseo\b|r[ée]f[ée]rencement\b|positionnement\s+(?:google|web|naturel)/i, 'seo-optimization'],
+  [/\bcv\b|curriculum\s*vit(?:ae|[ée])/i, 'career-documents'],
   [/\bpdf\b|\.pdf\b|fichier\s+pdf/i, 'pdf'],
   [/\bdocx\b|\.docx\b|document\s+(word|word\b)|fichier\s+word|\bword\b(?!\.?com)/i, 'docx'],
   [/\bxlsx\b|\.xlsx\b|fichier\s+excel|\bexcel\b|feuilles?\s+de\s+calcul|spreadsheet/i, 'xlsx'],
@@ -168,10 +173,12 @@ function scoreCandidate(c: Candidate, normText: string): number {
     if (kw.includes(' ')) {
       if (normText.includes(kw)) score += 4;
     } else if (kw.length <= 4) {
-      // Short/acronym keywords (cv, seo, ux, kpi, rest, copy…) — word-boundary
-      // match: "rest" must not fire inside "restaurant", nor "copy" in
-      // "copyright".
-      if (new RegExp(`(^|[^a-z0-9])${escapeRe(kw)}([^a-z0-9]|$)`).test(normText)) score += 3;
+      // Short/acronym keywords (cv, seo, ux, kpi, ia…) — word-boundary
+      // match AND a sub-threshold weight: "rest" must not fire inside
+      // "restaurant", and a lone "ia" ("actualités IA") must never load
+      // the image-generation skill. Two short keywords, a phrase keyword
+      // or a hint still cross the threshold together — that is the point.
+      if (new RegExp(`(^|[^a-z0-9])${escapeRe(kw)}([^a-z0-9]|$)`).test(normText)) score += 2;
     } else if (normText.includes(kw)) {
       score += 3;
     }
@@ -273,7 +280,7 @@ export async function buildPreLoadedSkillsMessage(
   return {
     role: 'system',
     content: `AGENT SKILLS LOADED FOR THIS TASK
-The skill packs below were loaded automatically because the user's current request clearly matches them. Follow their instructions closely while answering — they define the standards expected for this task. These skills are ALREADY loaded: never output USE_SKILL(...) for any skill listed below, answer directly instead. You may still begin your reply with USE_SKILL(other_skill) if a DIFFERENT skill from the Agent Skills index is genuinely required for this task.
+The skill packs below were loaded automatically because the user's current request clearly matches them. Their instructions are BINDING for this task: your answer MUST follow their methods, structure, standards and output formats wherever they apply — code style, section layout, vocabulary, file formats, checklists. An answer that ignores the loaded skills is a FAILED answer, even if it is otherwise correct. Apply them concretely, not symbolically: follow their step-by-step methods and produce the output shapes they define. These skills are ALREADY loaded: never output USE_SKILL(...) for any skill listed below, answer directly instead. You may still begin your reply with USE_SKILL(other_skill) if a DIFFERENT skill from the Agent Skills index is genuinely required for this task.
 Remember the platform's document capability: when the user explicitly asks for a downloadable file, emit a \`\`\`document filename="..." block; otherwise keep code and documents inline in normal fenced code blocks.
 
 ${blocks}`,

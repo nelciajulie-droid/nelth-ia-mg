@@ -987,6 +987,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const v = (params as any)[key] ?? (form as any)[key];
     if (v !== undefined && v !== null) reqBody[key] = v;
   }
+  // No output ceiling on the built-in models: without an explicit max_tokens
+  // the OpenAI-compatible gateways apply their own low default (~4k) and long
+  // code answers die mid-stream with finish_reason "length" (observed on
+  // Nelth-3.5_Thinking: code truncated mid-file). The gateway catalog limits
+  // are far higher (nemotron-3-ultra free: 65 536 completion tokens, dots-3
+  // free: 460 800) — a generous per-model ceiling is pinned so no generation
+  // is ever cut by a default. The user's own params.max_tokens still wins.
+  if (reqBody.max_tokens === undefined && isKilo) {
+    reqBody.max_tokens = modelId === KILO_REASONING_MODEL_ID ? 65_536 : 131_072;
+  }
+  console.log(
+    `[v12-flow] upstream request: model=${modelId} max_tokens=${
+      reqBody.max_tokens ?? 'gateway-default'
+    } stream=${form.stream ?? false}`
+  );
   if (form.stream === true) {
     reqBody.stream_options = { ...(reqBody.stream_options ?? {}), include_usage: true };
   }
@@ -1036,7 +1051,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // Shared upstream caller (flow scope): used by pass 1 AND the agent-skill
   // pass 2 (runStreamBody / the SSE API path re-call it with the injected
   // skill messages).
-  const timeoutSignal = AbortSignal.timeout(600_000);
+  // 780s: just under the 800s Vercel maxDuration (vercel.json) so a runaway
+  // upstream surfaces as a clean socket error instead of the platform's hard
+  // kill — while leaving ~13 minutes of streaming for long Thinking code
+  // generations that the old 600s cut mid-file.
+  const timeoutSignal = AbortSignal.timeout(780_000);
   const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
   const callUpstream = (body: Record<string, any>): Promise<Response> =>
     kiloFallback
@@ -1086,7 +1105,9 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       ...reqBody,
       messages,
       stream: false,
-      max_tokens: 800,
+      // Same ceiling as the main generation — a repaired answer can be a
+      // long code file; the old hard-coded 800 truncated it mid-code.
+      max_tokens: reqBody.max_tokens,
       stream_options: undefined,
     };
     delete body.stream_options;
@@ -1114,27 +1135,15 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // Provider flakiness guard (observed on the free dots-studio model with
     // web-search context): the gateway SOMETIMES answers 400 "bad request"
     // from the upstream provider although the request is perfectly valid —
-    // the same body succeeds on a retry and the built-in reasoning model
-    // handles these large payloads reliably. One retry on the same model,
-    // then a transparent fallback to the reasoning model, so the answer (and
-    // its citations) always reach the user instead of a dead error bubble.
+    // the same body succeeds on a retry. ONE retry on the SAME model: the
+    // model the user picked is never substituted (explicit user rule — a
+    // persisting upstream error surfaces as-is instead of silently
+    // answering with a different model).
     if (isKilo && upstream.status === 400) {
       const probe = await upstream.clone().text().catch(() => '');
       if (/bad request|Provider returned error/i.test(probe)) {
         console.warn('[v12-flow] gateway 400 provider flake — retrying the same model');
         upstream = await callUpstream(reqBody);
-        if (upstream.status === 400) {
-          const probe2 = await upstream.clone().text().catch(() => '');
-          if (/bad request|Provider returned error/i.test(probe2) && modelId !== KILO_REASONING_MODEL_ID) {
-            console.warn('[v12-flow] gateway 400 persists — falling back to the built-in reasoning model');
-            upstream = await callUpstream({
-              ...reqBody,
-              model: KILO_REASONING_MODEL_ID,
-              reasoning: { enabled: true },
-              include_reasoning: true,
-            });
-          }
-        }
       }
     }
   } catch (e) {
