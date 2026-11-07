@@ -1181,6 +1181,23 @@ html.nsrc-lock{overflow:hidden}
       /* hidden layers */
       '.nelth-imgc-hide{display:none !important}',
 
+      /* ---------------------------------------------------------- history
+         images — messages from PAST discussions render natively (the files
+         grid: button.w-full > img.rounded-lg): the w-full button stretches
+         the image to the WHOLE message width (760px desktop / full screen
+         mobile) while the live generation card caps at 384px — the reported
+         "l'image devient très grande" in older chats. Same ChatGPT-style
+         sizing as the card: width ≤ min(384px,100%), height ≤ 512px, natural
+         ratio, never upscaled, card-like corners/border. */
+      '.my-1.overflow-x-auto img.rounded-lg{max-width:min(384px,100%);max-height:512px;',
+      'border-radius:1rem;border:1px solid #e5e5e5}',
+      'html.dark .my-1.overflow-x-auto img.rounded-lg{border-color:#262626}',
+      /* the lightbox button shrinks with the image so the clickable area
+         matches what is visible (min() keeps it definite — fit-content would
+         stay 760px: the img's percentage max-width is ignored during
+         intrinsic sizing; graceful no-op where :has() is unsupported) */
+      '.my-1.overflow-x-auto button:has(>img.rounded-lg){width:min(384px,100%)}',
+
       /* reduced motion — settle instantly, no sweep/flash, no resize morph */
       '.nelth-imgc.nelth-imgc-instant .nelth-imgc-grid{transition:none}',
       '.nelth-imgc.nelth-imgc-instant .nelth-imgc-photo{transition:none}',
