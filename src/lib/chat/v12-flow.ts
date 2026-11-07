@@ -313,7 +313,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // Instant typing feedback (streaming UX): the user's message lands, then
   // NOTHING is visible for seconds on the free upstream — the auto-engagement
   // decisions (~2s of LLM calls) plus the gateway's first-token queue (~1.5s)
-  // are silent. A shimmer "Réflexion…" status row appears immediately (the
+  // are silent. A shimmer "Réflexion" status row appears immediately (the
   // SSE stream is already open) and clears the moment real content or
   // reasoning starts flowing. Image turns replace it with their own phase
   // statuses; search turns with "Recherche web en cours".
@@ -323,7 +323,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     thinkingStatusShown = true;
     await emit({
       type: 'status',
-      data: { action: 'chat', description: 'Réflexion…', done: false },
+      data: { action: 'chat', description: 'Réflexion', done: false },
     });
   };
   const clearThinkingStatus = async () => {
@@ -331,7 +331,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     thinkingStatusShown = false;
     await emit({
       type: 'status',
-      data: { action: 'chat', description: 'Réflexion…', done: true },
+      data: { action: 'chat', description: 'Réflexion', done: true },
     });
   };
   if (sessionId) await showThinkingStatus();
@@ -1599,7 +1599,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         nativeReasoning.advanceReveal();
         startRevealTicker();
       }
-      // Visible reasoning = live feedback: the "Réflexion…" status row
+      // Visible reasoning = live feedback: the "Réflexion" status row
       // hands over to the real thinking block.
       await clearThinkingStatus();
       await emitNative(!wasActive); // first chunk → force the switch
