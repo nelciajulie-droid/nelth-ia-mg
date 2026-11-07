@@ -2,8 +2,8 @@
 
 /**
  * Message list: user bubbles on the right, assistant bubbles on the left,
- * markdown-lite rendering, inline streaming caret that hugs the last
- * streamed character (and vanishes the moment the stream ends), file chips
+ * markdown-lite rendering, animated N logo that hugs the last streamed
+ * character (and vanishes the moment the stream ends), file chips
  * and auto-scroll.
  */
 
@@ -270,9 +270,10 @@ export function ChatMessages({
               <div className="group/message flex max-w-[85%] flex-col items-start gap-1 sm:max-w-[75%]">
                 {message.content.length > 0 || (showCursor && !message.imageGeneration) ? (
                   <div className="rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 shadow-sm">
-                    {/* The caret is rendered INSIDE the markdown tree, right
-                        after the last streamed character — it follows the text
-                        and is gone once the stream completes. */}
+                    {/* The animated N logo is rendered INSIDE the markdown
+                        tree, right after the last streamed character — it
+                        follows the text and is gone once the stream
+                        completes. */}
                     <Markdown content={message.content} streamingCursor={showCursor} />
                     {message.content.length === 0 && !streaming ? (
                       <span className="text-sm italic text-zinc-400">(empty response)</span>

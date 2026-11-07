@@ -7,11 +7,12 @@
  * `inline code`, [links](https://...) and line breaks. Everything is rendered
  * as React elements (no HTML injection), which keeps the stream safe.
  *
- * `streamingCursor` appends a blinking caret INLINE — right after the LAST
- * streamed character (or at the end of the last code block while it is still
- * being written). Because every delta re-renders this component, the caret
- * visibly follows the text as it streams, and it disappears entirely once
- * the stream ends (the prop is only true while tokens are arriving).
+ * `streamingCursor` appends the ANIMATED NELTH N LOGO INLINE — right after
+ * the LAST streamed character (or at the end of the last code block while it
+ * is still being written). Because every delta re-renders this component,
+ * the logo visibly follows the text as it streams, and it disappears
+ * entirely once the stream ends (the prop is only true while tokens are
+ * arriving).
  */
 
 import * as React from "react";
@@ -19,18 +20,26 @@ import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
-// Streaming caret — hugs the last character, blinks in place
+// Streaming N logo — hugs the last character, draws itself in a loop
 // ---------------------------------------------------------------------------
 
-function StreamCaret({ dark = false }: { dark?: boolean }) {
+/** The Nelth "N" glyph path (same as the compiled frontend's indicator). */
+const N_PATH =
+  "M380 85.5c-.8.7-6.9 5.3-13.5 10-33.7 24.3-107.8 79.8-108.2 81.1-.4 1.1 14.6 9.6 47.7 27.1l18.5 9.8.3 40.5c.1 22.2-.1 40.7-.6 41.2-.4.4-6.6-2.8-13.7-7.1-39.9-24-52.5-31.2-53.5-30.6-.6.4-1 11.8-1 33.4 0 32.7 0 32.8 2.3 34.8 2.5 2.4 6.9 5.1 21.7 13.8 5.8 3.4 17.6 10.5 26.3 15.8 19.9 12.2 23.9 14.3 31.5 15.8 14.7 3.1 33-5.4 40.9-18.8 5.5-9.4 5.3-4.5 5.3-141.6 0-132.7.1-129.4-4-125.2m-225.9 45c-12.4 3.5-20.9 10.6-26.4 22.3l-3.2 6.7-.1 128.8c-.2 113.3 0 128.8 1.3 128.3 1.8-.7 16.9-11.6 33.6-24.1 6.5-5 21.7-16.1 33.6-24.8 40.9-29.8 57.1-41.9 57.1-42.8 0-1.4-5.4-4.5-34.5-19.9-14.8-7.9-28-14.9-29.1-15.6-2-1.2-2.2-2.3-2.9-27.3-.8-29.7.1-56.1 1.9-56.1.7 0 4.5 2.1 8.6 4.7 19.8 12.5 56.6 34.1 57.2 33.7.5-.3.8-15.5.8-33.9v-33.3l-3-2.6c-4.7-3.9-66.6-40.6-72-42.7-6.9-2.6-16.4-3.2-22.9-1.4";
+
+function StreamN({ dark = false }: { dark?: boolean }) {
   return (
     <span
       aria-hidden="true"
       className={cn(
-        "stream-caret ml-[2px] inline-block h-[1.05em] w-[0.5em] translate-y-[0.2em] rounded-[2px]",
-        dark ? "bg-emerald-400" : "bg-emerald-500"
+        "nelth-stream-n-inline ml-[0.12em] inline-block h-[1.12em] w-[1.06em] align-[-0.22em]",
+        dark ? "text-emerald-400" : "text-emerald-600"
       )}
-    />
+    >
+      <svg viewBox="0 0 497 502" focusable="false" className="block h-full w-full">
+        <path className="nelth-n-path" d={N_PATH} />
+      </svg>
+    </span>
   );
 }
 
@@ -101,7 +110,7 @@ function renderTextBlock(text: string, keyPrefix: string, caret = false): React.
           <React.Fragment key={`${key}-l${lIndex}`}>
             {lIndex > 0 ? <br /> : null}
             {renderInline(line, `${key}-l${lIndex}`)}
-            {caret && isLastParagraph && lIndex === lines.length - 1 ? <StreamCaret /> : null}
+            {caret && isLastParagraph && lIndex === lines.length - 1 ? <StreamN /> : null}
           </React.Fragment>
         ))}
       </p>
@@ -153,7 +162,7 @@ function CodeBlock({
       <pre className="scrollbar-thin overflow-x-auto px-4 py-3 font-mono text-[13px] leading-relaxed text-zinc-100">
         <code>
           {code}
-          {caret ? <StreamCaret dark /> : null}
+          {caret ? <StreamN dark /> : null}
         </code>
       </pre>
     </div>
@@ -207,7 +216,7 @@ export function Markdown({
       return streamingCursor
         ? [
             <p key="t-empty" className="whitespace-pre-wrap break-words leading-relaxed">
-              <StreamCaret />
+              <StreamN />
             </p>,
           ]
         : null;

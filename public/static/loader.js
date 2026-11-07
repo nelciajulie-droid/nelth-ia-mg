@@ -1048,6 +1048,12 @@ html.nsrc-lock{overflow:hidden}
     for (let i = 0; i < buttons.length; i++) {
       const btn = buttons[i];
       if (btn.dataset[OPENED_FLAG]) continue;
+      // Status-history timeline — NEVER auto-expanded. The live status line
+      // (collapsed toggle) is the feedback; expanding it lays out the
+      // dot-and-line Activity Timeline the user explicitly rejected. Only
+      // reasoning/thinking content blocks (their headers carry no
+      // aria-label) auto-open.
+      if (btn.getAttribute('aria-label') === 'Toggle status history') continue;
       let shimmer = null;
       try {
         shimmer = btn.querySelector('.shimmer');
@@ -1616,7 +1622,41 @@ html.nsrc-lock{overflow:hidden}
     return false;
   };
 
+  /**
+   * Timeline chrome must never wrap the thinking label — the user rejected
+   * the dot-and-line "Activity Timeline" look for « Réflexion ». Every
+   * timeline row whose status text is the thinking label loses its
+   * decoration wrapper (the dot span + vertical connector line); the label
+   * renders as plain text. Applied in every state (live, manually expanded,
+   * reloaded history) — informative statuses (web search, image phases)
+   * keep their timeline.
+   */
+  function stripTimelineDecor(msgEl) {
+    const rows = msgEl.querySelectorAll('.status-description');
+    for (let i = 0; i < rows.length; i++) {
+      if (!isThinkingLabel(rows[i].textContent)) continue;
+      let row = null;
+      try {
+        row = rows[i].closest('.flex.items-stretch');
+      } catch (e) {
+        continue;
+      }
+      if (!row) continue;
+      const decor = row.firstElementChild;
+      if (
+        decor &&
+        decor !== rows[i] &&
+        !decor.classList.contains('status-description') &&
+        (decor.querySelector('span.rounded-full') || !(decor.textContent || '').trim())
+      ) {
+        decor.classList.add('nelth-think-hide');
+      }
+    }
+  }
+
   function cleanMessage(msgEl) {
+    // Timeline de-decoration runs first, in every state.
+    stripTimelineDecor(msgEl);
     // Done marker: the action toolbar only renders on completed messages.
     const done = !!msgEl.querySelector(
       'button[aria-label="Copy"], button[aria-label="Read Aloud"]'
@@ -1704,71 +1744,87 @@ html.nsrc-lock{overflow:hidden}
 })();
 
 /* ====================================================================
- * STREAMING CARET — the blinking caret that follows the stream.
+ * STREAMING « N » — the animated Nelth logo that follows the stream.
  *
- * User's ask: NOT a logo — a caret that rides the streaming text:
+ * User's ask (latest): the blinking caret becomes the ANIMATED N LOGO,
+ * with the exact same stream-riding behaviour:
  *   • it sits right AFTER the last streamed character — answer prose,
  *     streaming reasoning, or the last code line of a code block being
- *     written;
+ *     written — and, before the first token, right after the live
+ *     « Réflexion » status label (our own thinking text, plain, no
+ *     timeline chrome);
  *   • it moves along as tokens land;
- *   • it is invisible the moment the response completes (done → the
- *     message's action toolbar renders → the caret is removed) and never
+ *   • it is INVISIBLE the moment the response completes (done → the
+ *     message's action toolbar renders → the logo is removed) and never
  *     appears on finished messages.
  *
- * Two placement modes, same blinking caret:
- *   • INLINE (prose): appended inside the last text block, right after
- *     its last character. The compiled frontend re-renders the markdown
- *     tree on every delta, destroying the injected node — the caret is
- *     (re)created often, and a phase-locked negative animation-delay
- *     (anchored to a module-level clock) keeps the blink visually
+ * Two placement modes, same self-drawing N (nelthDraw, 1.5s infinite
+ * alternate — the compiled frontend's own indicator animation):
+ *   • INLINE (prose + pre-token status label): appended inside the last
+ *     text-bearing block, right after its last character. The compiled
+ *     frontend re-renders the markdown tree on every delta, destroying
+ *     the injected node — the logo is (re)created often, and a
+ *     phase-locked negative animation-delay (anchored to a module-level
+ *     clock, modulo the 3s alternate cycle) keeps the draw visually
  *     continuous across re-creations.
  *   • OVERLAY (CodeMirror code blocks): streaming code renders in a
  *     CodeMirror editor that rebuilds its line DOM on every frame — any
  *     foreign child appended inside a line is wiped within milliseconds
- *     (measured: 0% presence). The caret therefore becomes a
+ *     (measured: 0% presence). The logo therefore becomes a
  *     position:fixed overlay on <body>, re-anchored EVERY animation
  *     frame to a collapsed Range at the end of the last code line —
  *     outside CM's DOM, immune to its churn, perfectly glued to the
- *     text (including autoscroll), styled with the line's own font size
- *     and color.
- *   • The caret only lives where text is actually streaming: the LAST
+ *     text (including autoscroll), sized and coloured from the line's
+ *     own computed font.
+ *   • The logo only lives where text is actually streaming: the LAST
  *     prose container with content in document order (the answer renders
- *     after the reasoning block, so during thinking the caret rides the
+ *     after the reasoning block, so during thinking the N rides the
  *     reasoning prose, then jumps to the answer once it starts). Before
- *     the first token the "Réflexion" shimmer row is the feedback — no
- *     text yet, no caret.
+ *     the first token the live « Réflexion » status row carries it.
  *   • Completed messages (action toolbar rendered — also true for
  *     errors, which set done in the event handler) never show it.
  * ==================================================================== */
 (() => {
   'use strict';
-  if (window.__NELTH_STREAM_CARET__) return;
-  window.__NELTH_STREAM_CARET__ = true;
+  if (window.__NELTH_STREAM_N__) return;
+  window.__NELTH_STREAM_N__ = true;
 
-  const CARET_CLASS = 'nelth-stream-caret';
-  const CARET_INLINE = CARET_CLASS + '-inline';
-  const CARET_OVERLAY = CARET_CLASS + '-overlay';
-  const BLINK_MS = 1100;
+  const N_CLASS = 'nelth-stream-n';
+  const N_INLINE = N_CLASS + '-inline';
+  const N_OVERLAY = N_CLASS + '-overlay';
+  const DRAW_MS = 1500; // nelthDraw duration (alternate → 3s visual cycle)
   const T0 = Date.now(); // phase-lock reference for seamless re-creations
-  window.__NELTH_CARET_DEBUG__ = { errors: [], scans: 0, overlayFrames: 0 };
+  window.__NELTH_STREAM_N_DEBUG__ = { errors: [], scans: 0, overlayFrames: 0 };
+
+  const THINKING_LABELS = ['Réflexion', 'Réflexion…'];
+  const isThinkingLabel = (txt) => THINKING_LABELS.indexOf((txt || '').trim()) !== -1;
+
+  /* The Nelth "N" glyph — exact same path as the compiled frontend's own
+   * inline indicator (ResponseMessage template). The animation lives in a
+   * document-level stylesheet so re-created instances share one clock. */
+  const N_PATH =
+    'M380 85.5c-.8.7-6.9 5.3-13.5 10-33.7 24.3-107.8 79.8-108.2 81.1-.4 1.1 14.6 9.6 47.7 27.1l18.5 9.8.3 40.5c.1 22.2-.1 40.7-.6 41.2-.4.4-6.6-2.8-13.7-7.1-39.9-24-52.5-31.2-53.5-30.6-.6.4-1 11.8-1 33.4 0 32.7 0 32.8 2.3 34.8 2.5 2.4 6.9 5.1 21.7 13.8 5.8 3.4 17.6 10.5 26.3 15.8 19.9 12.2 23.9 14.3 31.5 15.8 14.7 3.1 33-5.4 40.9-18.8 5.5-9.4 5.3-4.5 5.3-141.6 0-132.7.1-129.4-4-125.2m-225.9 45c-12.4 3.5-20.9 10.6-26.4 22.3l-3.2 6.7-.1 128.8c-.2 113.3 0 128.8 1.3 128.3 1.8-.7 16.9-11.6 33.6-24.1 6.5-5 21.7-16.1 33.6-24.8 40.9-29.8 57.1-41.9 57.1-42.8 0-1.4-5.4-4.5-34.5-19.9-14.8-7.9-28-14.9-29.1-15.6-2-1.2-2.2-2.3-2.9-27.3-.8-29.7.1-56.1 1.9-56.1.7 0 4.5 2.1 8.6 4.7 19.8 12.5 56.6 34.1 57.2 33.7.5-.3.8-15.5.8-33.9v-33.3l-3-2.6c-4.7-3.9-66.6-40.6-72-42.7-6.9-2.6-16.4-3.2-22.9-1.4';
 
   const style = document.createElement('style');
   style.textContent = `
-.${CARET_CLASS}{border-radius:2px;background:currentColor;animation:nelthCaretBlink ${BLINK_MS}ms ease-in-out infinite;pointer-events:none;user-select:none}
-.${CARET_INLINE}{display:inline-block;width:0.42em;height:1.02em;margin-left:2px;vertical-align:-0.17em}
-.${CARET_OVERLAY}{position:fixed;display:block;margin:0;z-index:60;background:#10b981}
-@keyframes nelthCaretBlink{0%,100%{opacity:1}50%{opacity:0}}
-@media (prefers-reduced-motion:reduce){.${CARET_CLASS}{animation:none}}
+.nelth-n-path{fill:none;stroke:currentColor;stroke-width:7;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1800;stroke-dashoffset:1800;animation:nelthDraw ${DRAW_MS}ms cubic-bezier(.65,0,.35,1) infinite alternate,nelthFill .5s ease 1.2s infinite alternate}
+@keyframes nelthDraw{0%{stroke-dashoffset:1800}100%{stroke-dashoffset:0}}
+@keyframes nelthFill{0%,20%{fill:transparent;stroke:currentColor}80%,100%{fill:currentColor;stroke:currentColor}}
+.${N_CLASS}{pointer-events:none;user-select:none;line-height:1}
+.${N_INLINE}{display:inline-block;width:1.06em;height:1.12em;margin-left:0.12em;vertical-align:-0.22em}
+.${N_INLINE} svg,.${N_OVERLAY} svg{display:block;width:100%;height:100%}
+.${N_OVERLAY}{position:fixed;display:block;margin:0;z-index:60}
+@media (prefers-reduced-motion:reduce){.nelth-n-path{animation:none;stroke-dashoffset:0;fill:currentColor}}
 `;
   document.head.appendChild(style);
 
   /**
    * The exact spot the stream is writing: the LAST text-bearing block in
    * document order. CodeMirror code lines (.cm-line) are first-class
-   * candidates — a code block being streamed gets the caret right after
+   * candidates — a code block being streamed gets the logo right after
    * its last code character.
    */
-  function caretHost(proseEl) {
+  function streamHost(proseEl) {
     const blocks = proseEl.querySelectorAll(
       '.cm-line, p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption'
     );
@@ -1778,42 +1834,48 @@ html.nsrc-lock{overflow:hidden}
     return proseEl;
   }
 
-  let caretEl = null;
-  function getCaret() {
-    if (caretEl && caretEl.isConnected) return caretEl;
-    caretEl = document.createElement('span');
-    caretEl.className = CARET_CLASS + ' ' + CARET_INLINE;
-    caretEl.setAttribute('aria-hidden', 'true');
-    // Phase-locked blink: the element is re-created whenever Svelte wipes
-    // the markdown subtree — the delay keeps it on the same visual clock.
-    caretEl.style.animationDelay = (-(Date.now() - T0) % BLINK_MS) + 'ms';
-    return caretEl;
+  let nEl = null;
+  function getN() {
+    if (nEl && nEl.isConnected) return nEl;
+    nEl = document.createElement('span');
+    nEl.className = N_CLASS + ' ' + N_INLINE;
+    nEl.setAttribute('aria-hidden', 'true');
+    nEl.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 497 502" aria-hidden="true" focusable="false"><path class="nelth-n-path" d="' +
+      N_PATH +
+      '"/></svg>';
+    // Phase-locked draw: the element is re-created whenever Svelte wipes
+    // the markdown subtree — the delay keeps it on the same visual clock
+    // (nelthDraw is alternate → 3s period; nelthFill shares the offset).
+    const phase = (Date.now() - T0) % (DRAW_MS * 2);
+    const path = nEl.querySelector('path');
+    if (path) path.style.animationDelay = -phase + 'ms,' + -phase + 'ms';
+    return nEl;
   }
 
-  function hideCaret() {
-    if (caretEl) caretEl.remove();
+  function hideN() {
+    if (nEl) nEl.remove();
   }
 
   /* ------------------------------------------------------- overlay mode */
 
   let mode = 'off'; // 'off' | 'inline' | 'overlay'
-  let streamMsgEl = null; // message currently riding the caret
+  let streamMsgEl = null; // message currently riding the logo
   let rafHandle = null;
 
-  /** Anchor the overlay caret at the end of a CodeMirror line's content. */
+  /** Anchor the overlay logo at the end of a CodeMirror line's content. */
   function positionOverlay(host) {
-    const caret = getCaret();
-    if (caret.parentNode !== document.body) document.body.appendChild(caret);
-    if (caret.className !== CARET_CLASS + ' ' + CARET_OVERLAY) {
-      caret.className = CARET_CLASS + ' ' + CARET_OVERLAY;
-      caret.style.animationDelay = (-(Date.now() - T0) % BLINK_MS) + 'ms';
+    const n = getN();
+    if (n.parentNode !== document.body) document.body.appendChild(n);
+    if (n.className !== N_CLASS + ' ' + N_OVERLAY) {
+      n.className = N_CLASS + ' ' + N_OVERLAY;
     }
-    caret.classList.remove(CARET_INLINE);
-    caret.style.left = '';
-    caret.style.top = '';
-    caret.style.width = '';
-    caret.style.height = '';
-    caret.style.background = '';
+    n.classList.remove(N_INLINE);
+    n.style.left = '';
+    n.style.top = '';
+    n.style.width = '';
+    n.style.height = '';
+    n.style.color = '';
 
     const range = document.createRange();
     range.selectNodeContents(host);
@@ -1825,14 +1887,14 @@ html.nsrc-lock{overflow:hidden}
     }
     const lineStyle = window.getComputedStyle(host);
     const fontSize = parseFloat(lineStyle.fontSize) || 13;
-    const h = Math.max(Math.round(fontSize * 1.02), 10);
-    const w = Math.max(Math.round(fontSize * 0.42), 4);
+    const h = Math.max(Math.round(fontSize * 1.12), 12);
+    const w = Math.max(Math.round(fontSize * 1.06), 12);
     const top = rect.height > 0 ? rect.top + (rect.height - h) / 2 : rect.top;
-    caret.style.left = Math.round(rect.right + 2) + 'px';
-    caret.style.top = Math.round(top) + 'px';
-    caret.style.width = w + 'px';
-    caret.style.height = h + 'px';
-    caret.style.background = lineStyle.color || '#10b981';
+    n.style.left = Math.round(rect.right + 2) + 'px';
+    n.style.top = Math.round(top) + 'px';
+    n.style.width = w + 'px';
+    n.style.height = h + 'px';
+    n.style.color = lineStyle.color || '#10b981';
   }
 
   /** Per-frame overlay anchor (rAF while a code block streams). */
@@ -1841,7 +1903,7 @@ html.nsrc-lock{overflow:hidden}
     if (mode !== 'overlay' || !streamMsgEl || !streamMsgEl.isConnected) {
       mode = 'off';
       streamMsgEl = null;
-      hideCaret();
+      hideN();
       return;
     }
     const placement = placeFor(streamMsgEl);
@@ -1850,7 +1912,7 @@ html.nsrc-lock{overflow:hidden}
       // immediately instead of waiting for the next mutation scan.
       mode = 'off';
       streamMsgEl = null;
-      hideCaret();
+      hideN();
       return;
     }
     if (!placement.overlay) {
@@ -1860,22 +1922,22 @@ html.nsrc-lock{overflow:hidden}
       return;
     }
     positionOverlay(placement.host);
-    window.__NELTH_CARET_DEBUG__.overlayFrames++;
+    window.__NELTH_STREAM_N_DEBUG__.overlayFrames++;
     rafHandle = requestAnimationFrame(overlayTick);
   }
 
   /* ---------------------------------------------------- placement logic */
 
   /**
-   * Core decision for one message. Returns null when no caret applies
-   * (done or no streaming text), otherwise { host, overlay }.
+   * Core decision for one message. Returns null when no logo applies
+   * (done or nothing streaming), otherwise { host, overlay }.
    */
   function placeFor(msgEl) {
     const chat = msgEl.querySelector('.chat-assistant');
     if (!chat) return null;
 
     // Completed messages (toolbar rendered — also true for errors, which
-    // set done in the event handler): no caret, ever again.
+    // set done in the event handler): no logo, ever again.
     if (msgEl.querySelector('button[aria-label="Copy"], button[aria-label="Read Aloud"]')) {
       return null;
     }
@@ -1883,30 +1945,34 @@ html.nsrc-lock{overflow:hidden}
     // The live stream: the LAST prose container with text is the one
     // receiving tokens right now (answer after reasoning in DOM order).
     const proseEls = chat.querySelectorAll('.markdown-prose, .markdown-prose-sm');
-    let target = null;
     for (let i = proseEls.length - 1; i >= 0; i--) {
       if ((proseEls[i].textContent || '').trim()) {
-        target = proseEls[i];
-        break;
+        const host = streamHost(proseEls[i]);
+        return { host, overlay: host.classList.contains('cm-line') };
       }
     }
-    // No text anywhere yet (pre-first-token): the "Réflexion" shimmer row
-    // is the live feedback — the caret only exists behind streamed text.
-    if (!target) return null;
 
-    const host = caretHost(target);
-    return { host, overlay: host.classList.contains('cm-line'), target };
+    // Pre-first-token phase: no text yet — the logo rides the END of the
+    // live « Réflexion » status label (our own thinking text; hidden rows
+    // skip via offsetParent). This is the instant-feedback phase.
+    const rows = chat.querySelectorAll('.status-description');
+    for (let i = 0; i < rows.length; i++) {
+      if (isThinkingLabel(rows[i].textContent) && rows[i].offsetParent) {
+        return { host: rows[i], overlay: false };
+      }
+    }
+    return null;
   }
 
   function processMessage(msgEl) {
     const chat = msgEl.querySelector('.chat-assistant');
     if (!chat) return;
-    window.__NELTH_CARET_DEBUG__.scans++;
+    window.__NELTH_STREAM_N_DEBUG__.scans++;
 
     // Sweep inline strays first (re-renders can orphan previous instances
-    // inside the markdown tree). The overlay caret lives on <body> and is
+    // inside the markdown tree). The overlay logo lives on <body> and is
     // managed exclusively through the mode state machine.
-    const strays = chat.querySelectorAll('.' + CARET_CLASS);
+    const strays = chat.querySelectorAll('.' + N_CLASS);
     for (let i = 0; i < strays.length; i++) strays[i].remove();
 
     const placement = placeFor(msgEl);
@@ -1914,12 +1980,12 @@ html.nsrc-lock{overflow:hidden}
     if (!placement) {
       if (streamMsgEl === msgEl) {
         // This was the streaming message: generation finished (or its
-        // text vanished) — caret off, overlay loop stopped.
+        // text vanished) — logo off, overlay loop stopped.
         if (rafHandle !== null) cancelAnimationFrame(rafHandle);
         rafHandle = null;
         mode = 'off';
         streamMsgEl = null;
-        hideCaret();
+        hideN();
       }
       return;
     }
@@ -1943,20 +2009,20 @@ html.nsrc-lock{overflow:hidden}
       mode = 'inline';
     }
 
-    const caret = getCaret();
-    if (caret.className.indexOf(CARET_INLINE) === -1 || caret.classList.contains(CARET_OVERLAY)) {
-      caret.className = CARET_CLASS + ' ' + CARET_INLINE;
+    const n = getN();
+    if (n.className.indexOf(N_INLINE) === -1 || n.classList.contains(N_OVERLAY)) {
+      n.className = N_CLASS + ' ' + N_INLINE;
     }
-    caret.style.left = '';
-    caret.style.top = '';
-    caret.style.width = '';
-    caret.style.height = '';
-    caret.style.background = '';
+    n.style.left = '';
+    n.style.top = '';
+    n.style.width = '';
+    n.style.height = '';
+    n.style.color = '';
     // Move only when the anchor actually changed (new paragraph or content
-    // landed after the caret) — plain token appends to the same block keep
-    // it in place so the blink never stutters.
-    if (caret.parentNode !== placement.host || caret.nextSibling) {
-      placement.host.appendChild(caret);
+    // landed after the logo) — plain token appends to the same block keep
+    // it in place so the draw never stutters.
+    if (n.parentNode !== placement.host || n.nextSibling) {
+      placement.host.appendChild(n);
     }
   }
 
@@ -1966,7 +2032,7 @@ html.nsrc-lock{overflow:hidden}
       try {
         processMessage(msgs[i]);
       } catch (e) {
-        window.__NELTH_CARET_DEBUG__.errors.push(String(e && e.message));
+        window.__NELTH_STREAM_N_DEBUG__.errors.push(String(e && e.message));
       }
     }
   }
