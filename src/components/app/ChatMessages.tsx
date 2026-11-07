@@ -2,7 +2,9 @@
 
 /**
  * Message list: user bubbles on the right, assistant bubbles on the left,
- * markdown-lite rendering, streaming cursor, file chips and auto-scroll.
+ * markdown-lite rendering, inline streaming caret that hugs the last
+ * streamed character (and vanishes the moment the stream ends), file chips
+ * and auto-scroll.
  */
 
 import * as React from "react";
@@ -19,12 +21,6 @@ const SUGGESTIONS = [
   "Summarize the RAG pipeline as a bullet list",
   "Show me a TypeScript debounce snippet",
 ];
-
-function StreamingCursor() {
-  return (
-    <span className="ml-0.5 inline-block h-4 w-[7px] animate-pulse rounded-sm bg-emerald-500 align-text-bottom" />
-  );
-}
 
 function CopyMessageButton({ content }: { content: string }) {
   const [copied, setCopied] = React.useState(false);
@@ -274,8 +270,10 @@ export function ChatMessages({
               <div className="group/message flex max-w-[85%] flex-col items-start gap-1 sm:max-w-[75%]">
                 {message.content.length > 0 || (showCursor && !message.imageGeneration) ? (
                   <div className="rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 shadow-sm">
-                    <Markdown content={message.content} />
-                    {showCursor ? <StreamingCursor /> : null}
+                    {/* The caret is rendered INSIDE the markdown tree, right
+                        after the last streamed character — it follows the text
+                        and is gone once the stream completes. */}
+                    <Markdown content={message.content} streamingCursor={showCursor} />
                     {message.content.length === 0 && !streaming ? (
                       <span className="text-sm italic text-zinc-400">(empty response)</span>
                     ) : null}
@@ -285,11 +283,6 @@ export function ChatMessages({
                 <div className="flex items-center gap-1 pl-1">
                   {message.content.length > 0 && !showCursor ? (
                     <CopyMessageButton content={message.content} />
-                  ) : null}
-                  {showCursor ? (
-                    <span className="flex items-center gap-1 text-[11px] text-zinc-400">
-                      <Loader2 className="size-3 animate-spin" aria-hidden /> generating…
-                    </span>
                   ) : null}
                 </div>
               </div>

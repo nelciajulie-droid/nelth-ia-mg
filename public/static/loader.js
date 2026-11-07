@@ -1704,101 +1704,271 @@ html.nsrc-lock{overflow:hidden}
 })();
 
 /* ====================================================================
- * TYPING « N » — the animated Nelth logo while the AI responds.
+ * STREAMING CARET — the blinking caret that follows the stream.
  *
- * The compiled frontend ships a small inline "N" glyph that draws itself
- * over and over (nelthDraw, 1.5s infinite alternate) as the response's
- * live indicator: alone while waiting for the first token, then above the
- * growing answer until the message completes. Its render condition is
- * "no current status" — every status row suppresses it.
+ * User's ask: NOT a logo — a caret that rides the streaming text:
+ *   • it sits right AFTER the last streamed character — answer prose,
+ *     streaming reasoning, or the last code line of a code block being
+ *     written;
+ *   • it moves along as tokens land;
+ *   • it is invisible the moment the response completes (done → the
+ *     message's action toolbar renders → the caret is removed) and never
+ *     appears on finished messages.
  *
- * The streaming fix made the backend emit a "Réflexion" status row at
- * stream start — which instantly and permanently silenced the animated
- * logo (the status history is never empty afterwards). This layer
- * restores it: while a message is generating AND either answer prose is
- * streaming or the live "Réflexion" shimmer row is on screen, the exact
- * same inline SVG (same path, same animation) is inserted between the
- * status block and the content area — the indicator's original spot.
- * Search/image phase statuses keep it hidden (their rows are informative,
- * not the typing phase). Completed messages (action toolbar rendered)
- * never show it. Errors set done → the indicator is removed with them.
+ * Two placement modes, same blinking caret:
+ *   • INLINE (prose): appended inside the last text block, right after
+ *     its last character. The compiled frontend re-renders the markdown
+ *     tree on every delta, destroying the injected node — the caret is
+ *     (re)created often, and a phase-locked negative animation-delay
+ *     (anchored to a module-level clock) keeps the blink visually
+ *     continuous across re-creations.
+ *   • OVERLAY (CodeMirror code blocks): streaming code renders in a
+ *     CodeMirror editor that rebuilds its line DOM on every frame — any
+ *     foreign child appended inside a line is wiped within milliseconds
+ *     (measured: 0% presence). The caret therefore becomes a
+ *     position:fixed overlay on <body>, re-anchored EVERY animation
+ *     frame to a collapsed Range at the end of the last code line —
+ *     outside CM's DOM, immune to its churn, perfectly glued to the
+ *     text (including autoscroll), styled with the line's own font size
+ *     and color.
+ *   • The caret only lives where text is actually streaming: the LAST
+ *     prose container with content in document order (the answer renders
+ *     after the reasoning block, so during thinking the caret rides the
+ *     reasoning prose, then jumps to the answer once it starts). Before
+ *     the first token the "Réflexion" shimmer row is the feedback — no
+ *     text yet, no caret.
+ *   • Completed messages (action toolbar rendered — also true for
+ *     errors, which set done in the event handler) never show it.
  * ==================================================================== */
 (() => {
   'use strict';
-  if (window.__NELTH_TYPING_N__) return;
-  window.__NELTH_TYPING_N__ = true;
+  if (window.__NELTH_STREAM_CARET__) return;
+  window.__NELTH_STREAM_CARET__ = true;
 
-  /* Exact copy of the compiled indicator (ResponseMessage template):
-     same viewBox, same size (1.4em inline), same self-drawing animation. */
-  const N_SVG =
-    '<div class="text-[0.9375rem] leading-relaxed"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 497 502" aria-hidden="true" style="display:inline-block;height:1.4em;width:1.39em;margin-left:0.15em;vertical-align:-0.32em"><style>.nelth-logo-active{fill:none;stroke:currentColor;stroke-width:7;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1800;stroke-dashoffset:1800;animation:nelthDraw 1.5s cubic-bezier(.65,0,.35,1) infinite alternate,nelthFill .5s ease 1.2s infinite alternate}@keyframes nelthDraw{0%{stroke-dashoffset:1800}100%{stroke-dashoffset:0}}@keyframes nelthFill{0%,20%{fill:transparent;stroke:currentColor}80%,100%{fill:currentColor;stroke:currentColor}}</style><path class="nelth-logo-active" d="M380 85.5c-.8.7-6.9 5.3-13.5 10-33.7 24.3-107.8 79.8-108.2 81.1-.4 1.1 14.6 9.6 47.7 27.1l18.5 9.8.3 40.5c.1 22.2-.1 40.7-.6 41.2-.4.4-6.6-2.8-13.7-7.1-39.9-24-52.5-31.2-53.5-30.6-.6.4-1 11.8-1 33.4 0 32.7 0 32.8 2.3 34.8 2.5 2.4 6.9 5.1 21.7 13.8 5.8 3.4 17.6 10.5 26.3 15.8 19.9 12.2 23.9 14.3 31.5 15.8 14.7 3.1 33-5.4 40.9-18.8 5.5-9.4 5.3-4.5 5.3-141.6 0-132.7.1-129.4-4-125.2m-225.9 45c-12.4 3.5-20.9 10.6-26.4 22.3l-3.2 6.7-.1 128.8c-.2 113.3 0 128.8 1.3 128.3 1.8-.7 16.9-11.6 33.6-24.1 6.5-5 21.7-16.1 33.6-24.8 40.9-29.8 57.1-41.9 57.1-42.8 0-1.4-5.4-4.5-34.5-19.9-14.8-7.9-28-14.9-29.1-15.6-2-1.2-2.2-2.3-2.9-27.3-.8-29.7.1-56.1 1.9-56.1.7 0 4.5 2.1 8.6 4.7 19.8 12.5 56.6 34.1 57.2 33.7.5-.3.8-15.5.8-33.9v-33.3l-3-2.6c-4.7-3.9-66.6-40.6-72-42.7-6.9-2.6-16.4-3.2-22.9-1.4"/></svg></div>';
+  const CARET_CLASS = 'nelth-stream-caret';
+  const CARET_INLINE = CARET_CLASS + '-inline';
+  const CARET_OVERLAY = CARET_CLASS + '-overlay';
+  const BLINK_MS = 1100;
+  const T0 = Date.now(); // phase-lock reference for seamless re-creations
+  window.__NELTH_CARET_DEBUG__ = { errors: [], scans: 0, overlayFrames: 0 };
 
-  const THINKING_LABELS = ['Réflexion', 'Réflexion…'];
-  const isThinkingLabel = (txt) => THINKING_LABELS.indexOf((txt || '').trim()) !== -1;
+  const style = document.createElement('style');
+  style.textContent = `
+.${CARET_CLASS}{border-radius:2px;background:currentColor;animation:nelthCaretBlink ${BLINK_MS}ms ease-in-out infinite;pointer-events:none;user-select:none}
+.${CARET_INLINE}{display:inline-block;width:0.42em;height:1.02em;margin-left:2px;vertical-align:-0.17em}
+.${CARET_OVERLAY}{position:fixed;display:block;margin:0;z-index:60;background:#10b981}
+@keyframes nelthCaretBlink{0%,100%{opacity:1}50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.${CARET_CLASS}{animation:none}}
+`;
+  document.head.appendChild(style);
+
+  /**
+   * The exact spot the stream is writing: the LAST text-bearing block in
+   * document order. CodeMirror code lines (.cm-line) are first-class
+   * candidates — a code block being streamed gets the caret right after
+   * its last code character.
+   */
+  function caretHost(proseEl) {
+    const blocks = proseEl.querySelectorAll(
+      '.cm-line, p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption'
+    );
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if ((blocks[i].textContent || '').trim()) return blocks[i];
+    }
+    return proseEl;
+  }
+
+  let caretEl = null;
+  function getCaret() {
+    if (caretEl && caretEl.isConnected) return caretEl;
+    caretEl = document.createElement('span');
+    caretEl.className = CARET_CLASS + ' ' + CARET_INLINE;
+    caretEl.setAttribute('aria-hidden', 'true');
+    // Phase-locked blink: the element is re-created whenever Svelte wipes
+    // the markdown subtree — the delay keeps it on the same visual clock.
+    caretEl.style.animationDelay = (-(Date.now() - T0) % BLINK_MS) + 'ms';
+    return caretEl;
+  }
+
+  function hideCaret() {
+    if (caretEl) caretEl.remove();
+  }
+
+  /* ------------------------------------------------------- overlay mode */
+
+  let mode = 'off'; // 'off' | 'inline' | 'overlay'
+  let streamMsgEl = null; // message currently riding the caret
+  let rafHandle = null;
+
+  /** Anchor the overlay caret at the end of a CodeMirror line's content. */
+  function positionOverlay(host) {
+    const caret = getCaret();
+    if (caret.parentNode !== document.body) document.body.appendChild(caret);
+    if (caret.className !== CARET_CLASS + ' ' + CARET_OVERLAY) {
+      caret.className = CARET_CLASS + ' ' + CARET_OVERLAY;
+      caret.style.animationDelay = (-(Date.now() - T0) % BLINK_MS) + 'ms';
+    }
+    caret.classList.remove(CARET_INLINE);
+    caret.style.left = '';
+    caret.style.top = '';
+    caret.style.width = '';
+    caret.style.height = '';
+    caret.style.background = '';
+
+    const range = document.createRange();
+    range.selectNodeContents(host);
+    range.collapse(false); // zero-width position right after the last child
+    let rect = range.getBoundingClientRect();
+    if (!rect || (rect.top === 0 && rect.height === 0)) {
+      const hostRect = host.getBoundingClientRect();
+      rect = { top: hostRect.top, height: hostRect.height, right: hostRect.right };
+    }
+    const lineStyle = window.getComputedStyle(host);
+    const fontSize = parseFloat(lineStyle.fontSize) || 13;
+    const h = Math.max(Math.round(fontSize * 1.02), 10);
+    const w = Math.max(Math.round(fontSize * 0.42), 4);
+    const top = rect.height > 0 ? rect.top + (rect.height - h) / 2 : rect.top;
+    caret.style.left = Math.round(rect.right + 2) + 'px';
+    caret.style.top = Math.round(top) + 'px';
+    caret.style.width = w + 'px';
+    caret.style.height = h + 'px';
+    caret.style.background = lineStyle.color || '#10b981';
+  }
+
+  /** Per-frame overlay anchor (rAF while a code block streams). */
+  function overlayTick() {
+    rafHandle = null;
+    if (mode !== 'overlay' || !streamMsgEl || !streamMsgEl.isConnected) {
+      mode = 'off';
+      streamMsgEl = null;
+      hideCaret();
+      return;
+    }
+    const placement = placeFor(streamMsgEl);
+    if (!placement) {
+      // Generation finished (toolbar) or the text vanished — finalize
+      // immediately instead of waiting for the next mutation scan.
+      mode = 'off';
+      streamMsgEl = null;
+      hideCaret();
+      return;
+    }
+    if (!placement.overlay) {
+      // The stream moved back to prose — hand over to inline placement.
+      mode = 'inline';
+      processMessage(streamMsgEl);
+      return;
+    }
+    positionOverlay(placement.host);
+    window.__NELTH_CARET_DEBUG__.overlayFrames++;
+    rafHandle = requestAnimationFrame(overlayTick);
+  }
+
+  /* ---------------------------------------------------- placement logic */
+
+  /**
+   * Core decision for one message. Returns null when no caret applies
+   * (done or no streaming text), otherwise { host, overlay }.
+   */
+  function placeFor(msgEl) {
+    const chat = msgEl.querySelector('.chat-assistant');
+    if (!chat) return null;
+
+    // Completed messages (toolbar rendered — also true for errors, which
+    // set done in the event handler): no caret, ever again.
+    if (msgEl.querySelector('button[aria-label="Copy"], button[aria-label="Read Aloud"]')) {
+      return null;
+    }
+
+    // The live stream: the LAST prose container with text is the one
+    // receiving tokens right now (answer after reasoning in DOM order).
+    const proseEls = chat.querySelectorAll('.markdown-prose, .markdown-prose-sm');
+    let target = null;
+    for (let i = proseEls.length - 1; i >= 0; i--) {
+      if ((proseEls[i].textContent || '').trim()) {
+        target = proseEls[i];
+        break;
+      }
+    }
+    // No text anywhere yet (pre-first-token): the "Réflexion" shimmer row
+    // is the live feedback — the caret only exists behind streamed text.
+    if (!target) return null;
+
+    const host = caretHost(target);
+    return { host, overlay: host.classList.contains('cm-line'), target };
+  }
 
   function processMessage(msgEl) {
     const chat = msgEl.querySelector('.chat-assistant');
     if (!chat) return;
+    window.__NELTH_CARET_DEBUG__.scans++;
 
-    // Single instance per message (Svelte re-renders can duplicate nodes).
-    let n = null;
-    const existing = chat.querySelectorAll('.nelth-typing-n');
-    for (let i = 0; i < existing.length; i++) {
-      if (!n) n = existing[i];
-      else existing[i].remove();
-    }
+    // Sweep inline strays first (re-renders can orphan previous instances
+    // inside the markdown tree). The overlay caret lives on <body> and is
+    // managed exclusively through the mode state machine.
+    const strays = chat.querySelectorAll('.' + CARET_CLASS);
+    for (let i = 0; i < strays.length; i++) strays[i].remove();
 
-    // Completed messages (toolbar rendered — also true for errors, which
-    // set done in the event handler) never show the indicator.
-    if (msgEl.querySelector('button[aria-label="Copy"], button[aria-label="Read Aloud"]')) {
-      if (n) n.remove();
+    const placement = placeFor(msgEl);
+
+    if (!placement) {
+      if (streamMsgEl === msgEl) {
+        // This was the streaming message: generation finished (or its
+        // text vanished) — caret off, overlay loop stopped.
+        if (rafHandle !== null) cancelAnimationFrame(rafHandle);
+        rafHandle = null;
+        mode = 'off';
+        streamMsgEl = null;
+        hideCaret();
+      }
       return;
     }
 
-    // Live signal: answer/reasoning prose streaming, or the live thinking
-    // row still shimmering (pre-first-token phase). Informative phases
-    // (web search, image generation) show their own rows — no indicator.
-    let live = false;
-    const prose = chat.querySelectorAll('.markdown-prose, .markdown-prose-sm');
-    for (let i = 0; i < prose.length; i++) {
-      if ((prose[i].textContent || '').trim()) {
-        live = true;
-        break;
+    streamMsgEl = msgEl;
+
+    if (placement.overlay) {
+      if (mode !== 'overlay') {
+        mode = 'overlay';
+        if (rafHandle === null) rafHandle = requestAnimationFrame(overlayTick);
       }
-    }
-    if (!live) {
-      const rows = chat.querySelectorAll('.status-description');
-      for (let i = 0; i < rows.length; i++) {
-        if (isThinkingLabel(rows[i].textContent) && rows[i].offsetParent) {
-          live = true;
-          break;
-        }
-      }
-    }
-    if (!live) {
-      if (n) n.remove();
+      positionOverlay(placement.host); // also done per-frame by overlayTick
       return;
     }
 
-    if (!n) {
-      n = document.createElement('div');
-      n.className = 'nelth-typing-n';
-      n.innerHTML = N_SVG;
-      // The indicator's original spot: between the status block and the
-      // content area — siblings inside the unclassed wrapper under
-      // .chat-assistant (measured in the live DOM).
-      const contentArea = chat.querySelector('.w-full.flex.flex-col.relative');
-      if (contentArea && contentArea.parentElement) {
-        contentArea.parentElement.insertBefore(n, contentArea);
-      } else {
-        chat.appendChild(n);
-      }
+    if (mode === 'overlay') {
+      if (rafHandle !== null) cancelAnimationFrame(rafHandle);
+      rafHandle = null;
+      mode = 'inline';
+    } else {
+      mode = 'inline';
+    }
+
+    const caret = getCaret();
+    if (caret.className.indexOf(CARET_INLINE) === -1 || caret.classList.contains(CARET_OVERLAY)) {
+      caret.className = CARET_CLASS + ' ' + CARET_INLINE;
+    }
+    caret.style.left = '';
+    caret.style.top = '';
+    caret.style.width = '';
+    caret.style.height = '';
+    caret.style.background = '';
+    // Move only when the anchor actually changed (new paragraph or content
+    // landed after the caret) — plain token appends to the same block keep
+    // it in place so the blink never stutters.
+    if (caret.parentNode !== placement.host || caret.nextSibling) {
+      placement.host.appendChild(caret);
     }
   }
 
   function scan() {
     const msgs = document.querySelectorAll('[id^="message-"]');
-    for (let i = 0; i < msgs.length; i++) processMessage(msgs[i]);
+    for (let i = 0; i < msgs.length; i++) {
+      try {
+        processMessage(msgs[i]);
+      } catch (e) {
+        window.__NELTH_CARET_DEBUG__.errors.push(String(e && e.message));
+      }
+    }
   }
 
   let pending = false;
@@ -1808,7 +1978,7 @@ html.nsrc-lock{overflow:hidden}
     setTimeout(() => {
       pending = false;
       scan();
-    }, 300);
+    }, 150);
   };
 
   const start = () => {

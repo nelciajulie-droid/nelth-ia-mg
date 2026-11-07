@@ -120,3 +120,26 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Streaming caret — blinks in place while tokens arrive, removed from the DOM
+   the moment the stream ends (no logo, no spinner: it follows the text). */
+@keyframes stream-caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.stream-caret {
+  animation: stream-caret-blink 1.1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-caret {
+    animation: none;
+    opacity: 1;
+  }
+}

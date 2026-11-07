@@ -6,11 +6,33 @@
  * Supports: fenced code blocks (```lang ... ```), **bold**, *italic*,
  * `inline code`, [links](https://...) and line breaks. Everything is rendered
  * as React elements (no HTML injection), which keeps the stream safe.
+ *
+ * `streamingCursor` appends a blinking caret INLINE — right after the LAST
+ * streamed character (or at the end of the last code block while it is still
+ * being written). Because every delta re-renders this component, the caret
+ * visibly follows the text as it streams, and it disappears entirely once
+ * the stream ends (the prop is only true while tokens are arriving).
  */
 
 import * as React from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+// ---------------------------------------------------------------------------
+// Streaming caret — hugs the last character, blinks in place
+// ---------------------------------------------------------------------------
+
+function StreamCaret({ dark = false }: { dark?: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "stream-caret ml-[2px] inline-block h-[1.05em] w-[0.5em] translate-y-[0.2em] rounded-[2px]",
+        dark ? "bg-emerald-400" : "bg-emerald-500"
+      )}
+    />
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Inline elements
@@ -61,10 +83,17 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   });
 }
 
-function renderTextBlock(text: string, keyPrefix: string): React.ReactNode[] {
+/**
+ * Render a text run as paragraphs. When `caret` is true the blinking caret is
+ * appended AFTER THE LAST CHARACTER of the last line of the last paragraph —
+ * including when that line is still empty (the caret then marks the exact spot
+ * where the next token will land).
+ */
+function renderTextBlock(text: string, keyPrefix: string, caret = false): React.ReactNode[] {
   const paragraphs = text.split(/\n{2,}/);
   return paragraphs.map((paragraph, pIndex) => {
     const key = `${keyPrefix}-p${pIndex}`;
+    const isLastParagraph = pIndex === paragraphs.length - 1;
     const lines = paragraph.split("\n");
     return (
       <p key={key} className="whitespace-pre-wrap break-words leading-relaxed">
@@ -72,6 +101,7 @@ function renderTextBlock(text: string, keyPrefix: string): React.ReactNode[] {
           <React.Fragment key={`${key}-l${lIndex}`}>
             {lIndex > 0 ? <br /> : null}
             {renderInline(line, `${key}-l${lIndex}`)}
+            {caret && isLastParagraph && lIndex === lines.length - 1 ? <StreamCaret /> : null}
           </React.Fragment>
         ))}
       </p>
@@ -83,7 +113,15 @@ function renderTextBlock(text: string, keyPrefix: string): React.ReactNode[] {
 // Code block
 // ---------------------------------------------------------------------------
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+function CodeBlock({
+  language,
+  code,
+  caret = false,
+}: {
+  language: string;
+  code: string;
+  caret?: boolean;
+}) {
   const [copied, setCopied] = React.useState(false);
 
   const copy = async () => {
@@ -113,7 +151,10 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
         </button>
       </div>
       <pre className="scrollbar-thin overflow-x-auto px-4 py-3 font-mono text-[13px] leading-relaxed text-zinc-100">
-        <code>{code}</code>
+        <code>
+          {code}
+          {caret ? <StreamCaret dark /> : null}
+        </code>
       </pre>
     </div>
   );
@@ -123,36 +164,62 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
 // Public component
 // ---------------------------------------------------------------------------
 
-export function Markdown({ content, className }: { content: string; className?: string }) {
-  const nodes = React.useMemo(() => {
-    const result: React.ReactNode[] = [];
-    const fenceRe = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)(?:```|$)/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    let blockIndex = 0;
+type Block =
+  | { kind: "text"; text: string }
+  | { kind: "code"; language: string; code: string };
 
-    while ((match = fenceRe.exec(content)) !== null) {
-      if (match.index > lastIndex) {
-        result.push(...renderTextBlock(content.slice(lastIndex, match.index), `t${blockIndex}`));
-      }
-      const [, language, code] = match;
-      if (code && code.trim().length > 0) {
-        result.push(
-          <CodeBlock
-            key={`c${blockIndex}`}
-            language={language ?? ""}
-            code={code.replace(/\n$/, "")}
-          />
-        );
-      }
-      lastIndex = match.index + match[0].length;
-      blockIndex += 1;
+function parseBlocks(content: string): Block[] {
+  const blocks: Block[] = [];
+  const fenceRe = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)(?:```|$)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = fenceRe.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      blocks.push({ kind: "text", text: content.slice(lastIndex, match.index) });
     }
-    if (lastIndex < content.length) {
-      result.push(...renderTextBlock(content.slice(lastIndex), `t${blockIndex}`));
+    const [, language, code] = match;
+    if (code && code.trim().length > 0) {
+      blocks.push({ kind: "code", language: language ?? "", code: code.replace(/\n$/, "") });
     }
-    return result;
-  }, [content]);
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < content.length) {
+    blocks.push({ kind: "text", text: content.slice(lastIndex) });
+  }
+  return blocks;
+}
+
+export function Markdown({
+  content,
+  className,
+  streamingCursor = false,
+}: {
+  content: string;
+  className?: string;
+  /** While true: blinking caret right after the last streamed character. */
+  streamingCursor?: boolean;
+}) {
+  const nodes = React.useMemo(() => {
+    const blocks = parseBlocks(content);
+    if (blocks.length === 0) {
+      // Nothing yet — the caret alone marks where the first token will land.
+      return streamingCursor
+        ? [
+            <p key="t-empty" className="whitespace-pre-wrap break-words leading-relaxed">
+              <StreamCaret />
+            </p>,
+          ]
+        : null;
+    }
+    return blocks.map((block, index) => {
+      const caret = streamingCursor && index === blocks.length - 1;
+      if (block.kind === "code") {
+        return <CodeBlock key={`c${index}`} language={block.language} code={block.code} caret={caret} />;
+      }
+      return renderTextBlock(block.text, `t${index}`, caret);
+    });
+  }, [content, streamingCursor]);
 
   return <div className={cn("text-[0.925rem] text-zinc-800", className)}>{nodes}</div>;
 }
