@@ -763,6 +763,11 @@ html.nsrc-lock{overflow:hidden}
     queued: queue.length,
     waiting: waiters.length,
     delivered: debugDelivered,
+    nativeSid: liveSid,
+    nativeAge: liveSid ? Date.now() - liveSidAt : null,
+    socketIdle: lastSocketActivity ? Date.now() - lastSocketActivity : null,
+    liveSids: nativeSidActivity.size,
+    ioSids: Array.from(ioSidByEngine.values()),
   });
   let debugDelivered = 0;
   const CHAT_RE = /\/api\/chat\/completions\/?(\?.*)?$/;
@@ -772,6 +777,31 @@ html.nsrc-lock{overflow:hidden}
   let sid = null; // engine.io session id handed to the client
   const queue = []; // server → client packets (concatenated per poll)
   const waiters = []; // pending GET polls: { xhr, resolve }
+
+  // Native socket liveness tracking — used by the chat POST patch to detect
+  // a stale `session_id` (the app sends the socket.io id; if the real socket
+  // died while the page sat idle, socket-mode events would be emitted to a
+  // ghost session and the reply would never render). The compiled app may
+  // keep several live socket sessions side by side (component re-mounts
+  // create a new socket without always closing the previous one), and since
+  // socket.io v4.1 the socket.io id sent in the CONNECT ack differs from the
+  // engine.io sid — so BOTH ids are tracked. A healthy socket exchanges XHRs
+  // continuously (long-polls answered at least every ~25s by a server ping),
+  // so each socket URL opened through open() refreshes its ids' timestamps,
+  // and each poll response is peeked at for the `40{"sid":…}` CONNECT ack
+  // that reveals the socket.io id.
+  const nativeSidActivity = new Map(); // socket id (engine.io OR socket.io) → last XHR open time
+  const ioSidByEngine = new Map(); // engine.io sid → socket.io id (CONNECT ack)
+  let lastSocketActivity = 0;
+  let liveSid = null;
+  let liveSidAt = 0;
+  // Trim the map so long-lived pages don't accumulate dead sessions.
+  setInterval(() => {
+    const cutoff = Date.now() - 3600000;
+    for (const [s, t] of nativeSidActivity) {
+      if (t < cutoff) nativeSidActivity.delete(s);
+    }
+  }, 300000);
 
   const rand = () => Math.random().toString(36).slice(2, 10);
   const nowSid = () => 'nelth-' + rand() + rand();
@@ -799,8 +829,21 @@ html.nsrc-lock{overflow:hidden}
   const engage = () => {
     if (engaged) return;
     engaged = true;
-    // engine.io v4 server heartbeat — the client pongs via POST.
-    setInterval(() => pushPacket('2'), 20000);
+    // engine.io v4 server heartbeat — the client pongs via POST. Pushed at
+    // 20s (browsers throttle this timer to ~60s in hidden tabs, which is
+    // fine: the client-side watchdog derives from the handshake windows
+    // below — 25s + 1h — so even heavily throttled pings keep the fake
+    // connection alive indefinitely). The queue is bounded so a frozen tab
+    // (zero timer execution) cannot accumulate an endless pile of pings.
+    const heartbeat = () => {
+      if (waiters.length > 0 || queue.length < 2) pushPacket('2');
+    };
+    setInterval(heartbeat, 20000);
+    // Instant watchdog reset the moment the tab becomes visible again
+    // (post-freeze resume, back from system sleep, …).
+    document.addEventListener('visibilitychange', () => {
+      if (engaged && document.visibilityState === 'visible') heartbeat();
+    });
   };
 
   // ------------------------------------------------ fake XHR completion
@@ -823,14 +866,25 @@ html.nsrc-lock{overflow:hidden}
   // ------------------------------------------ engine.io protocol handling
   const handleFake = (xhr, method, url, body) => {
     if (method === 'GET') {
-      if (!sid) {
-        // Handshake: engine.io open packet (no upgrades → polling only).
+      // Handshake detection is URL-based (no sid param), NOT first-call
+      // based: after any disconnect (ping timeout on resume from sleep,
+      // navigation, …) the engine.io client opens a FRESH session and its
+      // handshake GET carries no sid even though we already served one.
+      // Parking that handshake as a long-poll (the old `if (!sid)` behaviour)
+      // fed the client a stray packet before the open packet and broke the
+      // reconnect loop — the exact “Connexion perdue. Reconnexion…” stall.
+      // Every fresh GET therefore gets a brand-new session + open packet,
+      // making every reconnect instant and protocol-valid.
+      if (!/[?&]sid=/.test(String(url))) {
         sid = nowSid();
         finishXhr(xhr, 200, '0' + JSON.stringify({
           sid,
           upgrades: [],
+          // Wide keep-alive windows: the client watchdog waits
+          // pingInterval + pingTimeout (≈1h) between pings, so hidden-tab
+          // timer throttling (~1/min) can never trip it.
           pingInterval: 25000,
-          pingTimeout: 20000,
+          pingTimeout: 3600000,
           maxPayload: 1000000,
         }));
         return;
@@ -867,6 +921,19 @@ html.nsrc-lock{overflow:hidden}
 
   XMLHttpRequest.prototype.open = function (method, url) {
     const isSocket = SOCKET_RE.test(String(url));
+    if (isSocket) {
+      lastSocketActivity = Date.now();
+      const sidMatch = String(url).match(/[?&]sid=([^&]+)/);
+      if (sidMatch) {
+        const engineSid = sidMatch[1];
+        nativeSidActivity.set(engineSid, Date.now());
+        // The socket.io id (what the app actually sends as session_id) is
+        // distinct from the engine.io sid since socket.io v4.1 — keep it
+        // as fresh as the engine session it rides on.
+        const ioId = ioSidByEngine.get(engineSid);
+        if (ioId) nativeSidActivity.set(ioId, Date.now());
+      }
+    }
     this.__nelth = isSocket
       ? { method: String(method || 'GET').toUpperCase(), url: String(url) }
       : null;
@@ -884,11 +951,35 @@ html.nsrc-lock{overflow:hidden}
 
     // Not engaged — the real service answered the handshake. Requests WITH
     // a session id are that connection's normal long-polls: pass through
-    // natively (engaging here would hijack a healthy connection). Only a
-    // fresh handshake (no sid — a reconnect attempt) gets failure-watched:
-    // two consecutive failures mean the service is truly unreachable.
+    // natively (engaging here would hijack a healthy connection). Their
+    // responses are still peeked at to learn the socket.io id the CONNECT
+    // ack assigns — that id is what the app later sends as `session_id`.
+    // Only a fresh handshake (no sid — a reconnect attempt) gets
+    // failure-watched: two consecutive failures mean the service is truly
+    // unreachable.
     const isHandshake = fake.method === 'GET' && !/[?&]sid=/.test(fake.url);
     if (!isHandshake) {
+      if (fake.method === 'GET') {
+        const xhr = this;
+        const origRSC = xhr.onreadystatechange;
+        xhr.onreadystatechange = function () {
+          try {
+            if (xhr.readyState === 4 && (xhr.status === 200 || xhr.status === 1223)) {
+              const ack = String(xhr.responseText || '').match(/40\{"sid":"([^"]+)"\}/);
+              if (ack) {
+                const em = String(fake.url).match(/[?&]sid=([^&]+)/);
+                if (em) {
+                  ioSidByEngine.set(em[1], ack[1]);
+                  nativeSidActivity.set(ack[1], Date.now());
+                }
+              }
+            }
+          } catch (e) {
+            /* unreadable response — tracking only, never fatal */
+          }
+          if (typeof origRSC === 'function') origRSC.apply(this, arguments);
+        };
+      }
       return nativeSend.call(this, body);
     }
 
@@ -898,6 +989,17 @@ html.nsrc-lock{overflow:hidden}
         if (xhr.readyState !== 4) return;
         if (xhr.status === 200 || xhr.status === 1223) {
           handshakeFailures = 0;
+          try {
+            const m = String(xhr.responseText || '').match(/"sid":"([^"]+)"/);
+            if (m) {
+              liveSid = m[1];
+              liveSidAt = Date.now();
+              lastSocketActivity = Date.now();
+              nativeSidActivity.set(m[1], Date.now());
+            }
+          } catch (e) {
+            /* response unreadable — liveness simply not updated */
+          }
           return;
         }
       } catch (e) {
@@ -944,11 +1046,25 @@ html.nsrc-lock{overflow:hidden}
     }
 
     // Socket-mode passthrough: a REAL socket service answered the handshake
-    // (bridge not engaged) AND the socket is connected (session_id present)
-    // — everything works natively (sandbox / self-hosted topology).
-    const useSseTransport =
-      engaged || !bodyObj || typeof bodyObj !== 'object' || !bodyObj.session_id;
-    if (!useSseTransport) {
+    // (bridge not engaged) AND the session's socket is ALIVE — the app may
+    // keep several live sessions side by side, so the payload's session_id
+    // just has to match ANY natively-polling engine.io sid (socket.io v4 uses
+    // the engine.io sid as the socket id). A session_id whose socket died
+    // while the page sat idle (no socket XHR for 90s; healthy sockets poll
+    // at least every ~25s) would silently swallow the reply — fall back to
+    // the SSE transport in that case instead.
+    window.__NELTH_LASTPOST__ = {
+      sid: bodyObj && typeof bodyObj === 'object' ? bodyObj.session_id : null,
+      known: Array.from(nativeSidActivity.keys()),
+      engaged,
+    };
+    const sidAlive =
+      bodyObj &&
+      typeof bodyObj === 'object' &&
+      typeof bodyObj.session_id === 'string' &&
+      Date.now() - (nativeSidActivity.get(bodyObj.session_id) || 0) < 90000;
+    const nativeSocketAlive = !engaged && sidAlive;
+    if (nativeSocketAlive) {
       return nativeFetch(input, init);
     }
 
@@ -956,7 +1072,9 @@ html.nsrc-lock{overflow:hidden}
     //   • the real socket service is unreachable (engaged) — any session_id
     //     in the payload is our fake one, the backend socket hop is dead;
     //   • the socket is not connected yet (no session_id) — the backend
-    //     would answer with raw SSE the JSON helper cannot parse.
+    //     would answer with raw SSE the JSON helper cannot parse;
+    //   • the socket died while the page sat idle (stale session_id) —
+    //     socket-mode events would be emitted to a ghost session.
     // Either way: ensure a session id + the SSE event transport flag — the
     // backend then runs the full socket-mode flow (statuses, deltas,
     // sources, titles, done) serialized into the HTTP response.
@@ -1011,6 +1129,87 @@ html.nsrc-lock{overflow:hidden}
       });
     });
   };
+})();
+
+/* ====================================================================
+ * RECONNECT TOAST SUPPRESSION — “always ready” UX.
+ *
+ * Why: with the wide keep-alive windows above, an idle/background tab no
+ * longer drops the realtime socket, and when a drop does happen (system
+ * sleep, service restart) the connection now heals itself in a second or
+ * two — the chat keeps working through the SSE transport meanwhile. The
+ * compiled frontend still warns “Connexion perdue. Reconnexion en cours…”
+ * whenever the socket is briefly down (2s grace), which reads like a
+ * failure the user has to act on even though nothing is actually lost.
+ *
+ * Fix, entirely in this layer (compiled frontend untouched): toasts are
+ * rendered by sonner — items carry `data-sonner-toast` — so a MutationObserver
+ * mutes exactly the reconnect-warning and reconnect-ok toasts (structure
+ * match + short exact/patterned text). Every other toast (API errors,
+ * confirmations, …) is left untouched. Muted items are hidden with
+ * display:none rather than removed, letting sonner run its own timers and
+ * lifecycle undisturbed.
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_TOAST_MUTE__) return;
+  window.__NELTH_TOAST_MUTE__ = true;
+
+  const WARNING_EXACT = [
+    'Connexion perdue. Reconnexion en cours...', // fr
+    'Connection lost. Reconnecting...', // en
+  ];
+  const isReconnectWarning = (t) =>
+    WARNING_EXACT.includes(t) ||
+    (/^(connection|connexion|conexi|verbindung|connessione|соедин)/i.test(t) &&
+      /(reconnect|reconect|verbind|riconn|подключ)/i.test(t));
+  const isReconnectedToast = (t) =>
+    /^(reconnected|reconnecté|reconectado|riconnesso|reconectou|wieder verbunden|neu verbunden)$/i.test(
+      t
+    );
+
+  const mute = (el) => {
+    el.setAttribute('data-nelth-muted', '');
+    el.style.setProperty('display', 'none', 'important');
+  };
+
+  const scan = (node) => {
+    const toasts = [];
+    try {
+      if (node.matches && node.matches('[data-sonner-toast]')) toasts.push(node);
+      const found = node.querySelectorAll('[data-sonner-toast]');
+      for (let k = 0; k < found.length; k++) toasts.push(found[k]);
+    } catch (e) {
+      return;
+    }
+    for (let i = 0; i < toasts.length; i++) {
+      const el = toasts[i];
+      if (el.hasAttribute('data-nelth-muted')) continue;
+      const text = (el.textContent || '').trim();
+      if (text.length > 90) continue; // safety: toasts are short
+      if (isReconnectWarning(text) || isReconnectedToast(text)) mute(el);
+    }
+  };
+
+  const start = () => {
+    const obs = new MutationObserver((muts) => {
+      for (let i = 0; i < muts.length; i++) {
+        const added = muts[i].addedNodes;
+        for (let j = 0; j < added.length; j++) {
+          const n = added[j];
+          if (n.nodeType !== 1) continue;
+          scan(n);
+        }
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    scan(document.body); // catch anything already on screen
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
 })();
 
 /* ====================================================================

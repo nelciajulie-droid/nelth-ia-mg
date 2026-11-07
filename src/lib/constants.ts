@@ -64,7 +64,18 @@ export const env = {
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '-1',
   ENABLE_API_KEY: envBool('ENABLE_API_KEY', 'True'),
   ENABLE_MFA: envBool('ENABLE_MFA', 'False'),
-  ENABLE_WEBSOCKET_SUPPORT: envBool('ENABLE_WEBSOCKET_SUPPORT', 'True'),
+  // Websocket transport for the realtime socket. The app origin proxies
+  // /ws/* through a Next.js route handler (src/app/ws/[...path]/route.ts),
+  // which cannot perform HTTP → WebSocket upgrades — not on `next dev`,
+  // not on Vercel, not behind Caddy/nginx pointing at the app port. A
+  // websocket-only client therefore NEVER connects (socket.io retries
+  // forever, and the UI toasts “Connexion perdue. Reconnexion…” every time
+  // the user returns to the tab). Polling is the transport that actually
+  // works through this topology end-to-end: natively where the socket
+  // service is reachable, and via the loader's serverless bridge elsewhere.
+  // Self-hosters routing /ws directly to the socket service at the edge
+  // (bypassing the app) may re-enable it.
+  ENABLE_WEBSOCKET_SUPPORT: envBool('ENABLE_WEBSOCKET_SUPPORT', 'False'),
   WEBSOCKET_HEARTBEAT_INTERVAL: (() => {
     const raw = process.env.WEBSOCKET_HEARTBEAT_INTERVAL ?? '';
     if (raw === '') return null;

@@ -60,11 +60,26 @@ function getSecret(): string {
 
 const io = new Server({
   path: '/ws/socket.io',
-  transports: ['polling', 'websocket'],
+  // Polling-only: browsers reach this service through the Next.js /ws proxy
+  // (src/app/ws/[...path]/route.ts), which cannot upgrade to WebSocket — a
+  // websocket upgrade attempt just hangs. Advertising no upgrades keeps the
+  // client deterministically on long-polling, which works end-to-end. A
+  // deployment that routes /ws here directly at the edge can re-add
+  // 'websocket'.
+  transports: ['polling'],
   cors: { origin: '*', credentials: true },
   maxHttpBufferSize: 5e6,
+  // Keep-alive for idle/background tabs. The browser throttles JS timers in
+  // hidden tabs (down to 1/min after 5 min), which delays the client's pong
+  // and — with the old 20s pingTimeout — made the server reap healthy but
+  // idle sessions ("ping timeout" → "Connexion perdue. Reconnexion…").
+  // pingInterval stays at 25s so every long-poll is answered well within the
+  // 60s proxy timeout (src/app/ws/[...path]/route.ts); pingTimeout is widened
+  // to 1h so the session (and the client-side watchdog, which derives from
+  // these handshake values: pingInterval + pingTimeout) survives an idle
+  // background tab for up to an hour without any disconnect.
   pingInterval: 25000,
-  pingTimeout: 20000,
+  pingTimeout: 3600000,
 });
 
 const http = createServer((req, res) => {
