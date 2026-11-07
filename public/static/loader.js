@@ -1608,6 +1608,43 @@ html.nsrc-lock{overflow:hidden}
     if (!msgEl.querySelector('button[aria-label="Copy"], button[aria-label="Read Aloud"]')) {
       return; // still generating — keep the live shimmer row
     }
+    // Status rows live in per-view blocks (collapsed toggle view + history
+    // list). Group the .status-description rows by their enclosing block
+    // (the div[class*="text-[0.9375rem]"] wrapper) so a thinking-only block
+    // disappears entirely while a mixed one (search statuses…) only loses
+    // its thinking rows.
+    const blocks = new Map();
+    const rows = msgEl.querySelectorAll('.status-description');
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      let block = row.parentElement;
+      while (block && block !== msgEl) {
+        if (String(block.className).indexOf('text-[0.9375rem]') !== -1) break;
+        block = block.parentElement;
+      }
+      if (!block || block === msgEl) block = row.parentElement;
+      if (!blocks.has(block)) blocks.set(block, []);
+      blocks.get(block).push(row);
+    }
+    blocks.forEach((blockRows, block) => {
+      let labelRows = 0;
+      for (let i = 0; i < blockRows.length; i++) {
+        if ((blockRows[i].textContent || '').trim() === THINKING_LABEL) labelRows++;
+      }
+      if (!labelRows) return;
+      if (labelRows === blockRows.length) {
+        // Thinking-only block: hide the whole wrapper (no orphan panel).
+        block.classList.add('nelth-think-hide');
+      } else {
+        for (let i = 0; i < blockRows.length; i++) {
+          if ((blockRows[i].textContent || '').trim() === THINKING_LABEL) {
+            blockRows[i].classList.add('nelth-think-hide');
+          }
+        }
+      }
+    });
+    // The collapse toggle shows the LAST status — hide it too when it is
+    // the thinking label (mixed blocks keep their informative last status).
     const toggles = msgEl.querySelectorAll('button[aria-label="Toggle status history"]');
     for (let i = 0; i < toggles.length; i++) {
       const toggle = toggles[i];
@@ -1616,10 +1653,10 @@ html.nsrc-lock{overflow:hidden}
       }
     }
     // Expanded history rows of the same label (panel open at completion).
-    const rows = msgEl.querySelectorAll('.shimmer');
-    for (let i = 0; i < rows.length; i++) {
-      if ((rows[i].textContent || '').trim() === THINKING_LABEL) {
-        rows[i].classList.add('nelth-think-hide');
+    const shimmers = msgEl.querySelectorAll('.shimmer');
+    for (let i = 0; i < shimmers.length; i++) {
+      if ((shimmers[i].textContent || '').trim() === THINKING_LABEL) {
+        shimmers[i].classList.add('nelth-think-hide');
       }
     }
   }
