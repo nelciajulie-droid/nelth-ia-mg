@@ -42,6 +42,19 @@ html.dark img#logo[src*="/static/assets/nelth-logo-idle.svg"] {
         filter: invert(1);
 }
 
+/* ── Chat header: remove the "Contrôles" (Controls) button ───────────────────
+ * The chat-header cluster div.lg:mr-1 (flex.flex-none) holds exactly two
+ * buttons — "Temporary Chat" and "Controls" — and exists only there. The
+ * Controls button is identified by its sliders icon signature (lucide
+ * adjustments-horizontal, path starting "M10.5 6h9.75"), unique on the
+ * page. Matching BOTH (cluster + glyph) makes the rule locale-proof
+ * (aria-label is translated — "Controls"/"Contrôles"/…) and unable to hit
+ * any other surface (Settings, popovers…). The button sits one wrapper
+ * deep (button > div.flex > div.lg:mr-1), hence the descendant combinator. */
+div.lg\:mr-1 button:has(svg path[d^="M10.5 6h9.75"]) {
+        display: none !important;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * LAYOUT REPAIR — geometry corrections only (visual design untouched).
  *
