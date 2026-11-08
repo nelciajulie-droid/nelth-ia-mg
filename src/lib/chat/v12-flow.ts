@@ -406,6 +406,9 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   let skillsActive = false;
   const usedSkills: string[] = [];
   const preSelectedNames: string[] = [];
+  // Connectors state (@ quick action — tool servers used this turn; rides the
+  // assistant message meta next to used_skills).
+  const usedConnectors: string[] = [];
 
   /** Continuation base — the interrupted round's partial answer (raw text
    *  for context + reasoning output items to re-emit ahead of the new
@@ -596,6 +599,65 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     const isImageModel =
       modelId === 'stable-diffusion-xl' || modelId.startsWith('image_generation.');
     const preSelected = isImageModel ? [] : await preselectSkills(rawLastUserText);
+    // @ quick action — explicitly selected skills ride the form's skill_ids
+    // (the compiled frontend's @ menu: Skills section + catalog plugins):
+    //   "catalog:<name>" → the platform skill catalog (registry)
+    //   "<uuid>"         → a workspace skill (DB — SKILL.md content)
+    // They merge with the pre-selector's picks (deduped by name) and get the
+    // exact same treatment: full injection after the last user message,
+    // "Skill « x » chargé" chips, used_skills meta.
+    const formSkillIds: string[] = Array.isArray(form.skill_ids)
+      ? form.skill_ids.filter((s: any): s is string => typeof s === 'string' && !!s)
+      : [];
+    if (formSkillIds.length && !isImageModel) {
+      const { getSkillByName } = await import('@/lib/skills/registry');
+      const { getSkillById } = await import('@/lib/models/workspace');
+      for (const sid of formSkillIds.slice(0, 5)) {
+        if (preSelected.some((p) => p.name === sid || `catalog:${p.name}` === sid)) continue;
+        let resolved: { name: string; label: string; description: string; content: string } | null = null;
+        if (sid.startsWith('catalog:')) {
+          const cat = getSkillByName(sid.slice('catalog:'.length));
+          if (cat) {
+            resolved = { name: cat.name, label: cat.label || cat.name, description: cat.description, content: cat.content };
+          }
+        } else {
+          try {
+            const dbSkill = await getSkillById(sid);
+            if (dbSkill) {
+              let data: any = dbSkill.data;
+              if (typeof data === 'string') {
+                try { data = JSON.parse(data); } catch { data = null; }
+              }
+              const files = data && Array.isArray(data.files) ? data.files : [];
+              const root = files.find((f: any) => f && typeof f === 'object' && f.path === 'SKILL.md');
+              const content = typeof root?.content === 'string' ? root.content : '';
+              if (content) {
+                resolved = {
+                  name: dbSkill.name ?? sid,
+                  label: dbSkill.name ?? sid,
+                  description: dbSkill.description ?? '',
+                  content,
+                };
+              }
+            }
+          } catch { /* unknown skill id — skipped */ }
+        }
+        if (resolved) {
+          preSelected.push({
+            name: resolved.name,
+            label: resolved.label,
+            description: resolved.description,
+            content: resolved.content,
+            score: 99, // explicit user choice outranks every heuristic
+          });
+        }
+      }
+      if (formSkillIds.length) {
+        console.log(
+          `[v12-flow] @-selected skills: ${formSkillIds.join(', ')} → loaded ${preSelected.length} pack(s)`
+        );
+      }
+    }
     preSelectedNames.push(...preSelected.map((s) => s.name));
     const skillManifest = await getSkillManifestPrompt(rawLastUserText, preSelectedNames);
     if (skillManifest) {
@@ -645,6 +707,131 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     }
   }
   } // end !isContinuation skills phase
+
+  // ---------------------------------------- 3.3ter Connectors (@ quick action:
+  // OpenAPI tool servers — Gmail, Calendar, …). The compiled frontend's @
+  // menu lists the admin-configured connectors (GET /tools/ merges them as
+  // "server:<id>" entries) and the user's direct integrations; the selection
+  // rides the form as tool_ids["server:…"] + tool_servers[…]. This phase
+  // turns the selection into LIVE DATA — same architecture as the web-search
+  // funnel: a non-streaming decision pre-pass (the free classifier model
+  // chooses which tools to call, JSON protocol — works on any model, no
+  // native function-calling needed), server-side execution of the calls
+  // against the connector's OpenAPI spec, then the results are injected as
+  // a tool-result system message after the last user message and the MAIN
+  // streaming pass answers with them.
+  if (!isContinuation) {
+    const formToolIds: string[] = Array.isArray(form.tool_ids)
+      ? form.tool_ids.filter((t: any): t is string => typeof t === 'string' && !!t)
+      : [];
+    const formToolServers: any[] = Array.isArray(form.tool_servers)
+      ? form.tool_servers.filter((s: any) => s && typeof s === 'object')
+      : [];
+    const isSd =
+      modelId === 'stable-diffusion-xl' || modelId.startsWith('image_generation.');
+    const serverSelections = formToolIds.filter((id) => id.startsWith('server:'));
+    const wantsConnectors = (serverSelections.length > 0 || formToolServers.length > 0) && !isSd;
+    if (wantsConnectors) {
+      try {
+        const {
+          resolveFormConnectors,
+          buildToolCallProtocolPrompt,
+          parseToolCalls,
+          executeToolCalls,
+          buildConnectorResultsMessage,
+        } = await import('@/lib/chat/connectors');
+        type ConnectorCallResult = import('@/lib/chat/connectors').ConnectorCallResult;
+        const connectors = await resolveFormConnectors(formToolIds, formToolServers);
+        console.log(
+          `[v12-flow] connectors requested (${serverSelections.join(', ') || 'direct'}) → resolved: ${
+            connectors.map((c) => `${c.name}(${c.specs.length} tools)`).join(', ') || 'none'
+          }`
+        );
+        const collected: ConnectorCallResult[] = [];
+        if (connectors.length) {
+          const { kiloChatCompletion } = await import('@/lib/kilo-llm');
+          let previousCallsKey = '';
+          for (let round = 0; round < 2; round++) {
+            // Decision pre-pass: which tools (if any) does this question need?
+            const protocolPrompt = buildToolCallProtocolPrompt(connectors, collected);
+            let decisionText = '';
+            try {
+              const decision = await kiloChatCompletion({
+                messages: [
+                  { role: 'system', content: protocolPrompt },
+                  ...llmMessages,
+                ],
+                stream: false,
+                max_tokens: 700,
+                temperature: 0,
+                thinking: false,
+              });
+              decisionText = String(decision?.choices?.[0]?.message?.content ?? '');
+            } catch (e) {
+              console.error('[v12-flow] connector decision call failed', e);
+              break;
+            }
+            const calls = parseToolCalls(decisionText);
+            if (!calls.length) break; // no tool needed — plain answer
+            // Free models sometimes re-request the exact same calls in round
+            // 2 (the results are already in the prompt) — identical calls add
+            // pure latency, so the round is skipped instead of re-executed.
+            const callsKey = JSON.stringify(
+              calls.map((c) => [c.tool, c.arguments]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+            );
+            if (round > 0 && callsKey === previousCallsKey) {
+              console.log('[v12-flow] connector round 2: identical calls — skipped');
+              break;
+            }
+            previousCallsKey = callsKey;
+            await clearThinkingStatus(); // connector chips take over the row
+            const connectorLabel = connectors.map((c) => c.name).join(', ');
+            await emit({
+              type: 'status',
+              data: {
+                action: 'connector',
+                description: `Connector « ${connectorLabel} » — exécution…`,
+                done: false,
+              },
+            });
+            const results = await executeToolCalls(connectors, calls);
+            collected.push(...results);
+            await emit({
+              type: 'status',
+              data: {
+                action: 'connector',
+                description: `Connector « ${connectorLabel} » — ${results.length} appel(s) exécuté(s)`,
+                done: true,
+              },
+            });
+            console.log(
+              `[v12-flow] connector round ${round + 1}: ${results
+                .map((r) => `${r.tool}(${r.status})`)
+                .join(', ')}`
+            );
+            // Round 2 only re-runs when the model still needs DIFFERENT data
+            // (dependent calls) — the protocol prompt carries the results so
+            // far and an empty tool_calls block breaks the loop.
+          }
+        }
+        if (collected.length) {
+          usedConnectors.push(...connectors.map((c) => c.name));
+          // Inject the live results after the LAST user message (the
+          // tool-result position) — lives only in this turn's request.
+          let insertAt = llmMessages.length;
+          for (let i = llmMessages.length - 1; i >= 0; i--) {
+            if (llmMessages[i]?.role === 'user') {
+              insertAt = i + 1;
+              break;
+            }
+          }
+          llmMessages.splice(insertAt, 0, buildConnectorResultsMessage(connectors, collected));
+        }
+      } catch (e) {
+        console.error('[v12-flow] connectors phase failed (continuing without them)', e);
+      }
+    }
+  } // end !isContinuation connectors phase
 
   // ------------------------------------ 3.4 Web search (explicit toggle OR auto).
   // Python middleware: features.web_search → search engine + context/citation
@@ -1677,12 +1864,13 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       ...(usage ? { usage } : {}),
       ...(files && files.length ? { files } : {}),
       ...(webCitations ? { sources: webCitations } : {}),
-      ...(done || llmContent || usedSkills.length || extraMeta
+      ...(done || llmContent || usedSkills.length || usedConnectors.length || extraMeta
         ? {
             meta: {
               ...(done ? { response_ended_at: nowSec() } : {}),
               ...(llmContent ? { llm_content: llmContent } : {}),
               ...(usedSkills.length ? { used_skills: usedSkills } : {}),
+              ...(usedConnectors.length ? { used_connectors: usedConnectors } : {}),
               ...(extraMeta ?? {}),
             },
           }
@@ -2029,7 +2217,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           model: modelId,
           // Skills used this turn ride the checkpoints too — a serverless
           // kill mid-generation still leaves the audit trail in meta.
-          ...(usedSkills.length ? { meta: { used_skills: usedSkills } } : {}),
+          ...(usedSkills.length || usedConnectors.length ? { meta: { ...(usedSkills.length ? { used_skills: usedSkills } : {}), ...(usedConnectors.length ? { used_connectors: usedConnectors } : {}) } } : {}),
         } as any);
       } catch {
         /* best-effort checkpoint */
@@ -2672,7 +2860,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
                   done: false,
                   model: modelId,
                   // Skills audit trail on checkpoints (serverless kills).
-                  ...(usedSkills.length ? { meta: { used_skills: usedSkills } } : {}),
+                  ...(usedSkills.length || usedConnectors.length ? { meta: { ...(usedSkills.length ? { used_skills: usedSkills } : {}), ...(usedConnectors.length ? { used_connectors: usedConnectors } : {}) } } : {}),
                 } as any);
               } catch {
                 /* best-effort checkpoint */

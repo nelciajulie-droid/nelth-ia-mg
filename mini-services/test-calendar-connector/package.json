@@ -1,0 +1,8 @@
+{
+  "name": "test-calendar-connector",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot index.js",
+    "start": "bun index.js"
+  }
+}

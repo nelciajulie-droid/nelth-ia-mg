@@ -1124,6 +1124,65 @@ async function multipartFiles(form: FormData): Promise<Array<{ name: string; byt
 }
 
 // ---------------------------------------------------------------------------
+// Platform skill catalog — virtual "plugin" entries
+// ---------------------------------------------------------------------------
+
+/**
+ * The curated platform catalog (pdf, docx, frontend-design, threejs-webgl, …)
+ * merged into the skills LIST endpoints as read-only virtual entries with
+ * "catalog:<name>" ids. Both the @ quick action (GET /skills/list — the
+ * mention popup's items source) and the workspace lists surface them;
+ * selecting one rides the chat request's skill_ids and v12-flow injects its
+ * full instructions through the registry (src/lib/skills/registry.ts).
+ */
+async function catalogVirtualSkills(): Promise<Record<string, any>[]> {
+  try {
+    const catalogEnabled = await configGet<boolean>('skills.catalog.enable', true);
+    if (!catalogEnabled) return [];
+    const { SKILL_CATALOG } = await import('@/lib/skills/catalog');
+    const { DESIGN_SKILL_CATALOG } = await import('@/lib/skills/design-catalog');
+    const { LIBRARY_SKILLS } = await import('@/lib/skills/library');
+    const seen = new Set<string>();
+    const out: Record<string, any>[] = [];
+    const push = (name: string, label: string, description: string) => {
+      const id = `catalog:${name}`;
+      if (seen.has(id)) return;
+      seen.add(id);
+      const desc = String(description ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      out.push({
+        version_id: null,
+        id,
+        user_id: null,
+        name: label || name,
+        description: desc,
+        meta: { description: desc, catalog: true },
+        is_active: true,
+        access_grants: [],
+        updated_at: nowSec(),
+        created_at: nowSec(),
+        user: null,
+      });
+    };
+    for (const s of SKILL_CATALOG) push(s.name, s.label, s.description);
+    for (const s of DESIGN_SKILL_CATALOG) push(s.name, s.label, s.description);
+    for (const s of LIBRARY_SKILLS) push(s.name, s.name, s.description);
+    return out;
+  } catch (e) {
+    console.error('Failed to load the platform skill catalog', e);
+    return [];
+  }
+}
+
+/** Filter virtual catalog entries by a search query (name/description). */
+function filterCatalogByQuery(entries: Record<string, any>[], query: string | null): Record<string, any>[] {
+  const q = (query ?? '').toLowerCase().trim();
+  if (!q) return entries;
+  return entries.filter(
+    (s) => String(s.name).toLowerCase().includes(q) || String(s.description).toLowerCase().includes(q)
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -1144,7 +1203,19 @@ export const routes: Route[] = [
       const owners = new Map(
         (await getUsersByIds([...new Set(skills.map((s) => s.user_id).filter((v): v is string => v !== null))])).map((u) => [u.id, u])
       );
-      return ctx.json(skills.map((skill) => skillUserResponse(skill, toUserResponse(owners.get(skill.user_id ?? '') ?? ({} as any)))));
+      const items = skills.map((skill) => skillUserResponse(skill, toUserResponse(owners.get(skill.user_id ?? '') ?? ({} as any))));
+      // Platform catalog plugins (virtual, read-only) — @ quick action source.
+      try {
+        const dbNames = new Set(skills.map((s) => (s.name ?? '').toLowerCase()));
+        const virtual = filterCatalogByQuery(
+          (await catalogVirtualSkills()).filter((s) => !dbNames.has(String(s.name).toLowerCase())),
+          query
+        );
+        items.push(...virtual.slice(0, 200));
+      } catch (e) {
+        console.error('Failed to merge the skill catalog into the list', e);
+      }
+      return ctx.json(items);
     },
   },
 
@@ -1167,6 +1238,16 @@ export const routes: Route[] = [
 
       let rows = await getSkillsByAccess(bypass ? null : user.id);
 
+      // Platform catalog plugins (virtual, read-only) join the listing BEFORE
+      // the query filter/pagination — the @ mention popup reads THIS route
+      // (GET /skills/list?query=…), so the plugins must ride the same flow.
+      const dbIds = new Set(rows.map((s) => s.id));
+      const dbNames = new Set(rows.map((s) => (s.name ?? '').toLowerCase()));
+      const virtual = (await catalogVirtualSkills()).filter(
+        (s) => !dbIds.has(String(s.id)) && !dbNames.has(String(s.name).toLowerCase())
+      );
+      rows = [...rows, ...(virtual as unknown as typeof rows)];
+
       if (query) {
         const owners = new Map(
           (await getUsersByIds([...new Set(rows.map((s) => s.user_id).filter((v): v is string => v !== null))])).map((u) => [u.id, u])
@@ -1185,7 +1266,6 @@ export const routes: Route[] = [
       }
       if (viewOption === 'created') rows = rows.filter((s) => s.user_id === user.id);
       else if (viewOption === 'shared') rows = rows.filter((s) => s.user_id !== user.id);
-
       const orderKey = orderBy ?? 'updated_at';
       const dir = direction === 'asc' ? 1 : -1;
       rows = [...rows].sort((a, b) => {
@@ -1208,7 +1288,11 @@ export const routes: Route[] = [
 
       const items = pageItems.map((skill) => ({
         ...skillUserResponse(skill, toUserResponse(owners.get(skill.user_id ?? '') ?? ({} as any))),
-        write_access: bypass || user.id === skill.user_id || writable.has(skill.id),
+        write_access:
+          String(skill.id).startsWith('catalog:') ||
+          bypass ||
+          user.id === skill.user_id ||
+          writable.has(skill.id),
       }));
 
       return ctx.json({ items, total });
@@ -1294,6 +1378,30 @@ export const routes: Route[] = [
     auth: 'user',
     handler: async (ctx) => {
       const user = requireUser(ctx);
+      // Platform catalog plugin — read-only virtual skill detail.
+      if (ctx.params.id.startsWith('catalog:')) {
+        const { getSkillByName } = await import('@/lib/skills/registry');
+        const cat = getSkillByName(ctx.params.id.slice('catalog:'.length));
+        if (cat) {
+          const desc = String(cat.description ?? '').slice(0, 160);
+          return ctx.json({
+            version_id: null,
+            id: `catalog:${cat.name}`,
+            user_id: null,
+            name: cat.label || cat.name,
+            description: desc,
+            meta: { description: desc, catalog: true },
+            is_active: true,
+            access_grants: [],
+            updated_at: nowSec(),
+            created_at: nowSec(),
+            user: null,
+            content: cat.content,
+            write_access: false,
+          });
+        }
+        err(404, ERROR_MESSAGES.NOT_FOUND);
+      }
       const skill = await getSkillById(ctx.params.id);
       if (!skill) err(404, ERROR_MESSAGES.NOT_FOUND);
       if (

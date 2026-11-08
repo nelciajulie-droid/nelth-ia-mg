@@ -103,7 +103,7 @@ function resolveSchema(schema: any, components: Record<string, any>, resolved = 
   return out;
 }
 
-function convertOpenapiToToolPayload(openapiSpec: Record<string, any>): any[] {
+export function convertOpenapiToToolPayload(openapiSpec: Record<string, any>): any[] {
   const toolPayload: any[] = [];
   for (const [path, methods] of Object.entries(openapiSpec['paths'] ?? {})) {
     if (!methods || typeof methods !== 'object') continue;
@@ -165,7 +165,7 @@ function convertOpenapiToToolPayload(openapiSpec: Record<string, any>): any[] {
   return toolPayload;
 }
 
-function getToolServerUrl(url: string | null | undefined, path: string): string {
+export function getToolServerUrl(url: string | null | undefined, path: string): string {
   if (!url) return path;
   if (/^https?:\/\//i.test(path)) return path;
   const base = url.replace(/\/$/, '');
@@ -173,7 +173,7 @@ function getToolServerUrl(url: string | null | undefined, path: string): string 
   return base + suffix;
 }
 
-async function fetchToolServerData(url: string, headers: Record<string, string> | null): Promise<any> {
+export async function fetchToolServerData(url: string, headers: Record<string, string> | null): Promise<any> {
   const res = await fetch(url, {
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(headers ?? {}) },
     signal: AbortSignal.timeout(CLIENT_TIMEOUT_MS),
@@ -193,8 +193,11 @@ type ToolServerEntry = {
   specs: any[];
 };
 
-/** Port of utils/tools.py get_tool_servers_data (openapi servers only). */
-async function getToolServersData(servers: any[]): Promise<ToolServerEntry[]> {
+export type { ToolServerEntry };
+
+/** Port of utils/tools.py get_tool_servers_data (openapi servers only).
+ * Exported for the chat pipeline's connectors phase (v12-flow). */
+export async function getToolServersData(servers: any[]): Promise<ToolServerEntry[]> {
   const results: ToolServerEntry[] = [];
   if (!ENABLE_TOOL_SERVERS) return [];
   for (let idx = 0; idx < servers.length; idx++) {
@@ -234,7 +237,7 @@ async function getToolServersData(servers: any[]): Promise<ToolServerEntry[]> {
   return results;
 }
 
-async function getToolServers(): Promise<ToolServerEntry[]> {
+export async function getToolServers(): Promise<ToolServerEntry[]> {
   if (!ENABLE_TOOL_SERVERS) return [];
   try {
     const connections = await configGet<any[]>('tool_server.connections', []);

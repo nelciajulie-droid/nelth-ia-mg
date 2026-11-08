@@ -54,13 +54,21 @@ export async function handleGetAppConfig(ctx: Ctx): Promise<Response> {
             enable_public_active_users_count: envBool('ENABLE_PUBLIC_ACTIVE_USERS_COUNT', 'False'),
             enable_easter_eggs: envBool('ENABLE_EASTER_EGGS', 'True'),
             enable_direct_connections: await configGet<boolean>('direct.enable', false),
+            // Direct integrations: users (not just admins) may attach their own
+            // OpenAPI connectors (personal Gmail/Calendar endpoints + keys) from
+            // the chat's connect action — they ride the request's tool_servers
+            // array and run through the same connectors phase.
             enable_direct_integrations:
-              envBool('ENABLE_TOOL_SERVERS', 'False') &&
-              (await configGet<boolean>('direct.integrations.enable', false)),
+              envBool('ENABLE_TOOL_SERVERS', 'True') &&
+              (await configGet<boolean>('direct.integrations.enable', true)),
             enable_plugins: envBool('ENABLE_PLUGINS', 'False'),
             enable_tools: envBool('ENABLE_TOOLS', 'True'),
             enable_functions: envBool('ENABLE_FUNCTIONS', 'True'),
-            enable_tool_servers: envBool('ENABLE_TOOL_SERVERS', 'False'),
+            // Tool servers (OpenAPI connectors — Gmail, Calendar, …) are ON by
+            // default: the workspace Connectors tab + the @ quick action list
+            // them, and the chat pipeline (v12-flow connectors phase) executes
+            // their calls server-side. Set ENABLE_TOOL_SERVERS=False to hide.
+            enable_tool_servers: envBool('ENABLE_TOOL_SERVERS', 'True'),
             enable_terminal_servers: false,
             enable_folders: await configGet<boolean>('folders.enable', env.ENABLE_FOLDERS),
             folder_max_file_count: await configGet<number | null>('folders.max_file_count', null),
