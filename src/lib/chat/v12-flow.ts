@@ -10,6 +10,13 @@ import {
 } from '@/lib/models/chats';
 import { emitSocketEvent } from './socket-events';
 import {
+  sanitizeConnectorIds,
+  resolveConnectorSelection,
+  selectionForcesWebSearch,
+  connectorStatusLabel,
+  buildConnectorContext,
+} from '@/lib/apps/app-router';
+import {
   ReasoningAccumulator,
   NativeReasoningAccumulator,
   nativeReasoningOutputItems,
@@ -708,6 +715,77 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   }
   } // end !isContinuation skills phase
 
+  // ------------------------------------ 3.3ter-bis @ app picker (overlay).
+  // The ChatGPT-style picker (loader.js) injects the selected apps as
+  // STRUCTURED METADATA (connector_ids). Routing:
+  //   • Gmail / Google Calendar / Google Drive → bridged onto the builtin
+  //     connector tool entries (tool_ids["server:connector:*"]) so the
+  //     phase below EXECUTES them (real Google APIs when GOOGLE_* is
+  //     configured, flagged demo otherwise — the deployed connector
+  //     architecture, reused as-is);
+  //   • Web Search → forces the real web-search pipeline (3.4);
+  //   • apps with no executable connector on this instance (Slack, GitHub,
+  //     Notion, Outlook, OneDrive…) → one TRUE status row + an honest
+  //     context note (the model tells the user how to connect them — it
+  //     NEVER pretends to have accessed those accounts).
+  const connectorIds = sanitizeConnectorIds(form.connector_ids);
+  const connectorPicks = !isContinuation && connectorIds.length
+    ? await resolveConnectorSelection(user.id, connectorIds)
+    : [];
+  const connectorForcesWebSearch = selectionForcesWebSearch(connectorPicks);
+  if (connectorPicks.length) {
+    console.log(
+      `[v12-flow] connectors @-selected (picker): ${connectorPicks
+        .map((p) => `${p.app.name}[${p.connection.status}]`)
+        .join(', ')}`
+    );
+    // Bridge the executable Google apps onto the builtin connector tools —
+    // the phase below resolves + executes them through the SAME pipeline
+    // as the native Integrations selection.
+    const TOOL_ID_BY_PICKER_APP: Record<string, string> = {
+      gmail: 'server:connector:gmail',
+      gcal: 'server:connector:gcalendar',
+      gdrive: 'server:connector:gdrive',
+    };
+    if (!Array.isArray(form.tool_ids)) form.tool_ids = [];
+    for (const pick of connectorPicks) {
+      const toolId = TOOL_ID_BY_PICKER_APP[pick.app.id];
+      if (toolId && !(form.tool_ids as string[]).includes(toolId)) {
+        (form.tool_ids as string[]).push(toolId);
+      }
+    }
+    // Status rows — the same protocol the skills use. Bridged apps get
+    // their execution statuses from the connector phase below; the rest
+    // surface their TRUE connection state here.
+    for (const pick of connectorPicks) {
+      if (TOOL_ID_BY_PICKER_APP[pick.app.id]) continue; // phase below reports it
+      await emit({
+        type: 'status',
+        data: {
+          action: 'connector',
+          description: `${pick.app.name} — ${connectorStatusLabel(pick)}`,
+          done: true,
+        },
+      });
+    }
+    const connectorContext = buildConnectorContext(
+      connectorPicks.filter((p) => !TOOL_ID_BY_PICKER_APP[p.app.id])
+    );
+    if (connectorContext) {
+      // Tool-result position (right after the last user message) — the same
+      // placement the pre-selected skills use; conversation-only, never
+      // persisted into history.
+      let insertAt = llmMessages.length;
+      for (let i = llmMessages.length - 1; i >= 0; i--) {
+        if (llmMessages[i]?.role === 'user') {
+          insertAt = i + 1;
+          break;
+        }
+      }
+      llmMessages.splice(insertAt, 0, { role: 'user', content: connectorContext });
+    }
+  }
+
   // ---------------------------------------- 3.3ter Connectors (@ quick action:
   // OpenAPI tool servers — Gmail, Calendar, …). The compiled frontend's @
   // menu lists the admin-configured connectors (GET /tools/ merges them as
@@ -861,7 +939,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // the "continue" instruction would derail the code continuation).
   const wantsWebSearch =
     !isContinuation &&
-    form.features?.web_search === true &&
+    (form.features?.web_search === true || connectorForcesWebSearch) &&
     form.features?.image_generation !== true &&
     !isSdModel;
   console.log('[v12-flow] features =', JSON.stringify(form.features ?? null), '| model =', modelId, '| wantsWebSearch =', wantsWebSearch);

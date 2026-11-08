@@ -45,6 +45,7 @@ import { routes as scimRoutes } from './routers/scim';
 import { routes as automationsRoutes } from './routers/automations';
 import { routes as calendarsRoutes } from './routers/calendars';
 import { routes as terminalsRoutes } from './routers/terminals';
+import { routes as connectorsRoutes } from './routers/connectors';
 
 // Special app-level endpoints under /api/v1 (main.py decorators)
 import { handleChatCompletions, handleEmbeddings } from './root-handlers';
@@ -84,6 +85,7 @@ export const V1_MOUNTS: Mount[] = [
   { name: 'automations', routes: automationsRoutes },
   { name: 'calendars', routes: calendarsRoutes },
   { name: 'scim', routes: scimRoutes },
+  { name: 'connectors', routes: connectorsRoutes },
 ];
 
 function withCors(res: Response): Response {

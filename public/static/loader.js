@@ -3005,534 +3005,830 @@ html.nsrc-lock{overflow:hidden}
   }
 })();
 
+
 /* ====================================================================
- * @ CONNECTOR PICKER — the « @ » quick action selects plugins.
+ * @ APP MENTION PICKER — ChatGPT-style application & connector selector.
  *
- * Why: the compiled frontend's @ menu lists models + knowledge only —
- * in this Open WebUI build, tools/connectors live in the Integrations
- * picker (puzzle button by the input). The backend now ships a
- * built-in connector catalog (Gmail, Google Calendar, Drive, Contacts,
- * Wikipédia — GET /api/v1/tools/, ids “server:connector:*”) and this
- * layer turns the @ key into a CONNECTOR SELECTOR:
- *   • keydown “@” on the chat input → the native model menu is
- *     suppressed (preventDefault + stopPropagation, capture phase) and
- *     a custom dropdown opens above the input — filter-as-you-type,
- *     ↑/↓ + Enter, click, Échap closes;
- *   • picking a connector drives the app's OWN control path
- *     programmatically: Integrations button → Tools menu → checkbox.
- *     The app's store is updated exactly like a manual check, so the
- *     selection persists and rides tool_ids on the next message;
- *   • already-attached connectors are detected (aria-checked) and
- *     skipped — no accidental toggle-off;
- *   • “@@” (typing @ while the picker is open) → passthrough to the
- *     native model menu (escape hatch);
- *   • automation failure → nothing breaks: a hint points at the
- *     Integrations button and the native flow still works.
+ * Why: the compiled frontend's "@" mention opens the svelte-mentions
+ * suggestion list, which — with no tools registered on this backend —
+ * falls back to the MODEL list (the reported "quand je clique @ il
+ * affiche le modèle"). This layer gives "@" its ChatGPT meaning: a
+ * floating picker of the available integrations (Gmail, Google Drive,
+ * Google Calendar, Slack, GitHub, Notion, Outlook, OneDrive, Web
+ * Search).
+ *
+ *   • Typing "@" in the composer opens the anchored popup; typing after
+ *     it filters (substring, then subsequence — "@gm" finds Gmail).
+ *   • Keyboard: ↑/↓ navigate, Enter selects, Escape closes. Multiple
+ *     apps can be selected — each becomes a compact, removable chip
+ *     row inside the composer (above the editor, alongside native
+ *     attachments — never breaking text editing or uploads).
+ *   • The native tippy suggestion list is suppressed while the picker
+ *     is open (CSS :has + JS fallback), and its keyboard handler never
+ *     sees our keys (document-level capture interception).
+ *   • Connection status is NEVER invented: it comes from
+ *     GET /api/v1/connectors (connector_connection table). Disconnected
+ *     apps offer the real connection flow (POST /:id/connect — the same
+ *     OAuth credentials as the login router, or an actionable
+ *     "not configured" answer).
+ *   • On send, the selected app ids ride the chat completions request
+ *     as structured metadata (connector_ids + connector_apps) — the
+ *     backend v12-flow routes them (web_search runs the real search
+ *     pipeline; others surface their true status).
  * ==================================================================== */
 (() => {
   'use strict';
+  if (window.__NELTH_APP_PICKER__) return;
+  window.__NELTH_APP_PICKER__ = true;
 
-  const CACHE_MS = 60000;
-  const TOOLS_ITEM_RE = /^(tools|outils|werkzeuge|herramientas|strumenti|ferramentas)\b/i;
+  // ------------------------------------------------------------- constants
+  const EDITOR_SEL = '#chat-input';
+  const COMPOSER_BOX_SEL = '#message-input-container';
+  const CHAT_POST_RE = /\/api\/chat\/completions\/?(\?.*)?$/;
+  const reduceMotionMq = window.matchMedia
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : { matches: false };
 
-  let cache = null; // { at, items }
-  let root = null; // picker element
+  // --------------------------------------------------------------- state
+  const selected = new Map(); // connector id → {id,name,connector,icon,status}
+  let registry = []; // ConnectorListItem[] from the backend
+  let registryLoadedAt = 0;
+  let popup = null;
   let listEl = null;
-  let filterText = '';
-  let activeIdx = 0;
-  let items = [];
-  let busy = false; // automation in flight — no re-entry
+  let searchEl = null;
+  let msgEl = null;
+  let countEl = null;
+  let chipsBar = null;
+  let editorEl = null; // composer the mention was typed in
+  let query = '';
+  let filtered = [];
+  let activeIndex = 0;
+  let isOpen = false;
+  let suppressTimer = 0;
+  let msgTimer = 0;
+  // Mention-active state — drives the native-list suppression for the WHOLE
+  // @word (popup open or dismissed), so Escape never lets the model menu
+  // pop back over a still-active mention.
+  let mentionActive = false;
+  let lastMentionAtPos = -2;
+  let dismissedAtPos = -2;
 
-  // ------------------------------------------------------------------
-  // Catalog
-  // ------------------------------------------------------------------
+  const statusLabel = (app) =>
+    app.connection && app.connection.status === 'connected'
+      ? 'Connecté'
+      : app.connection && app.connection.status === 'ready'
+        ? 'Prêt'
+        : 'Non connecté';
 
-  async function loadConnectors() {
-    if (cache && Date.now() - cache.at < CACHE_MS) return cache.items;
+  // --------------------------------------------------------------- styles
+  if (!document.getElementById('nelth-nap-style')) {
+    const style = document.createElement('style');
+    style.id = 'nelth-nap-style';
+    style.textContent = `
+/* --- native @ suggestion list suppression (while the picker is open) --- */
+html.nap-active .tippy-box:has(> .tippy-content > .suggestion-list-container){display:none !important}
+
+/* --- popup shell — ChatGPT-style: minimalist, rounded, hairline border,
+       soft shadow, opens with a 120ms scale+fade, closes in 90ms. --- */
+.nap-popup{position:fixed;z-index:9999;width:min(400px,calc(100vw - 24px));max-height:min(60vh,420px);
+  display:flex;flex-direction:column;background:#ffffff;border:1px solid #e5e5e5;border-radius:16px;
+  box-shadow:0 12px 40px rgba(0,0,0,.14),0 2px 8px rgba(0,0,0,.06);color:#0d0d0d;
+  opacity:0;transform:translateY(6px) scale(.98);pointer-events:none;
+  transition:opacity .12s ease,transform .12s cubic-bezier(.22,1,.36,1)}
+.nap-popup.nap-open{opacity:1;transform:none;pointer-events:auto}
+html.dark .nap-popup{background:#2b2b2b;border-color:rgba(255,255,255,.1);color:#ececec;
+  box-shadow:0 12px 44px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.3)}
+
+/* --- head --- */
+.nap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:12px 14px 8px;font-size:12px;font-weight:600;color:#8f8f8f;flex-shrink:0}
+html.dark .nap-head{color:#9b9b9b}
+.nap-count{font-weight:500;font-size:11px;color:#6b6b6b;background:#f0f0f0;border-radius:999px;padding:1px 8px}
+html.dark .nap-count{background:rgba(255,255,255,.09);color:#b4b4b4}
+
+/* --- search --- */
+.nap-search-wrap{padding:0 12px 8px;flex-shrink:0}
+.nap-search{width:100%;box-sizing:border-box;height:34px;border:1px solid #e5e5e5;border-radius:10px;
+  background:#f7f7f7;padding:0 10px 0 30px;font-size:13px;color:inherit;outline:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:10px center}
+.nap-search:focus{border-color:#d0d0d0;background:#fff}
+html.dark .nap-search{background:#1f1f1f;border-color:rgba(255,255,255,.1)}
+html.dark .nap-search:focus{background:#191919;border-color:rgba(255,255,255,.18)}
+
+/* --- list --- */
+.nap-list{overflow-y:auto;overscroll-behavior:contain;padding:2px 6px 6px;flex:1;min-height:0;
+  scrollbar-width:thin}
+.nap-row{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;padding:7px 8px;
+  border-radius:10px;cursor:pointer;border:none;background:none;text-align:left;color:inherit;font:inherit}
+.nap-row:hover,.nap-row.nap-cursor{background:#f4f4f4}
+html.dark .nap-row:hover,html.dark .nap-row.nap-cursor{background:rgba(255,255,255,.07)}
+.nap-ico{width:30px;height:30px;border-radius:8px;flex-shrink:0;display:grid;place-items:center;
+  background:#f2f2f2;overflow:hidden}
+html.dark .nap-ico{background:rgba(255,255,255,.08)}
+.nap-ico svg,.nap-ico img{width:18px;height:18px;display:block}
+.nap-ico img{object-fit:contain}
+.nap-body{flex:1;min-width:0}
+.nap-name{font-size:13px;font-weight:500;line-height:1.25;display:flex;align-items:center;gap:6px}
+.nap-desc{font-size:11px;line-height:1.3;color:#8f8f8f;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html.dark .nap-desc{color:#9b9b9b}
+.nap-side{flex-shrink:0;display:flex;align-items:center;gap:6px}
+.nap-badge{font-size:10.5px;font-weight:500;padding:2px 7px;border-radius:999px;white-space:nowrap}
+.nap-badge-ok{color:#067647;background:#e6f4ee}
+html.dark .nap-badge-ok{color:#57d0a1;background:rgba(16,138,96,.22)}
+.nap-badge-off{color:#6b6b6b;background:#f0f0f0}
+html.dark .nap-badge-off{color:#b4b4b4;background:rgba(255,255,255,.08)}
+.nap-check{width:16px;height:16px;color:#067647;flex-shrink:0}
+html.dark .nap-check{color:#57d0a1}
+.nap-connect{font-size:11px;font-weight:600;padding:4px 9px;border-radius:999px;border:1px solid #dcdcdc;
+  background:#fff;color:#0d0d0d;cursor:pointer;white-space:nowrap;transition:background .12s ease,border-color .12s ease}
+.nap-connect:hover{background:#f7f7f7;border-color:#ccc}
+html.dark .nap-connect{background:#1f1f1f;border-color:rgba(255,255,255,.16);color:#ececec}
+html.dark .nap-connect:hover{background:#282828}
+.nap-empty{padding:22px 14px;text-align:center;font-size:12px;color:#8f8f8f}
+
+/* --- connect-flow message (actionable, never a fake success) --- */
+.nap-msg{margin:0 12px 10px;padding:9px 11px;border-radius:10px;font-size:11.5px;line-height:1.45;
+  background:#fff7e6;border:1px solid #f2ddb1;color:#7a5b12;display:none;flex-shrink:0}
+html.dark .nap-msg{background:rgba(255,196,66,.09);border-color:rgba(255,196,66,.25);color:#e8c15a}
+.nap-msg.nap-msg-show{display:block}
+
+/* --- footer hint --- */
+.nap-foot{flex-shrink:0;padding:7px 14px 9px;border-top:1px solid #f0f0f0;font-size:10.5px;color:#a3a3a3;
+  display:flex;justify-content:space-between;gap:8px}
+html.dark .nap-foot{border-top-color:rgba(255,255,255,.07);color:#8f8f8f}
+.nap-foot kbd{font:inherit;font-weight:600}
+
+/* --- chips row (inside the composer, above the editor) --- */
+.nap-chips{display:flex;flex-wrap:wrap;gap:6px;padding:6px 2px 2px;margin:0}
+.nap-chip{display:inline-flex;align-items:center;gap:6px;max-width:200px;padding:3px 4px 3px 8px;
+  border-radius:999px;border:1px solid #e5e5e5;background:#fafafa;font-size:12px;font-weight:500;color:#0d0d0d}
+html.dark .nap-chip{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.12);color:#ececec}
+.nap-chip-ico{width:14px;height:14px;flex-shrink:0;display:grid;place-items:center}
+.nap-chip-ico svg,.nap-chip-ico img{width:14px;height:14px;display:block}
+.nap-chip-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nap-chip-dot{width:6px;height:6px;border-radius:999px;background:#d97706;flex-shrink:0}
+.nap-chip-dot.nap-dot-ok{background:#059669}
+.nap-chip-x{display:grid;place-items:center;width:18px;height:18px;border-radius:999px;border:none;
+  background:transparent;color:inherit;cursor:pointer;opacity:.55;flex-shrink:0;transition:background .12s ease,opacity .12s ease}
+.nap-chip-x:hover{opacity:1;background:rgba(0,0,0,.07)}
+html.dark .nap-chip-x:hover{background:rgba(255,255,255,.12)}
+
+@media (prefers-reduced-motion:reduce){
+  .nap-popup{transition:none}
+}
+    `;
+    document.head.appendChild(style);
+  }
+
+  // -------------------------------------------------------------- registry
+  function authHeaders() {
+    const headers = { 'content-type': 'application/json' };
+    const token = localStorage.token || '';
+    if (token) headers.authorization = `Bearer ${token}`;
+    return headers;
+  }
+
+  function loadRegistry(force) {
+    const hasToken = !!localStorage.token;
+    if (!hasToken) return Promise.resolve([]);
+    if (!force && registry.length && Date.now() - registryLoadedAt < 120000) {
+      return Promise.resolve(registry);
+    }
+    return fetch('/api/v1/connectors', { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && Array.isArray(data.connectors)) {
+          registry = data.connectors;
+          registryLoadedAt = Date.now();
+          // Refresh the live status of already-selected chips.
+          for (const app of selected.values()) {
+            const fresh = registry.find((c) => c.id === app.id);
+            if (fresh) selected.set(app.id, fresh);
+          }
+          renderChips();
+          if (isOpen) applyFilter();
+        }
+        return registry;
+      })
+      .catch(() => registry);
+  }
+
+  // --------------------------------------------------- caret / @ detection
+  /** Text before the caret + the text-node map (ProseMirror-safe walk). */
+  function caretContext(el) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const caret = sel.getRangeAt(0);
+    if (!caret.collapsed) return null;
+    if (!el.contains(caret.startContainer)) return null;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const segments = [];
+    let full = '';
+    let caretPos = -1;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (node === caret.startContainer) {
+        caretPos = full.length + caret.startOffset;
+        segments.push({ node, start: full.length });
+        full += node.data.slice(0, caret.startOffset);
+        break;
+      }
+      segments.push({ node, start: full.length });
+      full += node.data;
+    }
+    if (caretPos < 0) caretPos = full.length; // element-level caret (empty editor)
+    return { text: full, caretPos, segments };
+  }
+
+  const MENTION_RE = /(?:^|\s)@([^\s@]{0,24})$/;
+
+  /** The active "@query" ending at the caret, or null. */
+  function activeMention(el) {
+    const ctx = caretContext(el);
+    if (!ctx) return null;
+    const before = ctx.text.slice(0, ctx.caretPos);
+    const m = MENTION_RE.exec(before);
+    if (!m) return null;
+    return {
+      query: m[1],
+      atPos: ctx.caretPos - m[1].length - 1,
+      caretPos: ctx.caretPos,
+      segments: ctx.segments,
+    };
+  }
+
+  /** Map a text position onto a DOM point inside the walked segments. */
+  function posToPoint(segments, pos) {
+    for (const seg of segments) {
+      const segEnd = seg.start + seg.node.data.length;
+      if (pos >= seg.start && pos <= segEnd) {
+        return { node: seg.node, offset: pos - seg.start };
+      }
+    }
+    return null;
+  }
+
+  /** Delete the typed "@query" from the editor (ProseMirror ingests the DOM
+   *  mutation — text editing, cursor and attachments stay intact). */
+  function removeMentionText(mention) {
+    if (!mention || !editorEl) return;
+    const from = posToPoint(mention.segments, mention.atPos);
+    const to = posToPoint(mention.segments, mention.caretPos);
+    if (!from || !to) return;
     try {
-      const token = localStorage.getItem('token') || '';
-      const res = await fetch('/api/v1/tools/', {
-        headers: { Authorization: 'Bearer ' + token },
-      });
-      if (!res.ok) throw new Error('http ' + res.status);
-      const tools = await res.json();
-      const list = (Array.isArray(tools) ? tools : [])
-        .filter(
-          (t) =>
-            t &&
-            typeof t.id === 'string' &&
-            t.id.indexOf('server:') === 0 &&
-            (t.name || (t.meta && t.meta.description))
-        )
-        .map((t) => ({
-          id: t.id,
-          name: String(t.name || t.id),
-          description: String((t.meta && t.meta.description) || ''),
-        }));
-      cache = { at: Date.now(), items: list };
-      return list;
+      const range = document.createRange();
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
+      range.deleteContents();
+      editorEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: null }));
     } catch (e) {
-      return cache ? cache.items : [];
+      /* the chip is still added — worst case the @ text stays */
     }
   }
 
-  // ------------------------------------------------------------------
-  // Icons — brand-tinted letter badges (fallback: neutral puzzle dot)
-  // ------------------------------------------------------------------
-
-  const ICON_COLORS = {
-    'connector:gmail': '#EA4335',
-    'connector:gcalendar': '#34A853',
-    'connector:gdrive': '#FBBC05',
-    'connector:gcontacts': '#EA4335',
-    'connector:wikipedia': '#54565A',
-  };
-
-  function iconHtml(item) {
-    const color = ICON_COLORS[item.id.replace(/^server:/, '')] || '#6B7280';
-    const letter = (item.name || '?').trim().charAt(0).toUpperCase();
-    return (
-      '<span class="nelth-at-ico" style="background:' + color + '">' + letter + '</span>'
-    );
+  // -------------------------------------------------- native list suppression
+  function hideNativeList() {
+    // JS fallback for engines without :has() — re-run on a short interval
+    // while the picker is open (tippy re-mounts its box on render).
+    const boxes = document.querySelectorAll('.tippy-box');
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i];
+      if (box.querySelector('.suggestion-list-container')) {
+        if (box.style.display !== 'none') box.style.display = 'none';
+        box.setAttribute('data-nap-hidden', '1');
+      }
+    }
   }
 
-  // ------------------------------------------------------------------
-  // Picker DOM
-  // ------------------------------------------------------------------
+  function restoreNativeList() {
+    const hidden = document.querySelectorAll('.tippy-box[data-nap-hidden]');
+    for (let i = 0; i < hidden.length; i++) {
+      hidden[i].style.display = '';
+      hidden[i].removeAttribute('data-nap-hidden');
+    }
+  }
 
-  const STYLE = document.createElement('style');
-  STYLE.textContent = [
-    '.nelth-at-picker{position:fixed;z-index:99999;width:352px;max-width:calc(100vw - 20px);',
-    'border-radius:12px;border:1px solid rgba(17,24,39,.12);box-shadow:0 12px 44px rgba(15,23,42,.22);',
-    'background:#fff;color:#111827;overflow:hidden;font-size:13px;line-height:1.35;',
-    'font-family:inherit;-webkit-font-smoothing:antialiased}',
-    '.nelth-at-head{display:flex;align-items:center;gap:6px;padding:9px 12px 7px;',
-    'font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#6B7280;',
-    'border-bottom:1px solid rgba(17,24,39,.08)}',
-    '.nelth-at-list{max-height:288px;overflow-y:auto;padding:4px}',
-    '.nelth-at-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;cursor:pointer}',
-    '.nelth-at-row[data-active="1"]{background:rgba(17,24,39,.06)}',
-    '.nelth-at-row .nelth-at-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-    '.nelth-at-row .nelth-at-desc{color:#6B7280;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}',
-    '.nelth-at-ico{flex:0 0 auto;width:26px;height:26px;border-radius:8px;color:#fff;',
-    'display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}',
-    '.nelth-at-empty{padding:16px 12px;color:#6B7280;text-align:center}',
-    '.nelth-at-foot{padding:6px 12px 8px;font-size:10.5px;color:#9CA3AF;border-top:1px solid rgba(17,24,39,.08)}',
-    '.dark .nelth-at-picker{background:#1F2937;border-color:rgba(255,255,255,.09);color:#F3F4F6}',
-    '.dark .nelth-at-head{color:#9CA3AF;border-color:rgba(255,255,255,.08)}',
-    '.dark .nelth-at-row[data-active="1"]{background:rgba(255,255,255,.08)}',
-    '.dark .nelth-at-row .nelth-at-desc{color:#9CA3AF}',
-    '.dark .nelth-at-foot{color:#6B7280;border-color:rgba(255,255,255,.08)}',
-    '.nelth-at-hint{position:fixed;z-index:99999;left:50%;transform:translateX(-50%);bottom:92px;',
-    'background:#111827;color:#F9FAF8;padding:8px 16px;border-radius:999px;font-size:12.5px;',
-    'box-shadow:0 8px 30px rgba(0,0,0,.35);opacity:0;transition:opacity .18s;pointer-events:none;max-width:calc(100vw - 32px);text-align:center}',
-    '.nelth-at-hint.nelth-at-hint-on{opacity:1}',
-  ].join('');
-  document.head.appendChild(STYLE);
+  function startSuppress() {
+    document.documentElement.classList.add('nap-active');
+    hideNativeList();
+    if (suppressTimer) clearInterval(suppressTimer);
+    suppressTimer = setInterval(hideNativeList, 400);
+  }
 
-  function norm(s) {
-    return String(s)
+  function stopSuppress() {
+    document.documentElement.classList.remove('nap-active');
+    if (suppressTimer) {
+      clearInterval(suppressTimer);
+      suppressTimer = 0;
+    }
+    restoreNativeList();
+  }
+
+  // -------------------------------------------------------- popup building
+  function ensurePopup() {
+    if (popup) return;
+    popup = document.createElement('div');
+    popup.className = 'nap-popup';
+    popup.setAttribute('role', 'dialog');
+    popup.setAttribute('aria-label', 'Sélectionner des applications');
+    popup.innerHTML =
+      '<div class="nap-head"><span>Applications &amp; connecteurs</span>' +
+      '<span class="nap-count"></span></div>' +
+      '<div class="nap-search-wrap"><input class="nap-search" type="text" ' +
+      'placeholder="Rechercher une application…" aria-label="Rechercher une application" autocomplete="off" /></div>' +
+      '<div class="nap-list" role="listbox" aria-label="Applications"></div>' +
+      '<div class="nap-msg" role="status"></div>' +
+      '<div class="nap-foot"><span><kbd>↑↓</kbd> naviguer · <kbd>Entrée</kbd> sélectionner · <kbd>Échap</kbd> fermer</span>' +
+      '<span>@ pour rouvrir</span></div>';
+    listEl = popup.querySelector('.nap-list');
+    searchEl = popup.querySelector('.nap-search');
+    msgEl = popup.querySelector('.nap-msg');
+    countEl = popup.querySelector('.nap-count');
+    document.body.appendChild(popup);
+
+    searchEl.addEventListener('input', () => {
+      setQuery(searchEl.value.trim());
+    });
+    // Clicks inside the popup never dismiss it (nor reach the composer).
+    popup.addEventListener('mousedown', (e) => e.stopPropagation());
+    popup.addEventListener('click', (e) => {
+      // Connect button FIRST — it lives INSIDE a row, and the row handler
+      // below would otherwise swallow the click as a selection.
+      const connectBtn = e.target.closest('.nap-connect');
+      if (connectBtn) {
+        e.stopPropagation();
+        const app = registry.find((c) => c.id === connectBtn.dataset.app);
+        if (app) connectFlow(app, connectBtn);
+        return;
+      }
+      const row = e.target.closest('.nap-row');
+      if (row && row.dataset.idx !== undefined) {
+        selectRow(parseInt(row.dataset.idx, 10));
+      }
+    });
+    popup.addEventListener('mousedown', (e) => {
+      const connectBtn = e.target.closest('.nap-connect');
+      if (connectBtn) e.preventDefault(); // keep focus in the editor
+    });
+  }
+
+  function composerAnchor() {
+    // The visual composer card — the form wrapping the rich editor.
+    const el = editorEl || document.querySelector(EDITOR_SEL);
+    if (!el) return null;
+    return el.closest('form') || el.closest(COMPOSER_BOX_SEL) || el.parentElement;
+  }
+
+  function positionPopup() {
+    if (!popup) return;
+    const anchor = composerAnchor();
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const width = Math.min(400, vw - 24, Math.max(260, rect.width));
+    let left = rect.left;
+    if (left + width > vw - 12) left = vw - 12 - width;
+    if (left < 12) left = 12;
+    popup.style.width = width + 'px';
+    popup.style.left = Math.round(left) + 'px';
+    // Measure (hidden but laid out) then place above the composer.
+    popup.style.visibility = 'hidden';
+    popup.classList.add('nap-open');
+    const height = popup.offsetHeight;
+    popup.classList.remove('nap-open');
+    popup.style.visibility = '';
+    let top = rect.top - height - 10;
+    if (top < 12) top = rect.top + rect.height + 10; // flip below on short viewports
+    popup.style.top = Math.round(top) + 'px';
+  }
+
+  // -------------------------------------------------------------- filtering
+  const fold = (s) =>
+    String(s || '')
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '');
+
+  function isSubsequence(needle, hay) {
+    let i = 0;
+    for (let j = 0; j < hay.length && i < needle.length; j++) {
+      if (hay[j] === needle[i]) i++;
+    }
+    return i === needle.length;
   }
 
-  function visibleItems() {
-    if (!filterText) return items;
-    const q = norm(filterText);
-    return items.filter(
-      (it) => norm(it.name).indexOf(q) >= 0 || norm(it.description).indexOf(q) >= 0
-    );
+  function applyFilter() {
+    const q = fold(query);
+    if (!q) {
+      filtered = registry.slice();
+    } else {
+      const subs = [];
+      const fuzzy = [];
+      for (const app of registry) {
+        const name = fold(app.name);
+        const id = fold(app.id);
+        const kw = (app.keywords || []).map(fold);
+        if (name.includes(q) || id.includes(q) || kw.some((k) => k.includes(q))) {
+          subs.push(app);
+        } else if (isSubsequence(q, name)) {
+          fuzzy.push(app);
+        }
+      }
+      filtered = subs.concat(fuzzy);
+    }
+    if (activeIndex >= filtered.length) activeIndex = 0;
+    renderList();
+  }
+
+  function setQuery(q) {
+    query = q;
+    activeIndex = 0;
+    if (searchEl && searchEl.value !== q) searchEl.value = q;
+    applyFilter();
+  }
+
+  // ------------------------------------------------------------ row render
+  function iconHtml(app, className) {
+    // Registry icons are backend-served inline SVGs (trusted source).
+    const icon = String(app.icon || '');
+    if (icon.includes('<svg')) {
+      return `<span class="${className}">${icon}</span>`;
+    }
+    if (/^https?:\/\//i.test(icon)) {
+      return `<span class="${className}"><img src="${icon}" alt="" loading="lazy" /></span>`;
+    }
+    return '';
   }
 
   function renderList() {
     if (!listEl) return;
-    const vis = visibleItems();
-    if (activeIdx >= vis.length) activeIdx = Math.max(0, vis.length - 1);
-    if (!vis.length) {
+    if (countEl) {
+      countEl.textContent = selected.size
+        ? selected.size + ' sélectionnée' + (selected.size > 1 ? 's' : '')
+        : registry.length + ' apps';
+    }
+    if (!registry.length) {
       listEl.innerHTML =
-        '<div class="nelth-at-empty">Aucun connecteur ne correspond à « ' +
-        String(filterText).replace(/[<>&]/g, '') +
-        ' »</div>';
+        '<div class="nap-empty">Applications indisponibles — ' +
+        (localStorage.token ? 'erreur de chargement, réessayez' : 'connectez-vous') +
+        '.</div>';
       return;
     }
-    listEl.innerHTML = vis
-      .map((it, i) => {
-        const name = String(it.name).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-        const desc = String(it.description).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-        return (
-          '<div class="nelth-at-row" role="option" data-active="' +
-          (i === activeIdx ? '1' : '0') +
-          '" data-name="' +
-          name +
-          '">' +
-          iconHtml(it) +
-          '<span style="min-width:0"><span class="nelth-at-name">' +
-          name +
-          '</span><br/><span class="nelth-at-desc">' +
-          desc +
-          '</span></span></div>'
-        );
-      })
-      .join('');
-    Array.prototype.forEach.call(listEl.querySelectorAll('.nelth-at-row'), (row) => {
-      row.addEventListener('mousedown', (e) => {
-        e.preventDefault(); // keep the input focused
-      });
-      row.addEventListener('click', () => {
-        const name = row.getAttribute('data-name');
-        const it = items.find((x) => x.name === name);
-        if (it) choose(it);
-      });
-    });
-    const act = listEl.querySelector('.nelth-at-row[data-active="1"]');
-    if (act && act.scrollIntoView) act.scrollIntoView({ block: 'nearest' });
-  }
-
-  function positionPicker() {
-    if (!root) return;
-    const input = document.getElementById('chat-input');
-    if (!input) return;
-    const anchor = input.closest('form') || input;
-    const r = anchor.getBoundingClientRect();
-    const w = Math.min(352, window.innerWidth - 20);
-    root.style.left = Math.max(10, Math.min(r.left, window.innerWidth - w - 10)) + 'px';
-    root.style.bottom = Math.max(10, window.innerHeight - r.top + 8) + 'px';
-  }
-
-  async function openPicker() {
-    if (root) closePicker(true);
-    items = await loadConnectors();
-    if (!items.length) {
-      hint(
-        'Aucun connecteur disponible — utilisez le bouton 🧩 Integrations en bas de la zone de saisie.'
-      );
+    if (!filtered.length) {
+      listEl.innerHTML = '<div class="nap-empty">Aucune application ne correspond à « ' +
+        String(query).replace(/[<>&"]/g, '') + ' ».</div>';
       return;
     }
-    filterText = '';
-    activeIdx = 0;
-    root = document.createElement('div');
-    root.className = 'nelth-at-picker';
-    root.setAttribute('role', 'listbox');
-    root.innerHTML =
-      '<div class="nelth-at-head">🧩 Connecteurs</div>' +
-      '<div class="nelth-at-list"></div>' +
-      '<div class="nelth-at-foot">↑↓ naviguer · Entrée attacher · Échap fermer · @@ pour les modèles</div>';
-    listEl = root.querySelector('.nelth-at-list');
-    document.body.appendChild(root);
-    renderList();
-    positionPicker();
-    window.addEventListener('resize', positionPicker);
-    window.addEventListener('scroll', positionPicker, true);
-  }
-
-  function closePicker(silent) {
-    if (root) {
-      root.remove();
-      root = null;
-      listEl = null;
-    }
-    window.removeEventListener('resize', positionPicker);
-    window.removeEventListener('scroll', positionPicker, true);
-    filterText = '';
-    activeIdx = 0;
-    if (!silent) {
-      const input = document.getElementById('chat-input');
-      if (input && input.focus) input.focus({ preventScroll: true });
-    }
-  }
-
-  function choose(it) {
-    closePicker(true);
-    attachConnector(it.name);
-  }
-
-  // ------------------------------------------------------------------
-  // Hint bubble
-  // ------------------------------------------------------------------
-
-  let hintEl = null;
-  let hintTimer = 0;
-  function hint(text) {
-    if (!hintEl) {
-      hintEl = document.createElement('div');
-      hintEl.className = 'nelth-at-hint';
-      document.body.appendChild(hintEl);
-    }
-    hintEl.textContent = text;
-    hintEl.classList.add('nelth-at-hint-on');
-    clearTimeout(hintTimer);
-    hintTimer = setTimeout(() => {
-      if (hintEl) hintEl.classList.remove('nelth-at-hint-on');
-    }, 2600);
-  }
-
-  // ------------------------------------------------------------------
-  // Native-menu automation (Integrations → Tools → checkbox)
-  // ------------------------------------------------------------------
-
-  function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  async function waitFor(fn, ms) {
-    const t0 = Date.now();
-    for (;;) {
-      const v = fn();
-      if (v) return v;
-      if (Date.now() - t0 > ms) return null;
-      await sleep(60);
-    }
-  }
-
-  function pressEscape() {
-    const ev = new KeyboardEvent('keydown', {
-      key: 'Escape',
-      code: 'Escape',
-      keyCode: 27,
-      which: 27,
-      bubbles: true,
-      cancelable: true,
+    const frag = document.createDocumentFragment();
+    filtered.forEach((app, idx) => {
+      const isSelected = selected.has(app.id);
+      const status = app.connection ? app.connection.status : 'disconnected';
+      const badge =
+        status === 'ready'
+          ? '<span class="nap-badge nap-badge-ok">Prêt</span>'
+          : status === 'connected'
+            ? '<span class="nap-badge nap-badge-ok" title="' +
+              String(app.connection.account || '').replace(/"/g, '&quot;') +
+              '">Connecté</span>'
+            : '<span class="nap-badge nap-badge-off">Non connecté</span>';
+      const check = isSelected
+        ? '<svg class="nap-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>'
+        : '';
+      const connectBtn =
+        status === 'disconnected'
+          ? '<button type="button" class="nap-connect" data-app="' + app.id + '">Connecter</button>'
+          : '';
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'nap-row' + (idx === activeIndex ? ' nap-cursor' : '');
+      row.dataset.idx = String(idx);
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', idx === activeIndex ? 'true' : 'false');
+      row.innerHTML =
+        iconHtml(app, 'nap-ico') +
+        '<span class="nap-body"><span class="nap-name"></span>' +
+        '<span class="nap-desc"></span></span>' +
+        '<span class="nap-side">' + badge + check + connectBtn + '</span>';
+      row.querySelector('.nap-name').textContent = app.name;
+      row.querySelector('.nap-desc').textContent = app.description || '';
+      frag.appendChild(row);
     });
-    try {
-      if (document.activeElement && document.activeElement !== document.body) {
-        document.activeElement.dispatchEvent(ev);
-      }
-    } catch (e) {
-      /* ignore */
-    }
-    document.dispatchEvent(ev);
+    listEl.innerHTML = '';
+    listEl.appendChild(frag);
   }
 
-  function menuItems() {
-    return Array.prototype.slice.call(document.querySelectorAll('[role="menuitem"]'));
-  }
-
-  function menuCheckboxes() {
-    return Array.prototype.slice.call(document.querySelectorAll('[role="menuitemcheckbox"]'));
-  }
-
-  function integrationsCandidates() {
-    const input = document.getElementById('chat-input');
-    const form = input ? input.closest('form') : null;
-    const scope = form || document;
-    const btns = Array.prototype.slice.call(
-      scope.querySelectorAll('button[aria-haspopup="true"]')
-    );
-    // Prefer the icon-size hint of the Integrations trigger, keep every
-    // candidate as fallback (locale-proof discovery by content probing).
-    btns.sort((a, b) => {
-      const sa = /size-4(\.5)?\b/.test((a.querySelector('svg') || {}).className || '') ? 0 : 1;
-      const sb = /size-4(\.5)?\b/.test((b.querySelector('svg') || {}).className || '') ? 0 : 1;
-      return sa - sb;
+  function moveActive(delta) {
+    if (!filtered.length) return;
+    activeIndex = (activeIndex + delta + filtered.length) % filtered.length;
+    const rows = listEl.querySelectorAll('.nap-row');
+    rows.forEach((row) => {
+      const isCursor = parseInt(row.dataset.idx, 10) === activeIndex;
+      row.classList.toggle('nap-cursor', isCursor);
+      row.setAttribute('aria-selected', isCursor ? 'true' : 'false');
     });
-    return btns;
-  }
-
-  /** Radix-style submenus open on POINTER events, not plain .click() —
-   *  dispatch the full hover sequence so the submenu actually expands. */
-  function openSubmenu(item) {
-    const r = item.getBoundingClientRect();
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    const opts = {
-      bubbles: true,
-      cancelable: true,
-      clientX: cx,
-      clientY: cy,
-      button: 0,
-    };
-    const seq = [
-      ['pointerover', PointerEvent],
-      ['pointerenter', PointerEvent],
-      ['mouseover', MouseEvent],
-      ['mouseenter', MouseEvent],
-      ['pointermove', PointerEvent],
-      ['mousemove', MouseEvent],
-    ];
-    for (let i = 0; i < seq.length; i++) {
-      try {
-        item.dispatchEvent(new seq[i][1](seq[i][0], { ...opts, pointerId: 1, pointerType: 'mouse' }));
-      } catch (e) {
-        /* older browsers — mouse events still dispatched below */
-      }
+    const cursor = rows[activeIndex];
+    if (cursor) {
+      cursor.scrollIntoView({ block: 'nearest', behavior: reduceMotionMq.matches ? 'auto' : 'smooth' });
     }
   }
 
-  async function attachConnector(name) {
-    if (busy) return;
-    busy = true;
-    hint('« ' + name + ' » — attachement…');
-    let triggerBtn = null; // the button that opened the popup — toggling it
-    // again closes the popup through the app's OWN commit path (a synthetic
-    // Escape would cancel the uncommitted checkbox change!).
-    try {
-      // 1 — open the Integrations popup (probe each candidate button).
-      let toolsItem = null;
-      const candidates = integrationsCandidates();
-      for (let i = 0; i < candidates.length && !toolsItem; i++) {
-        candidates[i].click();
-        toolsItem = await waitFor(
-          () => menuItems().find((el) => TOOLS_ITEM_RE.test((el.textContent || '').trim())) || null,
-          900
-        );
-        if (toolsItem) {
-          triggerBtn = candidates[i];
-        } else {
-          pressEscape();
+  // ------------------------------------------------------------- selection
+  function selectRow(idx) {
+    const app = filtered[idx];
+    if (!app) return;
+    if (selected.has(app.id)) {
+      removeChip(app.id);
+      renderList(); // refresh the check state
+      return;
+    }
+    addChip(app);
+    // ChatGPT behavior: the typed "@query" is consumed by the chip.
+    const mention = activeMention(editorEl);
+    removeMentionText(mention);
+    closePopup();
+    if (editorEl && document.activeElement !== editorEl) {
+      editorEl.focus({ preventScroll: true });
+    }
+  }
+
+  // ----------------------------------------------------------- connect flow
+  function showMsg(text, sticky) {
+    if (!msgEl) return;
+    msgEl.textContent = text;
+    msgEl.classList.add('nap-msg-show');
+    if (msgTimer) clearTimeout(msgTimer);
+    if (!sticky) msgTimer = setTimeout(() => hideMsg(), 9000);
+  }
+
+  function hideMsg() {
+    if (!msgEl) return;
+    msgEl.classList.remove('nap-msg-show');
+    msgEl.textContent = '';
+  }
+
+  function connectFlow(app, btn) {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '…';
+    }
+    showMsg('Connexion ' + app.name + '…', true);
+    fetch('/api/v1/connectors/' + encodeURIComponent(app.id) + '/connect', {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+      .then((r) => r.json().catch(() => null))
+      .then((data) => {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Connecter';
         }
-      }
-      if (!toolsItem) {
-        automationFailed(name);
-        return;
-      }
-      // 2 — open the Tools submenu (pointer events — plain .click() is
-      // not enough: Radix-style submenus open on pointerenter/real clicks).
-      openSubmenu(toolsItem);
-      toolsItem.click();
-      const box = await waitFor(() => {
-        const boxes = menuCheckboxes();
-        const exact = boxes.find((el) => (el.textContent || '').trim().indexOf(name) === 0);
-        return exact || null;
-      }, 1400);
-      if (!box) {
-        closeViaTrigger(triggerBtn);
-        automationFailed(name);
-        return;
-      }
-      // 3 — attach unless already attached (aria-checked — never toggle off).
-      const wasChecked = box.getAttribute('aria-checked') === 'true';
-      if (wasChecked) {
-        hint('« ' + name + ' » est déjà attaché à cette conversation ✓');
+        if (!data) {
+          showMsg('Connexion impossible — réessayez.');
+          return;
+        }
+        if (data.status === 'redirect' && data.url) {
+          window.location.href = data.url;
+          return;
+        }
+        if (data.status === 'not_configured') {
+          showMsg(data.detail || 'Connexion non configurée sur cette instance.');
+          return;
+        }
+        showMsg(String(data.detail || 'Réponse inattendue du serveur.'));
+      })
+      .catch(() => {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Connecter';
+        }
+        showMsg('Connexion impossible — réseau indisponible.');
+      });
+  }
+
+  // ------------------------------------------------------------------ chips
+  function chipsHost() {
+    // Insertion point: the composer column, above the editor — alongside
+    // (never over) the native attachment chips.
+    const el = editorEl || document.querySelector(EDITOR_SEL);
+    if (!el) return null;
+    return el.closest(COMPOSER_BOX_SEL) || el.parentElement;
+  }
+
+  function ensureChipsBar() {
+    if (chipsBar && chipsBar.isConnected) return chipsBar;
+    const host = chipsHost();
+    if (!host) return null;
+    chipsBar = document.createElement('div');
+    chipsBar.className = 'nap-chips';
+    chipsBar.setAttribute('aria-label', 'Applications sélectionnées');
+    host.insertBefore(chipsBar, host.firstChild);
+    return chipsBar;
+  }
+
+  function renderChips() {
+    if (!selected.size) {
+      if (chipsBar && chipsBar.isConnected) chipsBar.remove();
+      chipsBar = null;
+      return;
+    }
+    const bar = ensureChipsBar();
+    if (!bar) return;
+    const frag = document.createDocumentFragment();
+    for (const app of selected.values()) {
+      const status = app.connection ? app.connection.status : 'disconnected';
+      const chip = document.createElement('span');
+      chip.className = 'nap-chip';
+      chip.title =
+        status === 'connected'
+          ? 'Connecté' + (app.connection.account ? ' — ' + app.connection.account : '')
+          : status === 'ready'
+            ? 'Prêt — sans compte'
+            : 'Non connecté — Connecter via @';
+      chip.innerHTML =
+        iconHtml(app, 'nap-chip-ico') +
+        '<span class="nap-chip-name"></span>' +
+        '<span class="nap-chip-dot' + (status === 'connected' || status === 'ready' ? ' nap-dot-ok' : '') +
+        '" aria-hidden="true"></span>' +
+        '<button type="button" class="nap-chip-x" aria-label="Retirer ' +
+        String(app.name).replace(/"/g, '&quot;') +
+        '"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>';
+      chip.querySelector('.nap-chip-name').textContent = app.name;
+      chip.querySelector('.nap-chip-x').addEventListener('click', () => removeChip(app.id));
+      frag.appendChild(chip);
+    }
+    bar.innerHTML = '';
+    bar.appendChild(frag);
+  }
+
+  function addChip(app) {
+    selected.set(app.id, app);
+    renderChips();
+    if (isOpen) renderList();
+  }
+
+  function removeChip(id) {
+    selected.delete(id);
+    renderChips();
+    if (isOpen) renderList();
+  }
+
+  // ------------------------------------------------------------- open/close
+  function openPopup() {
+    ensurePopup();
+    if (isOpen) {
+      positionPopup();
+      return;
+    }
+    isOpen = true;
+    hideMsg();
+    positionPopup();
+    popup.classList.add('nap-open');
+    startSuppress();
+    loadRegistry().then(() => {
+      if (isOpen) applyFilter();
+    });
+  }
+
+  function closePopup() {
+    if (!isOpen) return;
+    isOpen = false;
+    if (popup) popup.classList.remove('nap-open');
+    // The native list stays suppressed while the @word is still active —
+    // stopSuppress() runs when the mention itself ends (input handler).
+    if (!mentionActive) stopSuppress();
+    hideMsg();
+  }
+
+  // -------------------------------------------------------- event listeners
+  function editorFromTarget(target) {
+    if (!(target instanceof Element)) return null;
+    if (target.id === 'chat-input') return target;
+    return target.closest && target.id !== 'chat-input' ? target.closest(EDITOR_SEL) : null;
+  }
+
+  document.addEventListener(
+    'input',
+    (e) => {
+      const el = editorFromTarget(e.target);
+      if (!el) return;
+      editorEl = el;
+      const mention = activeMention(el);
+      if (mention) {
+        // A @word is active at the caret: the native suggestion list stays
+        // hidden for the WHOLE mention (not just while the popup is open) —
+        // Escape dismisses the popup without letting the model menu pop back.
+        mentionActive = true;
+        lastMentionAtPos = mention.atPos;
+        startSuppress();
+        if (mention.atPos !== dismissedAtPos) {
+          dismissedAtPos = -2; // a NEW @ mention — re-arm the popup
+          if (!isOpen) openPopup();
+        }
+        if (isOpen) setQuery(mention.query);
       } else {
-        box.click();
-        await sleep(220);
-        hint('Connecteur « ' + name + ' » attaché ✓ — posez votre question');
+        mentionActive = false;
+        dismissedAtPos = -2;
+        stopSuppress();
+        if (isOpen) closePopup();
       }
-      // 4 — close through the app's own path so the selection COMMITS.
-      await closeViaTrigger(triggerBtn);
-      await sleep(120);
-      const input = document.getElementById('chat-input');
-      if (input && input.focus) input.focus({ preventScroll: true });
-    } finally {
-      busy = false;
-    }
-  }
-
-  /** Close the popup by toggling its trigger button (commit path); falls
-   *  back to Escape only when the trigger is gone (route change). */
-  async function closeViaTrigger(btn) {
-    if (btn && btn.isConnected) {
-      try {
-        btn.click();
-        await sleep(180);
-        return;
-      } catch (e) {
-        /* fall through */
-      }
-    }
-    pressEscape();
-    await sleep(120);
-    pressEscape();
-  }
-
-  function automationFailed(name) {
-    hint(
-      'Attachement automatique indisponible — cliquez sur le bouton 🧩 Integrations → Tools, puis cochez « ' +
-        name +
-        ' »'
-    );
-  }
-
-  // ------------------------------------------------------------------
-  // '@' interception — capture phase on document (survives route changes)
-  // ------------------------------------------------------------------
+    },
+    true
+  );
 
   document.addEventListener(
     'keydown',
     (e) => {
-      const input = document.getElementById('chat-input');
-      if (!input) return;
-      if (e.target !== input && !(e.target && input.contains(e.target))) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-
-      if (e.key === '@') {
-        if (busy) {
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-        if (root) {
-          // "@@" — second @ while the picker is open → native model menu.
-          closePicker(true);
-          return;
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        openPicker();
-        return;
-      }
-
-      if (!root) return;
-
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        closePicker();
-        return;
-      }
+      if (!isOpen || !popup) return;
+      const inEditor = editorEl && (e.target === editorEl || editorEl.contains(e.target));
+      const inPopup = popup.contains(e.target);
+      if (!inEditor && !inPopup) return;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        e.stopPropagation();
-        const vis = visibleItems();
-        if (vis.length) {
-          activeIdx =
-            e.key === 'ArrowDown'
-              ? (activeIdx + 1) % vis.length
-              : (activeIdx - 1 + vis.length) % vis.length;
-          renderList();
-        }
-        return;
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.stopImmediatePropagation();
+        moveActive(e.key === 'ArrowDown' ? 1 : -1);
+      } else if (e.key === 'Enter') {
         e.preventDefault();
-        e.stopPropagation();
-        const vis = visibleItems();
-        const it = vis[Math.min(activeIdx, vis.length - 1)];
-        if (it) choose(it);
-        return;
-      }
-      if (e.key === 'Backspace') {
+        e.stopImmediatePropagation();
+        selectRow(activeIndex);
+      } else if (e.key === 'Escape') {
         e.preventDefault();
-        e.stopPropagation();
-        filterText = filterText.slice(0, -1);
-        activeIdx = 0;
-        renderList();
-        return;
-      }
-      if (e.key.length === 1) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (filterText.length < 40) {
-          filterText += e.key;
-          activeIdx = 0;
-          renderList();
-        }
+        e.stopImmediatePropagation();
+        // Dismiss for THIS mention only — typing a new @ re-arms the picker.
+        dismissedAtPos = lastMentionAtPos;
+        closePopup();
+        if (editorEl) editorEl.focus({ preventScroll: true });
       }
     },
     true
   );
 
-  // Outside click closes the picker.
   document.addEventListener(
     'mousedown',
     (e) => {
-      if (!root) return;
-      if (root.contains(e.target)) return;
-      const input = document.getElementById('chat-input');
-      if (input && (e.target === input || input.contains(e.target))) return;
-      closePicker(true);
+      if (!isOpen || !popup) return;
+      if (popup.contains(e.target)) return;
+      if (editorEl && (e.target === editorEl || editorEl.contains(e.target))) return;
+      closePopup();
     },
     true
   );
+
+  window.addEventListener('resize', () => {
+    if (isOpen) positionPopup();
+    // Viewport crossing can detach the chips host — re-render re-attaches.
+    if (selected.size) renderChips();
+  });
+
+  // ------------------------------------------------ send metadata injection
+  // Wrap the CURRENT window.fetch (the SSE bridge's wrapper when engaged —
+  // both transports carry the metadata). Selected app ids ride the chat
+  // completions POST as structured metadata; the turn committed clears chips.
+  const chatFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (
+        selected.size &&
+        CHAT_POST_RE.test(url) &&
+        init &&
+        String(init.method || '').toUpperCase() === 'POST'
+      ) {
+        const body = JSON.parse(String(init.body));
+        if (body && typeof body === 'object') {
+          body.connector_ids = Array.from(selected.keys());
+          body.connector_apps = Array.from(selected.values()).map((app) => ({
+            id: app.id,
+            name: app.name,
+            connector: app.connector,
+            status: app.connection ? app.connection.status : 'disconnected',
+          }));
+          init = Object.assign({}, init, { body: JSON.stringify(body) });
+          // The turn is committed — chips go with it.
+          selected.clear();
+          renderChips();
+        }
+      }
+    } catch (err) {
+      /* never break the send */
+    }
+    return chatFetch(input, init);
+  };
+
+  // -------------------------------------------------------------------- boot
+  const start = () => {
+    loadRegistry();
+    // Keep the chips bar attached across Svelte re-renders (new chat,
+    // navigation) and re-hide the native list while the picker is open.
+    const observer = new MutationObserver(() => {
+      if (selected.size && (!chipsBar || !chipsBar.isConnected)) renderChips();
+      if (isOpen || mentionActive) hideNativeList();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
 })();
