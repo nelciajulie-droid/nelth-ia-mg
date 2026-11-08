@@ -44,7 +44,13 @@ export interface PreSelectedSkill {
 // Hints — conservative, unambiguous medium/format triggers
 // ---------------------------------------------------------------------------
 
-/** Extended from registry.ts (kept here so selector has no import cycle). */
+/**
+ * Extended from registry.ts (kept here so selector has no import cycle).
+ * Ordered most-specific-first — several entries may fire TOGETHER (see
+ * hintSkillsForUserMessage): a rich task ("landing page avec cartes 3D")
+ * deserves its COMBINED expertise, not whichever keyword happened to win a
+ * single-slot race.
+ */
 const SKILL_HINTS: Array<[RegExp, string]> = [
   // Most specific first — the first match wins the +5 hint boost.
   [/\bseo\b|r[ée]f[ée]rencement\b|positionnement\s+(?:google|web|naturel)/i, 'seo-optimization'],
@@ -54,14 +60,21 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
   [/\bxlsx\b|\.xlsx\b|fichier\s+excel|\bexcel\b|feuilles?\s+de\s+calcul|spreadsheet/i, 'xlsx'],
   [/\bpptx?\b|\.pptx?\b|power\s*point|diapositives?\b/i, 'pptx'],
   [/\bposters?\b|affiches?\b/i, 'canvas-design'],
+  // Landing-page CREATION (verb + noun, typo-tolerant "lading/landing") — the
+  // dedicated protocol skill; fires alongside the broad frontend-design hint
+  // below (they are complementary: anatomy + aesthetics).
+  [
+    /(?:cr[ée]e?r?|creer|cree|fais|fait|con[çc]ois|concevoir|con[çc]u|b[âa]tir|construire|d[ée]veloppe\w*|build|make|create|design)\b[^.!?]{0,60}?\bl(?:a|n|e|an|ai)?ding\s*pages?|\bl(?:a|n|e|an|ai)?ding\s*pages?\b[^.!?]{0,60}?(?:ultra\s+)?(?:moderne|modern\w*|professionnelle?|responsive|unique)/i,
+    'landing-page-creation',
+  ],
   // 3D / animation / game engines — specific first, umbrella last.
   [/\bphaser\b/i, 'phaser-core'],
   [/\bgsap\b|greensock|scroll\s*trigger/i, 'gsap-scrolltrigger'],
   [/framer\s*motion/i, 'motion-framer'],
-  [/\bthree\.?js\b|\bwebgl\b|\bwebgpu\b|\bbabylon(?:\.?js)?\b|\b3d\b|rendu\s+3d|sc[èe]ne\s+3d|monde\s+3d|objet\s+3d|mod[èe]le\s+3d|jeu\s+3d/i, 'threejs-webgl'],
+  [/\bthree\.?js\b|\bwebgl\b|\bwebgpu\b|\bbabylon(?:\.?js)?\b|\b3d\b|rendu\s+3d|sc[èe]ne\s+3d|monde\s+3d|objet\s+3d|mod[èe]le\s+3d|jeu\s+3d|cartes?\s+3d|card\s+3d/i, 'threejs-webgl'],
   [/\bjeu(?:x)?\b|\bgames?\b|gameplay|game\s*design|game\s*jam/i, 'game-development'],
   [
-    /landing\s*pages?|pages?\s+web|sites?\s+web|sites?\s+vitrines?|front[ -]?end|web\s*design|ui\s*design|design\s+(?:tr[èe]s\s+|ultra\s+)?(?:moderne|modern\w*)|moderne\s+(?:web|site|page|interface)|modernis(?:er|e[rs]?)|redesign\w*|interface\s+(?:de\s+)?(?:utilisateur|web)|am[ée]lior\w*\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|look)|am[ée]lior\w*.{0,80}\b(?:design|ui\b|apparence|interface)|(?:refaire|relooker|moderniser)\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|site|page|app)|rend\w*.{0,40}\b(?:design|ui\b|apparence|interface)|design\s+(?:de|du)\s?(?:mon|ma|mes|l['’]?|le|la|ce(?:tte)?|notre|votre)\s?(?:application|app|site|page|web|interface|profil|portfolio|jeu)/i,
+    /l(?:a|n|e|an|ai)?ding\s*pages?|pages?\s+web|sites?\s+web|sites?\s+vitrines?|front[ -]?end|web\s*design|ui\s*design|design\s+(?:tr[èe]s\s+|ultra\s+)?(?:moderne|modern\w*)|moderne\s+(?:web|site|page|interface)|modernis(?:er|e[rs]?)|redesign\w*|interface\s+(?:de\s+)?(?:utilisateur|web)|am[ée]lior\w*\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|look)|am[ée]lior\w*.{0,80}\b(?:design|ui\b|apparence|interface)|(?:refaire|relooker|moderniser)\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|site|page|app)|rend\w*.{0,40}\b(?:design|ui\b|apparence|interface)|design\s+(?:de|du)\s?(?:mon|ma|mes|l['’]?|le|la|ce(?:tte)?|notre|votre)\s?(?:application|app|site|page|web|interface|profil|portfolio|jeu)/i,
     'frontend-design',
   ],
   [/art\s+(algorithmique|g[ée]n[ée]ratif|generative)|generative\s+art|p5\.?js|art\s+cod[ée]/i, 'algorithmic-art'],
@@ -73,13 +86,40 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
   [/curriculum|formation\s+claude|claude\s+academy|apprendre\s+[àa]\s+utiliser\s+claude/i, 'claude-academy-guide'],
 ];
 
-/** Best conservative hint skill for the user's raw message (or null). */
-export function hintSkillForUserMessage(userText: string): string | null {
-  if (!userText) return null;
+/** Hints that mark the request as a WEB-PAGE deliverable. When one of them
+ *  fires, the broad "jeu" hint is suppressed: "landing page de jeux Nintendo
+ *  avec card de jeu en 3D" needs the WEB skills, not the game-engine
+ *  instructions (the keyword layer can still surface game-development when
+ *  the message is genuinely about BUILDING a game). */
+const WEB_DELIVERABLE_HINTS = new Set([
+  'landing-page-creation',
+  'frontend-design',
+  'website-clone',
+  'web-artifacts-builder',
+]);
+
+/**
+ * ALL conservative hint skills matching the user's raw message, most
+ * specific first. Multi-domain requests ("créer une landing page avec des
+ * cartes 3D") get BOTH the web hints and the 3D hint — each boosted in
+ * preselectSkills — instead of a single winner that starves the others.
+ */
+export function hintSkillsForUserMessage(userText: string): string[] {
+  if (!userText) return [];
+  const found: string[] = [];
   for (const [re, name] of SKILL_HINTS) {
-    if (re.test(userText)) return name;
+    if (re.test(userText) && !found.includes(name)) found.push(name);
   }
-  return null;
+  if (found.some((n) => WEB_DELIVERABLE_HINTS.has(n))) {
+    return found.filter((n) => n !== 'game-development');
+  }
+  return found;
+}
+
+/** Best conservative hint skill for the user's raw message (or null) —
+ *  backward-compatible single-hint view (most specific first). */
+export function hintSkillForUserMessage(userText: string): string | null {
+  return hintSkillsForUserMessage(userText)[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,11 +248,19 @@ function scoreCandidate(c: Candidate, normText: string): number {
 
 const THRESHOLD = 3;
 const MAX_SKILLS = 3;
-const MAX_TOTAL_CHARS = 45_000;
+// Rich multi-domain requests ("landing page + cartes 3D") legitimately need
+// 2-3 complementary packs — landing-page anatomy + design aesthetics + the
+// 3D engine. 60k chars ≈ three packs at the per-skill cap, still a fraction
+// of the model's context.
+const MAX_TOTAL_CHARS = 60_000;
 
 /**
  * Deterministically pick the skills whose expertise the user's message
- * clearly calls for. Returns [] for chit-chat, ambiguous or off-library
+ * clearly calls for — possibly SEVERAL at once: a multi-domain request
+ * ("créer une landing page avec des cartes 3D") loads the landing-page
+ * protocol AND the design aesthetics AND the 3D engine, so the deliverable
+ * benefits from the COMBINED expertise instead of whichever single keyword
+ * won a first-match race. Returns [] for chit-chat, ambiguous or off-library
  * messages (the USE_SKILL fallback then remains the only skills path).
  * Respects the `skills.catalog.enable` feature flag.
  */
@@ -224,12 +272,15 @@ export async function preselectSkills(userText: string): Promise<PreSelectedSkil
     /* default: enabled */
   }
   const normText = normalize(userText);
-  const hintName = hintSkillForUserMessage(userText);
+  // EVERY matching domain gets its +5 boost — a "landing page avec cartes
+  // 3D" boosts landing-page-creation + frontend-design + threejs-webgl
+  // together instead of letting the first-matched keyword starve the rest.
+  const hintNames = new Set(hintSkillsForUserMessage(userText));
 
   const scored: PreSelectedSkill[] = [];
   for (const c of CANDIDATES) {
     let score = scoreCandidate(c, normText);
-    if (hintName && c.name === hintName) score += 5;
+    if (hintNames.has(c.name)) score += 5;
     if (score >= THRESHOLD) {
       scored.push({ name: c.name, label: c.label, description: c.description, content: c.content, score });
     }

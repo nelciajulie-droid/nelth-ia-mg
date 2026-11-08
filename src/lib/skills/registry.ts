@@ -19,8 +19,8 @@ import { DESIGN_SKILL_CATALOG, DESIGN_SKILL_BY_NAME } from './design-catalog';
 import { LIBRARY_SKILLS } from './library';
 import { configGet } from '@/lib/config';
 
-import { hintSkillForUserMessage } from './selector';
-export { hintSkillForUserMessage };
+import { hintSkillForUserMessage, hintSkillsForUserMessage } from './selector';
+export { hintSkillForUserMessage, hintSkillsForUserMessage };
 
 // ---------------------------------------------------------------------------
 // Marker protocol
