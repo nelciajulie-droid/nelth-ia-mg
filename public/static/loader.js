@@ -1895,6 +1895,655 @@ html.nsrc-lock{overflow:hidden}
 })();
 
 /* ====================================================================
+ * AI VIDEO GENERATION CARD — the vibes-engine twin of the image card.
+ *
+ * The vibes video engine (lib/video-generation.ts → nelcia.space-z.ai)
+ * drives video jobs through three live phases — sending → rendering →
+ * finalizing — surfaced as status rows by the compiled frontend
+ * ('Generating video · sending'…). This layer swaps that text row for the
+ * generation card:
+ *
+ *   • a canvas of 4px squares scintillating on desynchronized sine waves
+ *     (grid dissolve → reveal when the video lands),
+ *   • a live phase label plus a seconds counter — the ARRIVAL of the
+ *     video stops it,
+ *   • the reveal choreography: grid blurs out, the <video> fades in from
+ *     blur(20px), a diagonal light sweep, a brief white flash, footer
+ *     flips to 'Generated' + final duration,
+ *   • the card then IS the player: <video controls autoplay muted loop
+ *     playsinline> (no lightbox hop — the video carries its own controls);
+ *     the native files-grid video stays hidden.
+ *
+ * Works with both event transports (native socket.io and the SSE bridge):
+ * it watches the DOM, not the events.
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_VID_CARD__) return;
+  window.__NELTH_VID_CARD__ = true;
+
+  const VID_STATUS_RE = /^Generating video/i;
+  const PHASE_RE = /Generating video\s*[·—–-]\s*([a-z]+)/i;
+  const reduceMotionMq = window.matchMedia
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : { matches: false };
+
+  // ------------------------------------------------------------- styles
+  if (!document.getElementById('nelth-vidc-style')) {
+    const style = document.createElement('style');
+    style.id = 'nelth-vidc-style';
+    style.textContent = [
+      /* card shell — 16:9 placeholder while generating (the video default);
+         at the reveal it takes the video's NATURAL aspect ratio */
+      '.nelth-vidc{position:relative;width:min(100%,420px);aspect-ratio:16/9;border-radius:1rem;',
+      'overflow:hidden;background:#fff;border:1px solid #e5e5e5;',
+      'transition:border-color .3s ease,width .55s cubic-bezier(.22,1,.36,1),',
+      'aspect-ratio .55s cubic-bezier(.22,1,.36,1);isolation:isolate}',
+      'html.dark .nelth-vidc{background:#171717;border-color:#262626}',
+
+      /* scintillating grid (canvas) — dissolves at the reveal */
+      '.nelth-vidc-grid{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;',
+      'transition:opacity 1s cubic-bezier(.22,1,.36,1),transform 1s cubic-bezier(.22,1,.36,1),',
+      'filter 1s cubic-bezier(.22,1,.36,1)}',
+      '.nelth-vidc-grid canvas{width:100%;height:100%;display:block}',
+      '.nelth-vidc.nelth-vidc-done .nelth-vidc-grid{opacity:0;transform:scale(1.08);',
+      'filter:blur(14px);pointer-events:none}',
+
+      /* revealed video — fade-in from blur + diagonal light sweep */
+      '.nelth-vidc-photo{position:absolute;inset:0;opacity:0;filter:blur(20px);',
+      'transition:opacity .9s cubic-bezier(.22,1,.36,1),filter .9s cubic-bezier(.22,1,.36,1)}',
+      '.nelth-vidc.nelth-vidc-done .nelth-vidc-photo{opacity:1;filter:blur(0)}',
+      '.nelth-vidc-photo video{width:100%;height:100%;object-fit:contain;display:block;',
+      'background:#000}',
+      '.nelth-vidc-sweep{position:absolute;inset:0;overflow:hidden;pointer-events:none}',
+      '.nelth-vidc-sweep-bar{position:absolute;top:0;bottom:0;left:0;width:33.333%;',
+      'background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);',
+      'transform:translateX(-115%) skewX(-12deg)}',
+      '.nelth-vidc.nelth-vidc-done .nelth-vidc-sweep-bar{',
+      'animation:nelth-vidc-sweep 1.1s cubic-bezier(.65,0,.35,1) .3s 1 both}',
+      '@keyframes nelth-vidc-sweep{from{transform:translateX(-115%) skewX(-12deg)}',
+      'to{transform:translateX(345%) skewX(-12deg)}}',
+
+      /* brief white flash at the reveal */
+      '.nelth-vidc-flash{position:absolute;inset:0;pointer-events:none;background:#fff;opacity:0}',
+      '.nelth-vidc.nelth-vidc-done .nelth-vidc-flash{',
+      'animation:nelth-vidc-flash .7s ease-out .05s 1 both}',
+      '@keyframes nelth-vidc-flash{0%{opacity:0}25%{opacity:.18}100%{opacity:0}}',
+
+      /* footer — gradient-masked, label + seconds */
+      '.nelth-vidc-footer{position:absolute;left:0;right:0;bottom:0;height:72px;',
+      'background:rgba(255,255,255,.4);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);',
+      '-webkit-mask-image:linear-gradient(to top,black 0%,transparent 100%);',
+      'mask-image:linear-gradient(to top,black 0%,transparent 100%);pointer-events:none}',
+      'html.dark .nelth-vidc-footer{background:rgba(0,0,0,.5)}',
+      '.nelth-vidc-row{position:absolute;bottom:12px;left:20px;right:20px;display:flex;',
+      'align-items:center;justify-content:space-between;gap:8px}',
+      '.nelth-vidc-label,.nelth-vidc-seconds{font-size:.875rem;font-weight:500;color:#171717;',
+      'font-variant-numeric:tabular-nums;line-height:1.25}',
+      'html.dark .nelth-vidc-label,html.dark .nelth-vidc-seconds{color:#fff;',
+      'text-shadow:0 1px 2px rgba(0,0,0,.25)}',
+      '.nelth-vidc-seconds{opacity:.9}',
+      /* the footer fades out a beat after the reveal — the player's own
+         controls take over; the label lingers just long enough to read */
+      '.nelth-vidc.nelth-vidc-done .nelth-vidc-footer{',
+      'animation:nelth-vidc-footer 1.6s ease-out .9s 1 both}',
+      '@keyframes nelth-vidc-footer{to{opacity:0}}',
+
+      /* hidden layers */
+      '.nelth-vidc-hide{display:none !important}',
+
+      /* ---------------------------------------------------------- history
+         videos — the compiled frontend renders the generated video as a
+         generic FILE card (type 'file': its message grid only renders
+         ["image","file"]). This layer replaces those cards with inline
+         players (.nelth-vidh); the URL is resolved from the chat history
+         API (same path as the live reveal). */
+      '.nelth-vidh{width:min(100%,480px);border-radius:1rem;border:1px solid #e5e5e5;',
+      'overflow:hidden;background:#000;isolation:isolate}',
+      'html.dark .nelth-vidh{border-color:#262626}',
+      '.nelth-vidh video{width:100%;max-height:420px;display:block;background:#000}',
+      '.nelth-vidh-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;',
+      'padding:6px 10px;background:#fff;border-top:1px solid #f0f0f0}',
+      'html.dark .nelth-vidh-bar{background:#171717;border-top-color:#262626}',
+      '.nelth-vidh-name{font-size:.75rem;color:#525252;white-space:nowrap;overflow:hidden;',
+      'text-overflow:ellipsis;min-width:0}',
+      'html.dark .nelth-vidh-name{color:#a3a3a3}',
+      '.nelth-vidh-dl{font-size:.75rem;font-weight:500;color:#059669;text-decoration:none;',
+      'white-space:nowrap;flex-shrink:0}',
+      'html.dark .nelth-vidh-dl{color:#34d399}',
+      '.nelth-vidh-dl:hover{text-decoration:underline}',
+
+      /* reduced motion — settle instantly, no sweep/flash/footer fade */
+      '.nelth-vidc.nelth-vidc-instant .nelth-vidc-grid{transition:none}',
+      '.nelth-vidc.nelth-vidc-instant .nelth-vidc-photo{transition:none}',
+      '.nelth-vidc.nelth-vidc-instant{transition:border-color .3s ease !important}',
+      '.nelth-vidc.nelth-vidc-instant .nelth-vidc-sweep-bar{animation:none;opacity:0}',
+      '.nelth-vidc.nelth-vidc-instant .nelth-vidc-flash{animation:none;opacity:0}',
+      '.nelth-vidc.nelth-vidc-instant .nelth-vidc-footer{animation:none;opacity:0}',
+      '@media (prefers-reduced-motion:reduce){.nelth-vidc-sweep-bar{animation:none !important;opacity:0}',
+      '.nelth-vidc-flash{animation:none !important}',
+      '.nelth-vidc-footer{animation:none !important;opacity:0}',
+      '.nelth-vidc{transition:border-color .3s ease !important}}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  // ------------------------------------------------------- grid canvas
+  /** Scintillating grid — same twin of the image card's canvas. */
+  function startGrid(canvas) {
+    const ctx = canvas.getContext('2d', { alpha: true });
+    if (!ctx) return () => {};
+    let raf = 0;
+    let width = 0;
+    let height = 0;
+    const size = 4;
+    const gap = 2;
+    const step = size + gap;
+    let cols = 0;
+    let rows = 0;
+    let offsets = [];
+    let speeds = [];
+
+    const resize = () => {
+      const parent = canvas.parentElement;
+      if (!parent) return;
+      width = parent.clientWidth;
+      height = parent.clientHeight;
+      canvas.width = width;
+      canvas.height = height;
+      cols = Math.ceil(width / step);
+      rows = Math.ceil(height / step);
+      offsets = Array.from({ length: cols }, () =>
+        Array.from({ length: rows }, () => Math.random() * Math.PI * 2)
+      );
+      speeds = Array.from({ length: cols }, () =>
+        Array.from({ length: rows }, () => 0.35 + Math.random() * 0.95)
+      );
+    };
+    window.addEventListener('resize', resize);
+    resize();
+
+    const draw = () => {
+      ctx.clearRect(0, 0, width, height);
+      const time = Date.now() * 0.001;
+      const isDark = document.documentElement.classList.contains('dark');
+      const r = isDark ? 129 : 110;
+      const g = isDark ? 129 : 110;
+      const b = isDark ? 137 : 120;
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+          const wave = Math.sin(time * speeds[i][j] + offsets[i][j]);
+          let opacity = 0.02;
+          if (wave > 0.9) opacity = 0.1 + (wave - 0.9) * 3;
+          else if (wave > 0.7) opacity = 0.05 + (wave - 0.7) * 0.5;
+          ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + opacity + ')';
+          ctx.fillRect(i * step, j * step, size, size);
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    draw();
+
+    return () => {
+      window.removeEventListener('resize', resize);
+      cancelAnimationFrame(raf);
+    };
+  }
+
+  // ----------------------------------------------------------- the card
+  function buildCard() {
+    const card = document.createElement('div');
+    card.className = 'nelth-vidc';
+    card.setAttribute('role', 'video');
+    card.setAttribute('aria-label', 'Generating video');
+    card.innerHTML =
+      '<div class="nelth-vidc-grid"><canvas aria-hidden="true"></canvas></div>' +
+      '<div class="nelth-vidc-photo"><video controls autoplay muted loop playsinline preload="auto" ' +
+      'aria-label="AI generated video"></video>' +
+      '<div class="nelth-vidc-sweep" aria-hidden="true"><div class="nelth-vidc-sweep-bar"></div></div></div>' +
+      '<div class="nelth-vidc-flash" aria-hidden="true"></div>' +
+      '<div class="nelth-vidc-footer" aria-hidden="true"><div class="nelth-vidc-row">' +
+      '<span class="nelth-vidc-label">Generating video</span>' +
+      '<span class="nelth-vidc-seconds">0s</span></div></div>';
+    return card;
+  }
+
+  // ------------------------------------------------------------- states
+  const cards = new Map();
+
+  function stopGrid(state) {
+    if (state.stopGrid) {
+      state.stopGrid();
+      state.stopGrid = null;
+    }
+  }
+
+  function stopTimer(state) {
+    if (state.timerId) {
+      clearInterval(state.timerId);
+      state.timerId = null;
+    }
+  }
+
+  function setLabel(state, label) {
+    if (state.label === label) return;
+    state.label = label;
+    if (state.labelEl) state.labelEl.textContent = label;
+    state.card.setAttribute('aria-label', label === 'Generated' ? 'Generated video' : 'Generating video — ' + label);
+  }
+
+  /** Hide the native FILE CARD of the generated video (the card IS the
+   *  player now). Only the card's own wrapper — never the whole files grid
+   *  (other files of the message stay visible). */
+  function hideNativeCard(state) {
+    const btn = state.nativeCard;
+    if (!btn || !btn.isConnected) return;
+    let wrap = btn.parentElement;
+    if (wrap && !/overflow-x-auto/.test(String(wrap.className || ''))) {
+      state.nativeWrap = wrap;
+      wrap.classList.add('nelth-vidc-hide');
+    } else {
+      state.nativeWrap = btn;
+      btn.classList.add('nelth-vidc-hide');
+    }
+  }
+
+  /** ChatGPT-style sizing: adopt the video's natural aspect ratio once its
+   *  metadata is measurable — width capped at 420px, height at 512px. */
+  function applyVideoRatio(state) {
+    if (state.ratioApplied) return;
+    var w = 0;
+    var h = 0;
+    var cardVideo = state.card.querySelector('.nelth-vidc-photo video');
+    if (cardVideo && cardVideo.videoWidth > 0 && cardVideo.videoHeight > 0) {
+      w = cardVideo.videoWidth;
+      h = cardVideo.videoHeight;
+    }
+    if (!w || !h) return; // dimensions unknown yet — keep the 16:9 placeholder
+    state.ratioApplied = true;
+    var maxW = 420;
+    var parent = state.card.parentElement;
+    if (parent && parent.clientWidth > 0) maxW = Math.min(parent.clientWidth, 420);
+    var maxH = 512;
+    var scale = Math.min(maxW / w, maxH / h, 1);
+    state.card.style.width = 'min(100%, ' + Math.round(w * scale) + 'px)';
+    state.card.style.aspectRatio = w + ' / ' + h;
+  }
+
+  /** The reveal: grid dissolves, video fades in + plays, sweep + flash. */
+  function reveal(state, src) {
+    if (state.revealed) return;
+    state.revealed = true;
+
+    // freeze the chronometer at the arrival time
+    stopTimer(state);
+    if (state.secondsEl) state.secondsEl.textContent = state.seconds + 's';
+    setLabel(state, 'Generated');
+
+    const video = state.card.querySelector('.nelth-vidc-photo video');
+    const show = () => {
+      applyVideoRatio(state);
+      state.card.classList.add('nelth-vidc-done');
+      if (reduceMotionMq.matches) state.card.classList.add('nelth-vidc-instant');
+      if (video && !video.src) {
+        try { video.src = src; video.load(); video.play().catch(() => {}); } catch (e) { /* autoplay refused */ }
+      }
+    };
+    if (video) {
+      video.addEventListener('loadedmetadata', () => applyVideoRatio(state));
+      try { video.src = src; video.load(); } catch (e) { /* src assignment */ }
+      // A decoded first frame before the fade (1.2s fallback — a video's
+      // metadata can be slow on mobile networks).
+      video.addEventListener('loadeddata', show, { once: true });
+    }
+    setTimeout(show, 1200);
+
+    stopGrid(state);
+    hideNativeCard(state);
+  }
+
+  /** Remove a dead card (message re-render / navigation) — restore native. */
+  function dropCard(state) {
+    stopTimer(state);
+    stopGrid(state);
+    if (state.nativeWrap && state.nativeWrap.isConnected) {
+      state.nativeWrap.classList.remove('nelth-vidc-hide');
+    }
+    if (state.statusBox && state.statusBox.isConnected) {
+      state.statusBox.classList.remove('nelth-vidc-hide');
+      delete state.statusBox.dataset.nelthVidCard;
+    }
+    if (state.card.isConnected) state.card.remove();
+    if (state.msgObserver) {
+      try {
+        state.msgObserver.disconnect();
+      } catch (e) {
+        /* already gone */
+      }
+      state.msgObserver = null;
+    }
+  }
+
+  /** Create the card for an in-progress video generation status row. */
+  function createCard(statusBox) {
+    const card = buildCard();
+    statusBox.parentElement.insertBefore(card, statusBox.nextSibling);
+    statusBox.classList.add('nelth-vidc-hide'); // le texte shimmer est remplacé par la carte
+    statusBox.dataset.nelthVidCard = '1';
+
+    const state = {
+      card,
+      statusBox,
+      labelEl: card.querySelector('.nelth-vidc-label'),
+      secondsEl: card.querySelector('.nelth-vidc-seconds'),
+      startedAt: Date.now(),
+      seconds: 0,
+      label: 'Generating video',
+      revealed: false,
+      finishedAt: null,
+      ratioApplied: false,
+      stopGrid: startGrid(card.querySelector('canvas')),
+      timerId: null,
+      nativeCard: null,
+      nativeWrap: null,
+      resolving: false,
+      resolveStarted: false,
+      msgObserver: null,
+    };
+    cards.set(statusBox, state);
+
+    // Chronomètre (0,25s tick) — c'est l'ARRIVÉE de la vidéo qui le coupe.
+    state.timerId = setInterval(() => {
+      if (state.revealed) return;
+      const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
+      if (elapsed !== state.seconds) {
+        state.seconds = elapsed;
+        if (state.secondsEl) state.secondsEl.textContent = elapsed + 's';
+      }
+    }, 250);
+
+    // Fast-path observer scoped to the message: the generated video's FILE
+    // CARD (a button labelled with the .mp4 name) lands the frame it is
+    // appended — before paint, no flicker of the native grid.
+    const messageEl = statusBox.closest('[id^="message-"]') || statusBox.parentElement;
+    if (messageEl) {
+      state.msgObserver = new MutationObserver(() => checkReveal(state));
+      state.msgObserver.observe(messageEl, { childList: true, subtree: true });
+    }
+    return state;
+  }
+
+  // ------------------------------------------- video URL resolution (API)
+  // The compiled frontend renders the generated video as a generic FILE
+  // card (its message grid only renders ["image","file"]) — the card shows
+  // the NAME but never exposes the URL in the DOM. The URL is read from the
+  // chat history API: the message element's id IS the history key, and the
+  // backend persists the message BEFORE the files event / done status.
+  const chatCache = new Map(); // chatId → { at, data }
+  function fetchChatCached(chatId, maxAgeMs) {
+    const hit = chatCache.get(chatId);
+    if (hit && Date.now() - hit.at < (maxAgeMs == null ? 15000 : maxAgeMs)) {
+      return Promise.resolve(hit.data);
+    }
+    return fetch('/api/v1/chats/' + encodeURIComponent(chatId), {
+      headers: { Authorization: 'Bearer ' + (localStorage.token || '') },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+      .then((data) => {
+        if (data) chatCache.set(chatId, { at: Date.now(), data });
+        return data;
+      });
+  }
+
+  const isVideoFileEntry = (f) =>
+    !!f && (
+      f.type === 'video' ||
+      String(f.content_type || '').startsWith('video/') ||
+      /\.mp4$/i.test(String(f.name || ''))
+    );
+
+  /** Chat id candidates for the message lookup. The URL is the truth once
+   *  the user is IN a chat; during a live FIRST turn, though, the compiled
+   *  frontend keeps the URL at "/" (the backend creates the chat itself) —
+   *  the sidebar's newest entries (sorted by updated_at) cover that case.
+   *  A wrong candidate simply misses the message id and is skipped. */
+  function chatIdCandidates() {
+    const out = [];
+    const m = location.pathname.match(/\/c\/([a-zA-Z0-9-]{10,})/);
+    if (m) out.push(m[1]);
+    const links = document.querySelectorAll('a[href^="/c/"]');
+    for (let i = 0; i < Math.min(links.length, 3); i++) {
+      const mm = (links[i].getAttribute('href') || '').match(/\/c\/([a-zA-Z0-9-]{10,})/);
+      if (mm && out.indexOf(mm[1]) === -1) out.push(mm[1]);
+    }
+    return out;
+  }
+
+  /** messageEl (id="message-{id}") → the video file entry of that message. */
+  async function videoEntryOf(messageEl, maxAgeMs) {
+    const id = (messageEl.id || '').replace(/^message-/, '');
+    if (!id) return null;
+    const candidates = chatIdCandidates();
+    for (let c = 0; c < candidates.length; c++) {
+      const chat = await fetchChatCached(candidates[c], maxAgeMs);
+      const msgs = chat && chat.chat && chat.chat.history && chat.chat.history.messages
+        ? chat.chat.history.messages
+        : null;
+      const files = msgs && msgs[id] ? msgs[id].files : null;
+      if (!Array.isArray(files)) continue;
+      for (let i = 0; i < files.length; i++) {
+        if (isVideoFileEntry(files[i]) && typeof files[i].url === 'string' && files[i].url) {
+          return files[i];
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Resolve with retries — the files event lands a beat BEFORE the history
+   *  upsert (fresh refetch on each retry), and a brand-new chat's URL may
+   *  lag a second behind the first message. */
+  async function resolveVideoUrl(messageEl, attempts) {
+    const n = attempts || 4;
+    for (let i = 0; i < n; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 800));
+      const entry = await videoEntryOf(messageEl, i === 0 ? 15000 : 0).catch(() => null);
+      if (entry) return entry;
+    }
+    return null;
+  }
+
+  /** Detect the generated video's native FILE CARD (a button whose label
+   *  carries the .mp4 name) inside the message → async URL resolution →
+   *  reveal. */
+  function checkReveal(state) {
+    if (state.revealed || state.resolving || !state.card.isConnected) return;
+    const messageEl = state.statusBox.closest('[id^="message-"]') || state.card.parentElement;
+    if (!messageEl) return;
+    const btns = messageEl.querySelectorAll('button');
+    for (let i = 0; i < btns.length; i++) {
+      const btn = btns[i];
+      if (state.card.contains(btn)) continue;
+      const txt = (btn.textContent || '').trim();
+      if (/\.mp4(\s|$)/i.test(txt)) {
+        state.nativeCard = btn;
+        state.resolving = true;
+        resolveVideoUrl(messageEl, 4).then((entry) => {
+          state.resolving = false;
+          if (entry && entry.url && !state.revealed && state.card.isConnected) {
+            reveal(state, entry.url);
+          }
+        });
+        return;
+      }
+    }
+  }
+
+  // ------------------------------------------------- history video players
+  /** File cards (.mp4 names) in messages WITHOUT an active generation card
+   *  → replace with an inline player. The URL comes from the chat history
+   *  (same resolution path); the native card stays hidden, restorable. */
+  const upgradedCards = new WeakSet();
+
+  function buildHistoryPlayer(btn, entry) {
+    const wrap = document.createElement('div');
+    wrap.className = 'nelth-vidh';
+    const video = document.createElement('video');
+    video.controls = true;
+    video.preload = 'metadata';
+    video.playsInline = true;
+    video.setAttribute('aria-label', 'AI generated video');
+    video.src = entry.url;
+
+    const bar = document.createElement('div');
+    bar.className = 'nelth-vidh-bar';
+    const name = document.createElement('span');
+    name.className = 'nelth-vidh-name';
+    name.textContent = String(entry.name || 'generated-video.mp4');
+    const dl = document.createElement('a');
+    dl.className = 'nelth-vidh-dl';
+    dl.textContent = 'Télécharger';
+    dl.href = entry.url;
+    dl.setAttribute('download', String(entry.name || 'generated-video.mp4'));
+    bar.appendChild(name);
+    bar.appendChild(dl);
+    wrap.appendChild(video);
+    wrap.appendChild(bar);
+
+    // Insert after the card's own wrapper; hide the card (never the whole
+    // files grid — other files of the message stay visible).
+    const cardWrap = btn.parentElement && !/overflow-x-auto/.test(String(btn.parentElement.className || ''))
+      ? btn.parentElement
+      : btn;
+    if (cardWrap.parentElement) {
+      cardWrap.parentElement.insertBefore(wrap, cardWrap.nextSibling);
+      cardWrap.classList.add('nelth-vidc-hide');
+    }
+  }
+
+  function upgradeHistoryCards() {
+    const btns = document.querySelectorAll('[id^="message-"] button');
+    for (let i = 0; i < btns.length; i++) {
+      const btn = btns[i];
+      if (upgradedCards.has(btn) || btn.closest('.nelth-vidc')) continue;
+      const txt = (btn.textContent || '').trim();
+      if (!/\.mp4(\s|$)/i.test(txt)) continue;
+      const messageEl = btn.closest('[id^="message-"]');
+      if (!messageEl) continue;
+      // Skip cards owned by a message with an ACTIVE generation card — the
+      // live reveal handles those (and hides the card itself).
+      let owned = false;
+      for (const s of cards.values()) {
+        if (s.card.isConnected && messageEl.contains(s.card)) { owned = true; break; }
+      }
+      if (owned) continue;
+      upgradedCards.add(btn);
+      void resolveVideoUrl(messageEl, 2).then((entry) => {
+        if (entry && entry.url && btn.isConnected) buildHistoryPlayer(btn, entry);
+      });
+    }
+  }
+
+  // ------------------------------------------------------------- scanning
+  function scan() {
+    // 1 — drop dead cards (chat switch, message re-render, navigation).
+    for (const [box, state] of cards) {
+      if (!state.card.isConnected || !box.isConnected) {
+        dropCard(state);
+        cards.delete(box);
+      }
+    }
+
+    // 2 — create cards for in-progress video generations. The live status
+    //     row carries the shimmer class while the job runs.
+    const shimmerEls = document.querySelectorAll('.shimmer');
+    for (let i = 0; i < shimmerEls.length; i++) {
+      const el = shimmerEls[i];
+      const text = (el.textContent || '').trim();
+      if (!VID_STATUS_RE.test(text)) continue;
+      const btn = el.closest ? el.closest('button') : null;
+      const statusBox = btn ? btn.parentElement : null;
+      if (!statusBox || !statusBox.parentElement) continue;
+      if (statusBox.dataset.nelthVidCard) continue;
+      createCard(statusBox);
+    }
+
+    for (const state of cards.values()) {
+      if (!state.card.isConnected) continue;
+
+      // 3 — live phase label from the current status text. Once revealed the
+      //     footer stays on 'Generated' (the trailing '· finalizing' phase
+      //     must not overwrite it).
+      const live = state.statusBox.querySelector('.shimmer');
+      if (live && !state.revealed) {
+        const text = (live.textContent || '').trim();
+        const m = text.match(PHASE_RE);
+        setLabel(state, m ? m[1].toLowerCase() : 'Generating video');
+      }
+
+      // 4 — reveal check: the video's FILE CARD (the .mp4 button) triggers
+      //     the async URL resolution (the fast observer covers the frames
+      //     between scans; this is the safety net).
+      checkReveal(state);
+
+      // 5 — generation ended (the shimmer row is gone): resolve the video
+      //     URL from the chat history — the message is persisted BEFORE the
+      //     done status fires. Reveal on success; hand the message back to
+      //     the native rendering when no video is found (error / abort).
+      if (!state.revealed && !live && !state.resolveStarted) {
+        state.resolveStarted = true;
+        state.resolving = true;
+        const messageEl = state.statusBox.closest('[id^="message-"]') || state.card.parentElement;
+        if (messageEl) {
+          resolveVideoUrl(messageEl, 3).then((entry) => {
+            state.resolving = false;
+            if (entry && entry.url && !state.revealed && state.card.isConnected) {
+              reveal(state, entry.url);
+            } else if (!state.revealed) {
+              dropCard(state);
+              cards.delete(state.statusBox);
+            }
+          });
+        } else {
+          state.resolving = false;
+          dropCard(state);
+          cards.delete(state.statusBox);
+        }
+      } else if (state.revealed) {
+        // keep the native card hidden across Svelte re-renders
+        hideNativeCard(state);
+      }
+    }
+
+    // 6 — history videos: .mp4 file cards without an active generation →
+    //     inline players (URL resolved from the chat history API).
+    upgradeHistoryCards();
+  }
+
+  let scanPending = false;
+  const scheduleScan = () => {
+    if (scanPending) return;
+    scanPending = true;
+    setTimeout(() => {
+      scanPending = false;
+      scan();
+    }, 250);
+  };
+
+  const start = () => {
+    const obs = new MutationObserver(scheduleScan);
+    obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+    scan();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+
+/* ====================================================================
  * Thinking-status cleanup — « Réflexion »
  *
  * The backend shows a shimmer "Réflexion" status row the instant a message

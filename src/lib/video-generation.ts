@@ -1,6 +1,8 @@
 import type { ApiUser } from '@/lib/auth';
 import {
   vibesGenerateVideo,
+  vibesAnimateVideo,
+  vibesUploadImage,
   vibesPollBatch,
   downloadVibesVideo,
   type VibesAspectRatio,
@@ -10,18 +12,19 @@ import {
 /**
  * Built-in video generation engine — Nelth vibes gateway (nelcia.space-z.ai).
  *
- * Text→video only in V1: the animate (image→video) endpoint requires the
- * source image to live in the vibes project's own media library, which the
- * chat pipeline cannot populate (chat images come from the Nelthai engine).
+ * BOTH directions, mirroring image-generation.ts:
  *
- * The chain mirrors image-generation.ts:
- *
- *   • submit   — POST /api/vibes/videos/generate → batchId (fast retry on a
- *                quick 502: no job was created server-side, an immediate
- *                re-submit costs nothing);
+ *   • text→video  — POST /api/vibes/videos/generate → batchId;
+ *   • image→video — upload the source image bytes into the vibes media
+ *                   store (POST /api/vibes/upload/media → mediaEntId, the
+ *                   animate endpoint resolves source_image against that
+ *                   store — a bare URL is rejected with MEDIA_GONE), then
+ *                   POST /api/vibes/videos/animate → batchId. The user's
+ *                   text becomes the MOTION prompt ("la caméra zoome
+ *                   lentement…");
  *   • poll     — POST /api/vibes/batches/{id}/poll?timeout=5 every ~4s until
- *                isComplete, tolerating a few consecutive poll blips (the
- *                batch keeps running server-side);
+ *                isComplete (a fast submit blip that left no server-side job
+ *                retries at once — a quick 502 costs nothing);
  *   • download — grab the MP4 bytes before the CDN URL expires;
  *   • persist  — through the files upload pipeline so the chat message
  *                carries a durable /api/v1/files/{id}/content URL.
@@ -32,20 +35,50 @@ import {
 
 export type VideoPhase = 'sending' | 'rendering' | 'finalizing';
 
+/** A source image to animate (image→video), as raw bytes. */
+export type VideoSourceImage = {
+  bytes: Buffer;
+  contentType?: string;
+  filename?: string;
+};
+
 export interface GenerateVideoOptions {
   /** Live phases — displayed on the generating card. */
   onPhase?: (phase: VideoPhase) => void;
   /** Fired when a submission failed and another one starts. */
   onRetry?: (attemptIndex: number, totalAttempts: number) => void;
-  /** Target aspect ratio (default 16:9). */
+  /** Target aspect ratio (default 16:9, text→video only). */
   aspectRatio?: VibesAspectRatio;
   /** Target resolution (default 480p — observed ~35-60s at 480p). */
   resolution?: VibesResolution;
+  /** Source image → image→video (animate) instead of text→video. */
+  sourceImage?: VideoSourceImage;
 }
 
 export type GeneratedVideo = { bytes: Buffer; contentType: string };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Aspect-ratio / resolution hints parsed from the user's phrasing — the
+ * user asks naturally ("en vertical pour un reel", "en HD") and the format
+ * follows. 16:9 + 480p by default (observed ~35-60s at 480p).
+ */
+export function detectVideoFormat(text: string): {
+  aspectRatio: VibesAspectRatio;
+  resolution: VibesResolution;
+} {
+  const t = text || '';
+  const aspectRatio: VibesAspectRatio = /\b(vertical|verticale|portrait|story|stories|reels?|tiktok|shorts?|9:16|16:9\s*invers[ée]?)\b/i.test(t)
+    ? '9:16'
+    : /\b(carr[ée]e?|square|1:1)\b/i.test(t)
+      ? '1:1'
+      : '16:9';
+  const resolution: VibesResolution = /\b(hd|720p|haute\s+r[ée]solution|high\s*(?:quality|res)|hq)\b/i.test(t)
+    ? '720p'
+    : '480p';
+  return { aspectRatio, resolution };
+}
 
 /**
  * Global budget keeps the whole flow inside the serverless budget (Vercel
@@ -123,7 +156,37 @@ async function waitForVibesVideo(batchId: string): Promise<string[]> {
 }
 
 /**
+ * Image→video submission: upload the source bytes into the vibes media store
+ * (a mediaEntId is MANDATORY — the animate endpoint resolves source_image
+ * against that store, a bare URL is rejected with MEDIA_GONE), then start the
+ * animate batch. The user's prompt rides along as the motion directive.
+ */
+async function submitAnimateJob(motionPrompt: string, source: VideoSourceImage): Promise<string> {
+  const uploaded = await vibesUploadImage({
+    bytes: source.bytes,
+    filename: source.filename || 'input.png',
+    contentType: source.contentType || 'image/png',
+  });
+  const motion = motionPrompt.trim();
+  const { batchId } = await vibesAnimateVideo({
+    source: {
+      mediaEntId: uploaded.mediaEntId,
+      imageUrl: uploaded.imageUrl,
+      // A default motion keeps the job well-formed when the user only sent
+      // the image ("anime ça" with no directive).
+      prompt: motion || 'Gentle cinematic motion, subtle camera movement',
+    },
+    motion: motion || undefined,
+  });
+  return batchId;
+}
+
+/**
  * Generate a video with the vibes engine → raw MP4 bytes.
+ *
+ * TWO directions: with `options.sourceImage` the chain animates that image
+ * (upload → animate, the prompt acting as the MOTION directive); otherwise
+ * it is a plain text→video generation.
  *
  * Submission is retried when it fails FAST (a quick 502 means no job was
  * created server-side); a batch that already runs is never re-rolled, only
@@ -149,12 +212,16 @@ export async function generateVideo(
     const submitStartedAt = Date.now();
     try {
       options.onPhase?.('sending');
-      const { batchId } = await vibesGenerateVideo({
-        prompt: prompt.trim(),
-        aspectRatio: options.aspectRatio,
-        resolution: options.resolution,
-        variations: 1,
-      });
+      const batchId = options.sourceImage
+        ? await submitAnimateJob(prompt, options.sourceImage)
+        : (
+            await vibesGenerateVideo({
+              prompt: prompt.trim(),
+              aspectRatio: options.aspectRatio,
+              resolution: options.resolution,
+              variations: 1,
+            })
+          ).batchId;
 
       options.onPhase?.('rendering');
       const urls = await waitForVibesVideo(batchId);
@@ -192,8 +259,6 @@ export async function generateVideo(
       }
     }
   }
-
-  // Every attempt failed (or the budget ran out): a French, actionable message.
   console.error(
     '[video-generation] all attempts failed:',
     lastFailure instanceof Error ? lastFailure.message : String(lastFailure)
@@ -213,6 +278,8 @@ export type SavedVideoFile = {
   name: string;
   type: string;
   content_type: string;
+  /** Byte size — surfaced on the message file card (the compiled frontend shows it). */
+  size: number;
 };
 
 /** Generate + persist through the files upload pipeline (image parity). */
@@ -243,7 +310,8 @@ export async function generateAndSaveVideo(
     id,
     url: `/api/v1/files/${id}/content`,
     name: meta.name ?? fileItem?.filename ?? 'generated-video.mp4',
-    type: 'video',
+    type: 'file',
     content_type: meta.content_type ?? 'video/mp4',
+    size: bytes.length,
   };
 }

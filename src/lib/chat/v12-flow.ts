@@ -82,6 +82,20 @@ function messageContent(m: any): string {
           ? `Voici l'image générée (${names[0]}). Dites-moi si vous souhaitez des ajustements.`
           : `Voici les images générées (${names.join(', ')}). Dites-moi si vous souhaitez des ajustements.`;
       }
+      // Video-only legacy turns (vibes engine) — same natural-sentence
+      // pattern: the model knows a video exists and can be iterated on.
+      // The files carry type 'file' (the compiled frontend's message grid
+      // only renders ["image","file"]) — the video nature comes from the
+      // content_type / .mp4 name.
+      const isVideoFile = (f: any) =>
+        f?.type === 'video' ||
+        String(f?.content_type ?? '').startsWith('video/') ||
+        /\.mp4$/i.test(String(f?.name ?? ''));
+      if (!base.trim() && m.files.every((f: any) => isVideoFile(f))) {
+        return names.length === 1
+          ? `Voici la vidéo générée (${names[0]}). Dites-moi si vous souhaitez des ajustements.`
+          : `Voici les vidéos générées (${names.join(', ')}). Dites-moi si vous souhaitez des ajustements.`;
+      }
       return `${base}\n\n[Fichiers générés précédemment et joints à ce message : ${names.join(', ')}]`;
     }
   }
@@ -118,6 +132,39 @@ type ModelRoute = {
   baseUrl: string;
   apiKey: string;
 };
+
+/**
+ * Convert resolved image sources (chat attachments / history images) into
+ * the bytes-based video source: the vibes upload endpoint needs raw bytes
+ * (a bare URL is rejected with MEDIA_GONE by the animate pipeline).
+ */
+async function videoSourceFrom(
+  sources: import('@/lib/imagine/nelthai').NelthaiImageSource[]
+): Promise<import('@/lib/video-generation').VideoSourceImage | undefined> {
+  for (const s of sources) {
+    try {
+      if (s.kind === 'bytes' && s.bytes?.length) {
+        return { bytes: s.bytes, contentType: s.contentType, filename: s.filename };
+      }
+      if (s.kind === 'url' && /^https?:\/\//i.test(s.url)) {
+        const res = await fetch(s.url, { signal: AbortSignal.timeout(20_000) });
+        if (res.ok) {
+          const bytes = Buffer.from(await res.arrayBuffer());
+          if (bytes.length > 1024) {
+            const contentType = (res.headers.get('content-type') || '').split(';')[0].trim();
+            return {
+              bytes,
+              contentType: contentType.startsWith('image/') ? contentType : undefined,
+            };
+          }
+        }
+      }
+    } catch {
+      /* try the next source */
+    }
+  }
+  return undefined;
+}
 
 /**
  * Internal-analysis narration detector. The dots-3 "note" model sometimes
@@ -819,54 +866,231 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     }
   };
 
-  // Auto image engagement result — set by the parallel decision block below,
-  // consumed by section 3.5 (the image flow then runs exactly like an
-  // explicit toggle turn). `autoImageEdit` flags ITERATION turns: the most
-  // recent generated image of the conversation feeds the image-to-image job.
+  // Auto engagement results — set by the parallel decision block below.
+  // `autoImage`/`autoImageEdit` feed section 3.5 (the image flow then runs
+  // exactly like an explicit toggle turn; `autoImageEdit` flags ITERATION
+  // turns where the conversation's most recent generated image feeds the
+  // image-to-image job). `autoVideo`/`autoVideoAnimate` feed section 3.4ter
+  // (the vibes video engine — text→video, or image→video when an image is
+  // attached / `autoVideoAnimate` flagged an "anime cette image" turn).
   let autoImage = false;
   let autoImageEdit = false;
+  let autoVideo = false;
+  let autoVideoAnimate = false;
 
   if (wantsWebSearch) {
     if (await webSearchAllowed()) {
       const query = lastUserContent();
       if (query) await performWebSearch(query, 'Recherche web en cours');
     }
-  } else if (!isSdModel && !isContinuation && form.features?.image_generation !== true) {
+  } else if (!isSdModel && !isContinuation) {
     // ---- Auto engagement: the model decides, the user doesn't have to. ----
-    // Both autos (image + web search) decide IN PARALLEL — the added latency
-    // of the second auto is ~zero. When the image decision claims the turn,
-    // the (possibly simultaneous) search decision is simply ignored: an
-    // image turn never streams an LLM answer, so search context would be
-    // entirely wasted.
+    // The three autos (video + image + web search) decide IN PARALLEL — the
+    // added latency of each extra auto is ~zero. Priority when several claim
+    // the turn: VIDEO > IMAGE > search (neither a video nor an image turn
+    // streams an LLM answer, so search context would be entirely wasted).
+    // The video decision runs even with the image toggle ON: a textual
+    // "crée une vidéo…" outranks a sticky UI toggle.
     const { configGet } = await import('@/lib/config');
     const imageAuto = await configGet<boolean>('image_generation.auto', true);
     const imageEnabled = await configGet<boolean>('image_generation.enable', true);
+    const videoAuto = await configGet<boolean>('video_generation.auto', true);
+    const videoEnabled = await configGet<boolean>('video_generation.enable', true);
     const searchAuto = await configGet<boolean>('web.search.auto', true);
     const query = lastUserContent();
+    const imageToggleOn = form.features?.image_generation === true;
 
-    if (query && (imageAuto || searchAuto)) {
-      const [imageDecision, searchDecision] = await Promise.all([
-        imageAuto && imageEnabled
+    if (query && (imageAuto || searchAuto || videoAuto)) {
+      const [imageDecision, searchDecision, videoDecision] = await Promise.all([
+        imageAuto && imageEnabled && !imageToggleOn
           ? import('@/lib/chat/auto-image').then((m) => m.decideAutoImageGeneration(llmMessages))
           : Promise.resolve(null),
-        searchAuto && (await webSearchAllowed())
+        searchAuto && !imageToggleOn && (await webSearchAllowed())
           ? import('@/lib/chat/auto-web-search').then((m) => m.decideAutoWebSearch(llmMessages))
+          : Promise.resolve(null),
+        videoAuto && videoEnabled
+          ? import('@/lib/chat/auto-video').then((m) => m.decideAutoVideoGeneration(llmMessages))
           : Promise.resolve(null),
       ]);
       console.log(
-        '[v12-flow] auto decisions — image:',
+        '[v12-flow] auto decisions — video:',
+        videoDecision ? JSON.stringify(videoDecision) : 'null',
+        '| image:',
         imageDecision ? JSON.stringify(imageDecision) : 'null',
         '| search:',
         searchDecision ? JSON.stringify(searchDecision) : 'null'
       );
-      autoImage = imageDecision?.image === true;
+      autoVideo = videoDecision?.video === true;
+      autoVideoAnimate = autoVideo && videoDecision?.animate === true;
+      autoImage = !autoVideo && imageDecision?.image === true;
       autoImageEdit = autoImage && imageDecision?.edit === true;
-      if (!autoImage && searchDecision?.search && searchDecision.query) {
+      if (!autoImage && !autoVideo && searchDecision?.search && searchDecision.query) {
         // Same status label as the explicit toggle — the user shouldn't be
         // able to tell an auto engagement apart from a manual one.
         await performWebSearch(searchDecision.query, 'Recherche web en cours');
       }
     }
+  }
+
+  // ------------------------------------ 3.4ter Video generation (AUTO engagement
+  // only — the compiled frontend has no video toggle; natural phrasing
+  // ("crée une vidéo…", "anime cette image") routes the turn through the
+  // vibes engine: text→video, or image→video when the user attached an image
+  // / the decision flagged an animate turn on a previous visual).
+  const wantsVideoGeneration = !isContinuation && autoVideo;
+  if (wantsVideoGeneration) {
+    const { configGet } = await import('@/lib/config');
+    const { ERROR_MESSAGES } = await import('@/lib/constants');
+    const enabled = await configGet<boolean>('video_generation.enable', true);
+    if (!enabled) {
+      if (sessionId && chatId) {
+        await emit({ type: 'chat:message:error', data: { error: { content: ERROR_MESSAGES.ACCESS_PROHIBITED }, done: true } });
+        return nullJson();
+      }
+      return json({ detail: ERROR_MESSAGES.ACCESS_PROHIBITED }, 403);
+    }
+
+    const prompt = [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
+
+    // Image→video source: the user's image attachments this turn become the
+    // visual to animate (the text doubles as the MOTION directive).
+    let sourceImage: import('@/lib/video-generation').VideoSourceImage | undefined;
+    try {
+      const { resolveImageSources } = await import('@/lib/image-generation');
+      const lastFormMessage = Array.isArray(form.messages) ? form.messages[form.messages.length - 1] : null;
+      const attached = [
+        ...(Array.isArray(userMessage?.files) ? userMessage.files : []),
+        ...(Array.isArray(lastFormMessage?.files) ? lastFormMessage.files : []),
+      ];
+      sourceImage = await videoSourceFrom(await resolveImageSources(attached));
+    } catch {
+      /* attachments unreadable → plain text→video */
+    }
+
+    // Animate source (auto engagement): when the decision flagged an
+    // ANIMATE turn ("anime cette image", "fais-la bouger"…) and the user
+    // attached nothing, the conversation's most recent image (generated by
+    // the image engine, or uploaded earlier) becomes the source — the video
+    // transforms the ACTUAL previous visual instead of re-rolling from a
+    // context-free prompt.
+    if (!sourceImage && autoVideoAnimate && isSavedChatId(chatId) && userMessageId) {
+      try {
+        const chat = await getChatById(chatId);
+        const map = ((chat?.chat as any)?.history as any)?.messages;
+        if (map && typeof map === 'object') {
+          const chain = getMessageList(map, userMessageId); // newest→oldest from this user msg
+          for (const m of chain) {
+            const imageFiles = (Array.isArray(m?.files) ? m.files : []).filter(
+              (f: any) => f?.type === 'image' && (f?.url || f?.id)
+            );
+            if (m?.role === 'assistant' && imageFiles.length) {
+              const { resolveImageSources } = await import('@/lib/image-generation');
+              sourceImage = await videoSourceFrom(await resolveImageSources(imageFiles));
+              if (sourceImage) {
+                console.log(
+                  `[v12-flow] auto animate — image-to-video with the previous image (${imageFiles[0]?.name ?? 'unnamed'})`
+                );
+              }
+              break;
+            }
+          }
+        }
+      } catch {
+        /* history unreadable → plain text→video */
+      }
+    }
+
+    if (sourceImage) {
+      console.log('[v12-flow] image-to-video (animate) with a source image');
+    }
+
+    // Live phase label — same status-row contract as the image engine
+    // ('Generating video · sending | rendering | finalizing'): the video
+    // card layer in loader.js swaps the shimmer row for the generation card.
+    const videoPhaseStatus = (phase: string | null) =>
+      emit({
+        type: 'status',
+        data: {
+          action: 'video_generation',
+          description: phase ? `Generating video · ${phase}` : 'Generating video…',
+          done: false,
+        },
+      });
+    await videoPhaseStatus(null);
+    await clearThinkingStatus(); // the generation card's status takes over
+    try {
+      const { generateAndSaveVideo, detectVideoFormat } = await import('@/lib/video-generation');
+      const { aspectRatio, resolution } = detectVideoFormat(prompt);
+      const file = await generateAndSaveVideo(user, prompt, { chat_id: chatId }, {
+        aspectRatio,
+        resolution,
+        onPhase: (phase) => {
+          void videoPhaseStatus(phase);
+        },
+        // Transient upstream failures retry invisibly (see video-generation.ts)
+        // — the status row tells the user another attempt started.
+        onRetry: (attemptIndex, totalAttempts) => {
+          void emit({
+            type: 'status',
+            data: {
+              action: 'video_generation',
+              description: `Nouvelle tentative de génération (${attemptIndex + 1}/${totalAttempts})…`,
+              done: false,
+            },
+          });
+        },
+        sourceImage,
+      });
+      const files = [{
+        type: 'file',
+        url: file.url,
+        name: file.name,
+        content_type: file.content_type || 'video/mp4',
+        size: file.size,
+      }];
+
+      await emit({ type: 'chat:message:files', data: { files } });
+
+      if (isSavedChatId(chatId) && assistantMessageId) {
+        // meta.llm_content — what the NEXT turn's LLM context sees for this
+        // video turn (natural assistant sentence, image-turn parity).
+        const llmContent = sourceImage
+          ? `Voici la vidéo animée à partir de l'image (${file.name}). Dites-moi si vous souhaitez des ajustements.`
+          : `Voici la vidéo générée (${file.name}). Dites-moi si vous souhaitez des ajustements.`;
+        await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
+          parentId: userMessageId,
+          role: 'assistant',
+          content: '',
+          done: true,
+          model: modelId,
+          files,
+          meta: { response_ended_at: nowSec(), llm_content: llmContent },
+        } as any);
+      }
+
+      // Title from the prompt (image-chat parity).
+      if (isSavedChatId(chatId) && backgroundTasks.title_generation && !isTemporaryChatId(chatId)) {
+        const chat = await getChatById(chatId);
+        if (chat && (chat.title === 'New Chat' || !chat.title)) {
+          const title = prompt.trim().slice(0, 100) || 'Video';
+          await updateChatById(chatId, { title });
+          await emit({ type: 'chat:title', data: title });
+        }
+      }
+
+      await emit({ type: 'chat:completion', data: { done: true, content: '' } });
+      await emit({ type: 'chat:list', data: { chat_id: chatId, folder_id: form.folder_id ?? null } });
+      await emit({ type: 'status', data: { done: true } });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error('[v12-flow] video generation failed', e);
+      if (sessionId && chatId) {
+        await emit({ type: 'chat:message:error', data: { error: { content: detail }, done: true } });
+        return nullJson();
+      }
+      return json({ detail }, 400);
+    }
+    return nullJson();
   }
 
   // ------------------------------------ 3.5 Image generation (features toggle /

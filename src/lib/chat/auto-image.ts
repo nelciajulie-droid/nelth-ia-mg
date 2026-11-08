@@ -76,6 +76,30 @@ function clearlyCodeRequest(text: string): boolean {
   return CODE_DELIVERABLE_RE.test(text) && !IMAGE_WORD_RE.test(text);
 }
 
+/**
+ * Video words — a message that asks for a VIDEO ("crée une vidéo d'un chat",
+ * "fais un clip", "anime ça"…) belongs to the VIDEO engine, never to the
+ * image engine. Symmetric guard of auto-video's static-image guard.
+ */
+const VIDEO_WORD_RE = new RegExp(
+  [
+    '\\bvid[ée]os?\\b|\\bvideo\\w*\\b',
+    '\\bclips?\\b|\\bcourt[ -]?m[ée]trages?\\b',
+    '\\banim(?:ation|ations|er|e|é|ée|es|ees)\\b|\\banim[ée]?\\b|\\banimate\\b|\\banimated\\b',
+    '\\breels?\\b|\\bstories?\\b|\\btiktoks?\\b|\\bshorts?\\b',
+    '\\bmotion\\b|\\bmouvement\\b',
+    '\\b(?:fais|fait|met|mets|mettre)\\s+(?:[çc]a|ceci|cela)\\s+(?:bouger|en\\s+mouvement)\\b',
+    '\\b(?:make|put)\\s+(?:it|this)\\s+(?:move|in\\s+motion)\\b',
+  ].join('|'),
+  'i'
+);
+
+/** True when the message unambiguously asks for a video (video tool). */
+function clearlyVideoRequest(text: string): boolean {
+  if (!text) return false;
+  return VIDEO_WORD_RE.test(text) && !IMAGE_WORD_RE.test(text);
+}
+
 const SYSTEM_PROMPT = `You decide whether the latest user message is a request to CREATE or EDIT a visual (to be produced by an image-generation tool), rather than a normal chat message.
 
 The user may write with SPELLING MISTAKES or phonetic approximations (any language, often French — e.g. "desine moi", "fait un logo", "cre une image", "lading page" = landing page). First silently reconstruct what they MEAN, then decide on the corrected intent.
@@ -132,11 +156,17 @@ export async function decideAutoImageGeneration(
   if (lastUserIdx < 0) return null;
   const targetText = String(messages[lastUserIdx].content ?? '');
 
-  // Deterministic guard FIRST: a clearly-code request ("créer landing page
+  // Deterministic guards FIRST: a clearly-code request ("créer landing page
   // ultra moderne", "développe une app") never reaches the classifier —
-  // zero latency, zero risk of a weak-model misfire hijacking the turn.
+  // zero latency, zero risk of a weak-model misfire hijacking the turn. A
+  // clearly-VIDEO request ("crée une vidéo", "fais un clip") equally stays
+  // out: the video engine owns that turn, not the image engine.
   if (clearlyCodeRequest(targetText)) {
     console.log('[auto-image] code-deliverable guard: image=false (no LLM call)');
+    return { image: false, edit: false };
+  }
+  if (clearlyVideoRequest(targetText)) {
+    console.log('[auto-image] video-request guard: image=false (no LLM call)');
     return { image: false, edit: false };
   }
 

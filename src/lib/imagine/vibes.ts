@@ -1,24 +1,24 @@
 /**
- * Nelth vibes video generation — backend client (text→video, batch polling).
+ * Nelth vibes video generation — backend client (text→video, image→video).
  *
  * Talks to the Nelth vibes gateway (https://nelcia.space-z.ai):
  *
  *   Text→video : POST /api/vibes/videos/generate
  *                body JSON { project_id, prompt, aspect_ratio, resolution,
  *                            variations, poll: false } → { batchId }
+ *   Upload     : POST /api/vibes/upload/media  (multipart: file, filename,
+ *                project_id) → { mediaEntId, imageUrl } — registers an image
+ *                into the vibes media store, prerequisite for animate
+ *   Image→video: POST /api/vibes/videos/animate
+ *                body JSON { project_id, prompt (motion), poll: false,
+ *                            source_image: { id, imageUrl, mediaEntId,
+ *                            prompt } } → { batchId }
  *   Poll batch : POST /api/vibes/batches/{batchId}/poll?timeout=5
  *                (GET is rejected with 405 — POST only) →
  *                { isComplete, hasError, error, content: [{ videoUrl }] }
  *
  * The generated videos are short-lived CDN URLs (fbcdn) — callers must
  * download the bytes immediately (see downloadVibesVideo).
- *
- * The gateway also exposes an image→video animate endpoint, but it requires
- * a source image ALREADY uploaded to the vibes project's media library
- * (source_image.mediaEntId is resolved against the vibes-side store — a bare
- * imageUrl is rejected with MEDIA_GONE). The chat pipeline generates images
- * through the Nelthai engine, so those cannot be animated here; text→video
- * is the supported direction for the chat tool (V1).
  */
 
 const VIBES_API_BASE = (
@@ -134,6 +134,88 @@ export async function vibesPollBatch(batchId: string): Promise<VibesBatch> {
     {},
     25_000
   );
+}
+
+// ---------------------------------------------------------------------------
+// Image upload — registers an image into the vibes project media store
+// ---------------------------------------------------------------------------
+
+export interface VibesUploadedMedia {
+  mediaEntId: string;
+  imageUrl: string;
+  sourceImageEntId?: string;
+  registered?: boolean;
+}
+
+/**
+ * Upload raw image bytes to the vibes media library (multipart ONLY, exactly
+ * like the studio frontend: fields `file`, `filename`, `project_id`).
+ *
+ * This is the ONLY way to animate an arbitrary image: the animate endpoint
+ * resolves its `source_image.mediaEntId` against the vibes-side store — a
+ * bare public URL is rejected with MEDIA_GONE.
+ */
+export async function vibesUploadImage(input: {
+  bytes: Buffer;
+  filename?: string;
+  contentType?: string;
+}): Promise<VibesUploadedMedia> {
+  if (!input.bytes?.length) throw new Error('Image bytes are required for the vibes upload');
+  const form = new FormData();
+  form.append(
+    'file',
+    new File([new Uint8Array(input.bytes)], input.filename || 'input.png', {
+      type: input.contentType || 'image/png',
+    })
+  );
+  form.append('filename', input.filename || 'input.png');
+  form.append('project_id', VIBES_PROJECT_ID);
+
+  const res = await fetch(`${VIBES_API_BASE}/api/vibes/upload/media`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(await parseError(res, `HTTP ${res.status}`));
+  const body = (await res.json()) as Partial<VibesUploadedMedia> & { error?: string };
+  const mediaEntId = body?.mediaEntId || body?.sourceImageEntId;
+  if (!mediaEntId || !body?.imageUrl) {
+    throw new Error(body?.error || 'The vibes upload returned no mediaEntId');
+  }
+  return {
+    mediaEntId,
+    imageUrl: body.imageUrl,
+    sourceImageEntId: body.sourceImageEntId ?? mediaEntId,
+    registered: body.registered,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Image→video (animate) — source_image + motion prompt
+// ---------------------------------------------------------------------------
+
+export async function vibesAnimateVideo(input: {
+  source: { mediaEntId: string; imageUrl: string; prompt?: string };
+  motion?: string;
+}): Promise<{ batchId: string }> {
+  const data = await vibesFetch<{ batchId?: string; batch?: { id?: string }; id?: string; error?: string }>(
+    '/api/vibes/videos/animate',
+    {
+      project_id: VIBES_PROJECT_ID,
+      prompt: (input.motion || '').trim() || undefined, // motion directive — optional
+      poll: false,
+      source_image: {
+        id: input.source.mediaEntId,
+        imageUrl: input.source.imageUrl,
+        mediaEntId: input.source.mediaEntId,
+        prompt: input.source.prompt ?? 'Uploaded image',
+      },
+    },
+    30_000
+  );
+  const batchId = data?.batchId || data?.batch?.id || data?.id;
+  if (!batchId) throw new Error(data?.error || 'No batchId returned by the animate endpoint');
+  return { batchId };
 }
 
 // ---------------------------------------------------------------------------
