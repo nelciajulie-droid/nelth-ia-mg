@@ -1827,14 +1827,18 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // Provider flakiness guard (observed on the free dots-studio model with
     // web-search context): the gateway SOMETIMES answers 400 "bad request"
     // from the upstream provider although the request is perfectly valid —
-    // the same body succeeds on a retry. ONE retry on the SAME model: the
-    // model the user picked is never substituted (explicit user rule — a
-    // persisting upstream error surfaces as-is instead of silently
-    // answering with a different model).
+    // the same body succeeds on a retry (reproduced: one turn fails twice
+    // then succeeds unchanged). Up to TWO extra retries on the SAME model,
+    // short backoff between attempts: the model the user picked is never
+    // substituted (explicit user rule — a persisting upstream error
+    // surfaces as-is instead of silently answering with a different model).
     if (isKilo && upstream.status === 400) {
-      const probe = await upstream.clone().text().catch(() => '');
-      if (/bad request|Provider returned error/i.test(probe)) {
-        console.warn('[v12-flow] gateway 400 provider flake — retrying the same model');
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        if (upstream.status !== 400) break;
+        const probe = await upstream.clone().text().catch(() => '');
+        if (!/bad request|Provider returned error/i.test(probe)) break;
+        console.warn(`[v12-flow] gateway 400 provider flake — retry ${attempt}/2 (same model)`);
+        await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
         upstream = await callUpstream(reqBody);
       }
     }

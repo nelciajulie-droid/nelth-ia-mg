@@ -653,6 +653,24 @@ model OAuthSession {
   @@map("oauth_session")
 }
 
+// ─── connectors (@ app mention picker) ───────────────────────────────────────
+
+model ConnectorConnection {
+  id           String  @id
+  user_id      String
+  connector_id String // registry id: gmail | gdrive | gcal | slack | github | notion | outlook | onedrive
+  status       String // "connected" | "expired" | "revoked"
+  provider     String? // oauth provider family reused from the login OAuth env contract
+  account      String? // connected account label (email / login)
+  scopes       String? // JSON array of granted scopes
+  created_at   Float // time_ns
+  updated_at   Float // time_ns
+
+  @@unique([user_id, connector_id], map: "uq_connector_connection_user_connector")
+  @@index([user_id], map: "idx_connector_connection_user_id")
+  @@map("connector_connection")
+}
+
 // ─── calendar.py ──────────────────────────────────────────────────────────────
 
 model Calendar {

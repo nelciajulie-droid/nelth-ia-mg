@@ -115,7 +115,7 @@ export const APP_REGISTRY: AppDefinition[] = [
       { id: 'read', label: 'Lire un e-mail', description: 'Lit un message spécifique et le résume dans la conversation.', sensitive: false },
       { id: 'send', label: 'Rédiger / envoyer un e-mail', description: 'Prépare et envoie un e-mail — confirmation demandée avant l’envoi.', sensitive: true },
     ],
-    permissions: ['gmail.readonly', 'gmail.send'],
+    permissions: ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send'],
   },
   {
     id: 'gdrive',
@@ -131,7 +131,7 @@ export const APP_REGISTRY: AppDefinition[] = [
       { id: 'read', label: 'Lire un document', description: 'Extrait le contenu d’un document Drive comme contexte.', sensitive: false },
       { id: 'create', label: 'Créer un document', description: 'Crée un document dans le Drive — confirmation demandée.', sensitive: true },
     ],
-    permissions: ['drive.readonly', 'drive.file'],
+    permissions: ['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file'],
   },
   {
     id: 'gcal',
@@ -147,7 +147,7 @@ export const APP_REGISTRY: AppDefinition[] = [
       { id: 'create', label: 'Créer un événement', description: 'Ajoute un événement à l’agenda — confirmation demandée.', sensitive: true },
       { id: 'move', label: 'Déplacer / annuler', description: 'Modifie ou supprime un événement existant — confirmation demandée.', sensitive: true },
     ],
-    permissions: ['calendar.readonly', 'calendar.events'],
+    permissions: ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.events'],
   },
   {
     id: 'slack',
