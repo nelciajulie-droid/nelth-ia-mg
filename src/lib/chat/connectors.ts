@@ -29,11 +29,17 @@ import {
   type ToolServerEntry,
 } from '@/server/routers/tools';
 import { configGet } from '@/lib/config';
+import {
+  builtinOpenapi,
+  builtinHandlers,
+  getBuiltinConnector,
+  type BuiltinConnectorDef,
+} from '@/lib/connectors/builtin';
 
 export interface ResolvedConnector {
   /** Display name (OpenAPI info.title, or the connection's url host). */
   name: string;
-  /** Server base URL (no trailing slash). */
+  /** Server base URL (no trailing slash) — 'builtin://<id>' for built-ins. */
   url: string;
   /** Auth headers for every call to this server. */
   authHeaders: Record<string, string>;
@@ -41,6 +47,8 @@ export interface ResolvedConnector {
   openapi: Record<string, any>;
   /** Converted tool payloads (name/description/parameters). */
   specs: any[];
+  /** Built-in connectors: operationId → LOCAL handler (no HTTP server). */
+  builtinHandlers?: Record<string, (args: Record<string, any>) => unknown | Promise<unknown>>;
 }
 
 export interface ConnectorToolCall {
@@ -128,8 +136,22 @@ async function resolveOneConnection(
   };
 }
 
+/** A built-in connector def → ResolvedConnector (local execution). */
+function toResolvedBuiltin(def: BuiltinConnectorDef): ResolvedConnector {
+  return {
+    name: def.name,
+    url: `builtin://${def.id}`,
+    authHeaders: {},
+    openapi: builtinOpenapi(def),
+    specs: convertOpenapiToToolPayload(builtinOpenapi(def)),
+    builtinHandlers: builtinHandlers(def),
+  };
+}
+
 /**
  * All connectors the CURRENT request selected:
+ *  - `server:connector:<id>` entries of form.tool_ids → the built-in plugin
+ *    catalog (Gmail, Calendar, Drive, Contacts, Wikipédia — executed locally);
  *  - `server:<id>` entries of form.tool_ids → matched against the
  *    admin-configured connections (tool_server.connections) by info.id or index;
  *  - every entry of form.tool_servers (the user's direct integrations).
@@ -170,6 +192,12 @@ export async function resolveFormConnectors(
       if (infoId) byEntryId.set(infoId, entry);
     }
     for (const wanted of serverIds) {
+      // Built-in connectors first — no admin connection, no spec fetch.
+      const builtin = getBuiltinConnector(wanted);
+      if (builtin) {
+        push(toResolvedBuiltin(builtin));
+        continue;
+      }
       const entry = byEntryId.get(wanted);
       if (!entry) continue;
       const conn = (connections ?? [])[entry.idx] ?? {};
@@ -351,6 +379,24 @@ async function executeOne(
   const target = findOperation(connectors, call.tool);
   if (!target) {
     return { tool: call.tool, status: 'error', body: `Unknown tool "${call.tool}" — check the tool name.` };
+  }
+  // ---- built-in connectors: LOCAL execution (no HTTP round-trip) ----------
+  const localHandler = target.connector.builtinHandlers?.[call.tool];
+  if (localHandler) {
+    try {
+      const out = await localHandler({ ...(call.arguments ?? {}) });
+      return {
+        tool: call.tool,
+        status: 200,
+        body: JSON.stringify(out ?? { ok: true }).slice(0, MAX_RESULT_CHARS),
+      };
+    } catch (e: any) {
+      return {
+        tool: call.tool,
+        status: 'error',
+        body: `Connector error: ${String(e?.message ?? e)}`.slice(0, MAX_RESULT_CHARS),
+      };
+    }
   }
   const args = { ...(call.arguments ?? {}) };
   // ---- path params -------------------------------------------------------

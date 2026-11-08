@@ -3,6 +3,7 @@ import { HttpError } from '../http';
 import { configGet } from '@/lib/config';
 
 import { getUserGroupIds, hasPermission } from '@/lib/access-control';
+import { BUILTIN_CONNECTORS, builtinOpenapi } from '@/lib/connectors/builtin';
 import {
   getToolById,
   getTools,
@@ -462,6 +463,33 @@ export const routes: Route[] = [
                 : {}),
             });
           }
+        }
+      }
+
+      // Built-in connectors (Gmail, Google Calendar, Drive, Contacts,
+      // Wikipédia) — zero-setup plugin catalog for the @ quick action. They
+      // ride the same "server:" tool_ids path as admin-configured tool
+      // servers but resolve + execute LOCALLY in the chat pipeline (no HTTP
+      // server to reach) — see lib/connectors/builtin.ts and the v12-flow
+      // connectors phase.
+      if (ENABLE_TOOL_SERVERS) {
+        for (const def of BUILTIN_CONNECTORS) {
+          const serverId = `server:${def.id}`;
+          // Unrestricted connection → part of the shared catalog (everyone).
+          serverConnections[serverId] = { config: {} };
+          tools.push({
+            version_id: null,
+            id: serverId,
+            user_id: serverId,
+            name: def.name,
+            content: null,
+            specs: convertOpenapiToToolPayload(builtinOpenapi(def)),
+            meta: { description: def.description },
+            access_grants: [],
+            user: null,
+            updated_at: nowSec(),
+            created_at: nowSec(),
+          });
         }
       }
 

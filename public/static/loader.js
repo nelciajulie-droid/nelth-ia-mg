@@ -3004,3 +3004,535 @@ html.nsrc-lock{overflow:hidden}
     start();
   }
 })();
+
+/* ====================================================================
+ * @ CONNECTOR PICKER — the « @ » quick action selects plugins.
+ *
+ * Why: the compiled frontend's @ menu lists models + knowledge only —
+ * in this Open WebUI build, tools/connectors live in the Integrations
+ * picker (puzzle button by the input). The backend now ships a
+ * built-in connector catalog (Gmail, Google Calendar, Drive, Contacts,
+ * Wikipédia — GET /api/v1/tools/, ids “server:connector:*”) and this
+ * layer turns the @ key into a CONNECTOR SELECTOR:
+ *   • keydown “@” on the chat input → the native model menu is
+ *     suppressed (preventDefault + stopPropagation, capture phase) and
+ *     a custom dropdown opens above the input — filter-as-you-type,
+ *     ↑/↓ + Enter, click, Échap closes;
+ *   • picking a connector drives the app's OWN control path
+ *     programmatically: Integrations button → Tools menu → checkbox.
+ *     The app's store is updated exactly like a manual check, so the
+ *     selection persists and rides tool_ids on the next message;
+ *   • already-attached connectors are detected (aria-checked) and
+ *     skipped — no accidental toggle-off;
+ *   • “@@” (typing @ while the picker is open) → passthrough to the
+ *     native model menu (escape hatch);
+ *   • automation failure → nothing breaks: a hint points at the
+ *     Integrations button and the native flow still works.
+ * ==================================================================== */
+(() => {
+  'use strict';
+
+  const CACHE_MS = 60000;
+  const TOOLS_ITEM_RE = /^(tools|outils|werkzeuge|herramientas|strumenti|ferramentas)\b/i;
+
+  let cache = null; // { at, items }
+  let root = null; // picker element
+  let listEl = null;
+  let filterText = '';
+  let activeIdx = 0;
+  let items = [];
+  let busy = false; // automation in flight — no re-entry
+
+  // ------------------------------------------------------------------
+  // Catalog
+  // ------------------------------------------------------------------
+
+  async function loadConnectors() {
+    if (cache && Date.now() - cache.at < CACHE_MS) return cache.items;
+    try {
+      const token = localStorage.getItem('token') || '';
+      const res = await fetch('/api/v1/tools/', {
+        headers: { Authorization: 'Bearer ' + token },
+      });
+      if (!res.ok) throw new Error('http ' + res.status);
+      const tools = await res.json();
+      const list = (Array.isArray(tools) ? tools : [])
+        .filter(
+          (t) =>
+            t &&
+            typeof t.id === 'string' &&
+            t.id.indexOf('server:') === 0 &&
+            (t.name || (t.meta && t.meta.description))
+        )
+        .map((t) => ({
+          id: t.id,
+          name: String(t.name || t.id),
+          description: String((t.meta && t.meta.description) || ''),
+        }));
+      cache = { at: Date.now(), items: list };
+      return list;
+    } catch (e) {
+      return cache ? cache.items : [];
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Icons — brand-tinted letter badges (fallback: neutral puzzle dot)
+  // ------------------------------------------------------------------
+
+  const ICON_COLORS = {
+    'connector:gmail': '#EA4335',
+    'connector:gcalendar': '#34A853',
+    'connector:gdrive': '#FBBC05',
+    'connector:gcontacts': '#EA4335',
+    'connector:wikipedia': '#54565A',
+  };
+
+  function iconHtml(item) {
+    const color = ICON_COLORS[item.id.replace(/^server:/, '')] || '#6B7280';
+    const letter = (item.name || '?').trim().charAt(0).toUpperCase();
+    return (
+      '<span class="nelth-at-ico" style="background:' + color + '">' + letter + '</span>'
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // Picker DOM
+  // ------------------------------------------------------------------
+
+  const STYLE = document.createElement('style');
+  STYLE.textContent = [
+    '.nelth-at-picker{position:fixed;z-index:99999;width:352px;max-width:calc(100vw - 20px);',
+    'border-radius:12px;border:1px solid rgba(17,24,39,.12);box-shadow:0 12px 44px rgba(15,23,42,.22);',
+    'background:#fff;color:#111827;overflow:hidden;font-size:13px;line-height:1.35;',
+    'font-family:inherit;-webkit-font-smoothing:antialiased}',
+    '.nelth-at-head{display:flex;align-items:center;gap:6px;padding:9px 12px 7px;',
+    'font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#6B7280;',
+    'border-bottom:1px solid rgba(17,24,39,.08)}',
+    '.nelth-at-list{max-height:288px;overflow-y:auto;padding:4px}',
+    '.nelth-at-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;cursor:pointer}',
+    '.nelth-at-row[data-active="1"]{background:rgba(17,24,39,.06)}',
+    '.nelth-at-row .nelth-at-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.nelth-at-row .nelth-at-desc{color:#6B7280;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}',
+    '.nelth-at-ico{flex:0 0 auto;width:26px;height:26px;border-radius:8px;color:#fff;',
+    'display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}',
+    '.nelth-at-empty{padding:16px 12px;color:#6B7280;text-align:center}',
+    '.nelth-at-foot{padding:6px 12px 8px;font-size:10.5px;color:#9CA3AF;border-top:1px solid rgba(17,24,39,.08)}',
+    '.dark .nelth-at-picker{background:#1F2937;border-color:rgba(255,255,255,.09);color:#F3F4F6}',
+    '.dark .nelth-at-head{color:#9CA3AF;border-color:rgba(255,255,255,.08)}',
+    '.dark .nelth-at-row[data-active="1"]{background:rgba(255,255,255,.08)}',
+    '.dark .nelth-at-row .nelth-at-desc{color:#9CA3AF}',
+    '.dark .nelth-at-foot{color:#6B7280;border-color:rgba(255,255,255,.08)}',
+    '.nelth-at-hint{position:fixed;z-index:99999;left:50%;transform:translateX(-50%);bottom:92px;',
+    'background:#111827;color:#F9FAF8;padding:8px 16px;border-radius:999px;font-size:12.5px;',
+    'box-shadow:0 8px 30px rgba(0,0,0,.35);opacity:0;transition:opacity .18s;pointer-events:none;max-width:calc(100vw - 32px);text-align:center}',
+    '.nelth-at-hint.nelth-at-hint-on{opacity:1}',
+  ].join('');
+  document.head.appendChild(STYLE);
+
+  function norm(s) {
+    return String(s)
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+  }
+
+  function visibleItems() {
+    if (!filterText) return items;
+    const q = norm(filterText);
+    return items.filter(
+      (it) => norm(it.name).indexOf(q) >= 0 || norm(it.description).indexOf(q) >= 0
+    );
+  }
+
+  function renderList() {
+    if (!listEl) return;
+    const vis = visibleItems();
+    if (activeIdx >= vis.length) activeIdx = Math.max(0, vis.length - 1);
+    if (!vis.length) {
+      listEl.innerHTML =
+        '<div class="nelth-at-empty">Aucun connecteur ne correspond à « ' +
+        String(filterText).replace(/[<>&]/g, '') +
+        ' »</div>';
+      return;
+    }
+    listEl.innerHTML = vis
+      .map((it, i) => {
+        const name = String(it.name).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        const desc = String(it.description).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        return (
+          '<div class="nelth-at-row" role="option" data-active="' +
+          (i === activeIdx ? '1' : '0') +
+          '" data-name="' +
+          name +
+          '">' +
+          iconHtml(it) +
+          '<span style="min-width:0"><span class="nelth-at-name">' +
+          name +
+          '</span><br/><span class="nelth-at-desc">' +
+          desc +
+          '</span></span></div>'
+        );
+      })
+      .join('');
+    Array.prototype.forEach.call(listEl.querySelectorAll('.nelth-at-row'), (row) => {
+      row.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // keep the input focused
+      });
+      row.addEventListener('click', () => {
+        const name = row.getAttribute('data-name');
+        const it = items.find((x) => x.name === name);
+        if (it) choose(it);
+      });
+    });
+    const act = listEl.querySelector('.nelth-at-row[data-active="1"]');
+    if (act && act.scrollIntoView) act.scrollIntoView({ block: 'nearest' });
+  }
+
+  function positionPicker() {
+    if (!root) return;
+    const input = document.getElementById('chat-input');
+    if (!input) return;
+    const anchor = input.closest('form') || input;
+    const r = anchor.getBoundingClientRect();
+    const w = Math.min(352, window.innerWidth - 20);
+    root.style.left = Math.max(10, Math.min(r.left, window.innerWidth - w - 10)) + 'px';
+    root.style.bottom = Math.max(10, window.innerHeight - r.top + 8) + 'px';
+  }
+
+  async function openPicker() {
+    if (root) closePicker(true);
+    items = await loadConnectors();
+    if (!items.length) {
+      hint(
+        'Aucun connecteur disponible — utilisez le bouton 🧩 Integrations en bas de la zone de saisie.'
+      );
+      return;
+    }
+    filterText = '';
+    activeIdx = 0;
+    root = document.createElement('div');
+    root.className = 'nelth-at-picker';
+    root.setAttribute('role', 'listbox');
+    root.innerHTML =
+      '<div class="nelth-at-head">🧩 Connecteurs</div>' +
+      '<div class="nelth-at-list"></div>' +
+      '<div class="nelth-at-foot">↑↓ naviguer · Entrée attacher · Échap fermer · @@ pour les modèles</div>';
+    listEl = root.querySelector('.nelth-at-list');
+    document.body.appendChild(root);
+    renderList();
+    positionPicker();
+    window.addEventListener('resize', positionPicker);
+    window.addEventListener('scroll', positionPicker, true);
+  }
+
+  function closePicker(silent) {
+    if (root) {
+      root.remove();
+      root = null;
+      listEl = null;
+    }
+    window.removeEventListener('resize', positionPicker);
+    window.removeEventListener('scroll', positionPicker, true);
+    filterText = '';
+    activeIdx = 0;
+    if (!silent) {
+      const input = document.getElementById('chat-input');
+      if (input && input.focus) input.focus({ preventScroll: true });
+    }
+  }
+
+  function choose(it) {
+    closePicker(true);
+    attachConnector(it.name);
+  }
+
+  // ------------------------------------------------------------------
+  // Hint bubble
+  // ------------------------------------------------------------------
+
+  let hintEl = null;
+  let hintTimer = 0;
+  function hint(text) {
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.className = 'nelth-at-hint';
+      document.body.appendChild(hintEl);
+    }
+    hintEl.textContent = text;
+    hintEl.classList.add('nelth-at-hint-on');
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => {
+      if (hintEl) hintEl.classList.remove('nelth-at-hint-on');
+    }, 2600);
+  }
+
+  // ------------------------------------------------------------------
+  // Native-menu automation (Integrations → Tools → checkbox)
+  // ------------------------------------------------------------------
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function waitFor(fn, ms) {
+    const t0 = Date.now();
+    for (;;) {
+      const v = fn();
+      if (v) return v;
+      if (Date.now() - t0 > ms) return null;
+      await sleep(60);
+    }
+  }
+
+  function pressEscape() {
+    const ev = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      keyCode: 27,
+      which: 27,
+      bubbles: true,
+      cancelable: true,
+    });
+    try {
+      if (document.activeElement && document.activeElement !== document.body) {
+        document.activeElement.dispatchEvent(ev);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    document.dispatchEvent(ev);
+  }
+
+  function menuItems() {
+    return Array.prototype.slice.call(document.querySelectorAll('[role="menuitem"]'));
+  }
+
+  function menuCheckboxes() {
+    return Array.prototype.slice.call(document.querySelectorAll('[role="menuitemcheckbox"]'));
+  }
+
+  function integrationsCandidates() {
+    const input = document.getElementById('chat-input');
+    const form = input ? input.closest('form') : null;
+    const scope = form || document;
+    const btns = Array.prototype.slice.call(
+      scope.querySelectorAll('button[aria-haspopup="true"]')
+    );
+    // Prefer the icon-size hint of the Integrations trigger, keep every
+    // candidate as fallback (locale-proof discovery by content probing).
+    btns.sort((a, b) => {
+      const sa = /size-4(\.5)?\b/.test((a.querySelector('svg') || {}).className || '') ? 0 : 1;
+      const sb = /size-4(\.5)?\b/.test((b.querySelector('svg') || {}).className || '') ? 0 : 1;
+      return sa - sb;
+    });
+    return btns;
+  }
+
+  /** Radix-style submenus open on POINTER events, not plain .click() —
+   *  dispatch the full hover sequence so the submenu actually expands. */
+  function openSubmenu(item) {
+    const r = item.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      clientX: cx,
+      clientY: cy,
+      button: 0,
+    };
+    const seq = [
+      ['pointerover', PointerEvent],
+      ['pointerenter', PointerEvent],
+      ['mouseover', MouseEvent],
+      ['mouseenter', MouseEvent],
+      ['pointermove', PointerEvent],
+      ['mousemove', MouseEvent],
+    ];
+    for (let i = 0; i < seq.length; i++) {
+      try {
+        item.dispatchEvent(new seq[i][1](seq[i][0], { ...opts, pointerId: 1, pointerType: 'mouse' }));
+      } catch (e) {
+        /* older browsers — mouse events still dispatched below */
+      }
+    }
+  }
+
+  async function attachConnector(name) {
+    if (busy) return;
+    busy = true;
+    hint('« ' + name + ' » — attachement…');
+    let triggerBtn = null; // the button that opened the popup — toggling it
+    // again closes the popup through the app's OWN commit path (a synthetic
+    // Escape would cancel the uncommitted checkbox change!).
+    try {
+      // 1 — open the Integrations popup (probe each candidate button).
+      let toolsItem = null;
+      const candidates = integrationsCandidates();
+      for (let i = 0; i < candidates.length && !toolsItem; i++) {
+        candidates[i].click();
+        toolsItem = await waitFor(
+          () => menuItems().find((el) => TOOLS_ITEM_RE.test((el.textContent || '').trim())) || null,
+          900
+        );
+        if (toolsItem) {
+          triggerBtn = candidates[i];
+        } else {
+          pressEscape();
+        }
+      }
+      if (!toolsItem) {
+        automationFailed(name);
+        return;
+      }
+      // 2 — open the Tools submenu (pointer events — plain .click() is
+      // not enough: Radix-style submenus open on pointerenter/real clicks).
+      openSubmenu(toolsItem);
+      toolsItem.click();
+      const box = await waitFor(() => {
+        const boxes = menuCheckboxes();
+        const exact = boxes.find((el) => (el.textContent || '').trim().indexOf(name) === 0);
+        return exact || null;
+      }, 1400);
+      if (!box) {
+        closeViaTrigger(triggerBtn);
+        automationFailed(name);
+        return;
+      }
+      // 3 — attach unless already attached (aria-checked — never toggle off).
+      const wasChecked = box.getAttribute('aria-checked') === 'true';
+      if (wasChecked) {
+        hint('« ' + name + ' » est déjà attaché à cette conversation ✓');
+      } else {
+        box.click();
+        await sleep(220);
+        hint('Connecteur « ' + name + ' » attaché ✓ — posez votre question');
+      }
+      // 4 — close through the app's own path so the selection COMMITS.
+      await closeViaTrigger(triggerBtn);
+      await sleep(120);
+      const input = document.getElementById('chat-input');
+      if (input && input.focus) input.focus({ preventScroll: true });
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Close the popup by toggling its trigger button (commit path); falls
+   *  back to Escape only when the trigger is gone (route change). */
+  async function closeViaTrigger(btn) {
+    if (btn && btn.isConnected) {
+      try {
+        btn.click();
+        await sleep(180);
+        return;
+      } catch (e) {
+        /* fall through */
+      }
+    }
+    pressEscape();
+    await sleep(120);
+    pressEscape();
+  }
+
+  function automationFailed(name) {
+    hint(
+      'Attachement automatique indisponible — cliquez sur le bouton 🧩 Integrations → Tools, puis cochez « ' +
+        name +
+        ' »'
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // '@' interception — capture phase on document (survives route changes)
+  // ------------------------------------------------------------------
+
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      const input = document.getElementById('chat-input');
+      if (!input) return;
+      if (e.target !== input && !(e.target && input.contains(e.target))) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (e.key === '@') {
+        if (busy) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        if (root) {
+          // "@@" — second @ while the picker is open → native model menu.
+          closePicker(true);
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        openPicker();
+        return;
+      }
+
+      if (!root) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closePicker();
+        return;
+      }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        const vis = visibleItems();
+        if (vis.length) {
+          activeIdx =
+            e.key === 'ArrowDown'
+              ? (activeIdx + 1) % vis.length
+              : (activeIdx - 1 + vis.length) % vis.length;
+          renderList();
+        }
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        e.stopPropagation();
+        const vis = visibleItems();
+        const it = vis[Math.min(activeIdx, vis.length - 1)];
+        if (it) choose(it);
+        return;
+      }
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        e.stopPropagation();
+        filterText = filterText.slice(0, -1);
+        activeIdx = 0;
+        renderList();
+        return;
+      }
+      if (e.key.length === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (filterText.length < 40) {
+          filterText += e.key;
+          activeIdx = 0;
+          renderList();
+        }
+      }
+    },
+    true
+  );
+
+  // Outside click closes the picker.
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      if (!root) return;
+      if (root.contains(e.target)) return;
+      const input = document.getElementById('chat-input');
+      if (input && (e.target === input || input.contains(e.target))) return;
+      closePicker(true);
+    },
+    true
+  );
+})();
