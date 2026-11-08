@@ -314,6 +314,16 @@ export class NativeReasoningAccumulator {
   private reasoningFirstAt: number | null = null;
   private reasoningEndedAt: number | null = null;
   private contentFirstAt: number | null = null;
+  /** Item-id suffix (continuation rounds): the frontend replaces the whole
+   *  `output` array on every snapshot, so a continuation round's items must
+   *  not collide with the interrupted round's persisted ids — a distinct
+   *  suffix renders the second thinking phase as its own block while the
+   *  (seeded) message item carries base+new content under one id. */
+  private readonly itemSuffix: string;
+
+  constructor(itemSuffix = '') {
+    this.itemSuffix = itemSuffix;
+  }
 
   /** True once any reasoning text has been received (structured mode). */
   get active(): boolean {
@@ -429,7 +439,7 @@ export class NativeReasoningAccumulator {
     if (this.reasoningText) {
       items.push({
         type: 'reasoning',
-        id: 'rs_native',
+        id: 'rs_native' + this.itemSuffix,
         status: endedMs !== undefined ? 'completed' : 'in_progress',
         start_tag: '<thinking>',
         end_tag: '</thinking>',
@@ -447,7 +457,7 @@ export class NativeReasoningAccumulator {
       // emission contract is full-snapshot: D.output = output).
       items.push({
         type: 'reasoning',
-        id: 'rs_native',
+        id: 'rs_native' + this.itemSuffix,
         status: 'in_progress',
         start_tag: '<thinking>',
         end_tag: '</thinking>',
@@ -460,7 +470,7 @@ export class NativeReasoningAccumulator {
     if (this.contentText && (revealDone || allDone || !this.reasoningLedContent)) {
       items.push({
         type: 'message',
-        id: 'msg_native',
+        id: 'msg_native' + this.itemSuffix,
         status: allDone ? 'completed' : 'in_progress',
         role: 'assistant',
         content: [{ type: 'output_text', text: this.contentText }],

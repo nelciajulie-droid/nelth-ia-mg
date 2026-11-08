@@ -151,6 +151,16 @@ const NARRATION_START_RE = new RegExp(
   'i'
 );
 
+/**
+ * Continuation instruction for auto-continue rounds (see finalizeTruncated
+ * and the __nelth_continue mode): the serverless platform caps a single
+ * completion request (Vercel maxDuration 300s), and a thinking-model
+ * generation of a very long code file can outrun it. The interrupted
+ * round's partial answer rides in the context as the model's own last
+ * message — this instruction makes the continuation seamless.
+ */
+const CONTINUE_INSTRUCTION = `Your previous answer was interrupted mid-output by a platform time limit — the conversation shows exactly where it stopped. Continue EXACTLY from that point: do not repeat anything already written, do not re-introduce or summarize the answer, do not apologize or mention the interruption. If the output stopped inside a code block, continue inside that same code block and close it properly when the code ends. Emit ONLY the continuation, starting with the very next character.`;
+
 export async function handleChatCompletionV12(user: ApiUser, form: any): Promise<Response> {
   const json = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data === null ? 'null' : data === undefined ? 'null' : data), {
@@ -192,6 +202,14 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // over a socket hop that does not exist.
   const sseEventsRequested = form.__sse_events === true;
   delete form.__sse_events;
+  // Auto-continue chain (see finalizeTruncated + the loader.js SSE bridge):
+  // this request is a CONTINUATION round for a generation that hit the
+  // serverless time budget mid-code. The context is rebuilt from the stored
+  // history INCLUDING the interrupted partial answer, and every turn-level
+  // phase below (skills pre-selection, web search, image funnel, title) is
+  // skipped — those decisions belong to the original request.
+  const isContinuation = form.__nelth_continue === true;
+  delete form.__nelth_continue;
   const sseBuffer: unknown[] = [];
   let sseSink: ((envelope: unknown) => void) | null = null;
 
@@ -227,7 +245,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
 
   // ------------------------------------------------- 2. Chat bookkeeping (DB)
   let historyMap: Record<string, any> | null = null;
-  if (isSavedChatId(chatId) && userMessageId && userMessage) {
+  if (!isContinuation && isSavedChatId(chatId) && userMessageId && userMessage) {
     const allAssistantIds = messageIds.map((e) => e?.message_id).filter(Boolean);
     const um: Record<string, any> = {
       ...userMessage,
@@ -335,8 +353,79 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     });
   };
   if (sessionId) await showThinkingStatus();
+
+  // Skills state (hoisted so the continuation branch below can seed
+  // usedSkills from the interrupted round's meta before the phase 3.3bis
+  // block runs).
+  let skillsActive = false;
+  const usedSkills: string[] = [];
+  const preSelectedNames: string[] = [];
+
+  /** Continuation base — the interrupted round's partial answer (raw text
+   *  for context + reasoning output items to re-emit ahead of the new
+   *  round's snapshots so the first thinking block survives the frontend's
+   *  full-snapshot replacement). Null on normal (non-continuation) turns. */
+  let contBase: { content: string; output: any[]; fileIntent: boolean } | null = null;
+
   let llmMessages: { role: string; content: string }[];
-  if (historyMap && userMessageId) {
+  if (isContinuation) {
+    // ---- Continuation round (auto-continue chain) --------------------------
+    // Rebuild the LLM context from the STORED history including the partial
+    // assistant message, re-inject the skill packs the interrupted round
+    // loaded, and close with a surgical "continue exactly where you stopped"
+    // instruction. Turn-level phases (search/image/skills/title) are skipped.
+    if (!isSavedChatId(chatId) || !assistantMessageId) {
+      return json({ detail: 'Continuation requires a saved chat and message id' }, 400);
+    }
+    const chat = await getChatById(chatId);
+    if (!chat || (chat.user_id !== user.id && user.role !== 'admin')) {
+      return json({ detail: 'You do not have permission to access this resource. Please contact your administrator for assistance.' }, 403);
+    }
+    const stored = (await getChatMessagesMapByChatId(chatId)) as Record<string, any> | null;
+    const existing = stored?.[assistantMessageId] ?? null;
+    if (!existing || existing.role !== 'assistant') {
+      return json({ detail: 'Continuation target message not found' }, 404);
+    }
+    contBase = {
+      content: messageContent(existing),
+      // reasoning items only — the message item is rebuilt by the accumulator
+      // (seeded with the base content) under the continuation's item id.
+      output: (Array.isArray(existing.output) ? existing.output : []).filter(
+        (it: any) => it && it.type !== 'message'
+      ),
+      // The interrupted round's file intent rides in meta — a ```document
+      // block spanning the seam must still become a file card at the end.
+      fileIntent: existing?.meta?.file_intent === true,
+    };
+    // Chain up to (but excluding) the partial assistant message itself.
+    const chain = getMessageList(stored as any, assistantMessageId)
+      .reverse()
+      .filter((m: any) => m && m.id !== assistantMessageId && messageContent(m));
+    let contMessages = chain.map((m: any) => ({ role: m.role, content: messageContent(m) }));
+    // Re-inject the skill packs the interrupted round loaded — the rest of
+    // the code must keep following the same instructions (100% compliance
+    // across the seam, not just on the first 285 seconds).
+    const prevSkills: string[] = Array.isArray(existing?.meta?.used_skills)
+      ? existing.meta.used_skills.filter((s: any): s is string => typeof s === 'string')
+      : [];
+    if (prevSkills.length) {
+      const { getSkillByName, buildSkillInjectionMessages } = await import('@/lib/skills/registry');
+      for (const name of prevSkills) {
+        const skill = getSkillByName(name);
+        if (skill) contMessages = await buildSkillInjectionMessages(contMessages, skill);
+      }
+      usedSkills.push(...prevSkills);
+    }
+    llmMessages = [
+      ...contMessages,
+      { role: 'assistant', content: contBase.content || '[début de réponse — aucun contenu reçu]' },
+      { role: 'user', content: CONTINUE_INSTRUCTION },
+    ];
+    console.log(
+      `[v12-flow] continuation round — base ${contBase.content.length} chars, ` +
+        `${contBase.output.length} output items, skills: ${prevSkills.join(', ') || 'none'}`
+    );
+  } else if (historyMap && userMessageId) {
     // load_messages_from_db: chain up to user_message_id (getMessageList walks
     // parentId links newest→oldest, then we reverse).
     let map = historyMap;
@@ -400,7 +489,9 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   let userAskedForFile = false;
   try {
     const { FILE_REQUEST_RE } = await import('@/lib/document-generation');
-    userAskedForFile = FILE_REQUEST_RE.test(rawLastUserText || '');
+    userAskedForFile = isContinuation
+      ? contBase?.fileIntent === true
+      : FILE_REQUEST_RE.test(rawLastUserText || '');
   } catch {
     userAskedForFile = false;
   }
@@ -447,11 +538,10 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   //     skill the pre-selector missed, the model can begin with
   //     USE_SKILL(name) and the gates below restart with that pack injected.
   // Either way, only the matched skills' full instructions ever enter the
-  // context — the rest of the library stays out.
-  let skillsActive = false;
-  // Skills actually loaded this turn (persisted in message meta for UI/audit).
-  const usedSkills: string[] = [];
-  const preSelectedNames: string[] = [];
+  // context — the rest of the library stays out. Continuation rounds skip
+  // this phase entirely: the packs are re-injected from the interrupted
+  // round's meta (see the continuation branch above).
+  if (!isContinuation) {
   {
     const { getSkillManifestPrompt } = await import('@/lib/skills/registry');
     const { preselectSkills, buildPreLoadedSkillsMessage } = await import('@/lib/skills/selector');
@@ -508,6 +598,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       }
     }
   }
+  } // end !isContinuation skills phase
 
   // ------------------------------------ 3.4 Web search (explicit toggle OR auto).
   // Python middleware: features.web_search → search engine + context/citation
@@ -532,7 +623,11 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // wall-clock latency.
   const isSdModel = modelId === 'stable-diffusion-xl' || modelId.startsWith('image_generation.');
   let webCitations: any[] | null = null;
+  // Continuation rounds never re-run the turn-level feature decisions —
+  // the interrupted request already made them (a fresh search/image call on
+  // the "continue" instruction would derail the code continuation).
   const wantsWebSearch =
+    !isContinuation &&
     form.features?.web_search === true &&
     form.features?.image_generation !== true &&
     !isSdModel;
@@ -736,7 +831,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       const query = lastUserContent();
       if (query) await performWebSearch(query, 'Recherche web en cours');
     }
-  } else if (!isSdModel && form.features?.image_generation !== true) {
+  } else if (!isSdModel && !isContinuation && form.features?.image_generation !== true) {
     // ---- Auto engagement: the model decides, the user doesn't have to. ----
     // Both autos (image + web search) decide IN PARALLEL — the added latency
     // of the second auto is ~zero. When the image decision claims the turn,
@@ -780,7 +875,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // the built-in `stable-diffusion-xl` model that routes here directly, and
   // the auto engagement path (decideAutoImageGeneration) for image requests
   // phrased naturally ("dessine-moi…") with the toggle OFF.
-  const wantsImageGeneration = form.features?.image_generation === true || isSdModel || autoImage;
+  const wantsImageGeneration =
+    !isContinuation && (form.features?.image_generation === true || isSdModel || autoImage);
   if (wantsImageGeneration) {
     const { configGet } = await import('@/lib/config');
     const { ERROR_MESSAGES } = await import('@/lib/constants');
@@ -1051,20 +1147,83 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // Shared upstream caller (flow scope): used by pass 1 AND the agent-skill
   // pass 2 (runStreamBody / the SSE API path re-call it with the injected
   // skill messages).
-  // 285s: just under the 300s maxDuration ceiling the Vercel plan allows
-  // (vercel.json — the platform rejects anything above 300 on this plan) so a
-  // runaway upstream surfaces as a clean socket error instead of the
-  // platform's hard kill. Long Thinking code generations get the full ~4¾
-  // minutes of streaming the plan permits; more requires a plan upgrade.
-  const timeoutSignal = AbortSignal.timeout(285_000);
-  const signal = typeof AbortSignal.any === 'function' ? AbortSignal.any([timeoutSignal, taskSignal]) : timeoutSignal;
+  //
+  // Per-CALL timeout budget (not per-flow): every upstream call gets a fresh
+  // window, so a pass-2 restart, a narration repair or an auto-continue round
+  // never inherits a starved countdown. The FLOW wall (Vercel maxDuration,
+  // ~300s on this plan) still binds everything: each call's window is capped
+  // at the wall's remainder, and the wall leaves finalization headroom — a
+  // budget abort triggers the graceful truncation path (finalizeTruncated:
+  // persist the partial + the nelth:continue marker for the loader.js SSE
+  // bridge, which re-requests with __nelth_continue in a FRESH serverless
+  // invocation with its own full budget) instead of the raw
+  // "Chat completion stream failed" banner.
+  // NELTH_FLOW_BUDGET_MS (env): tuning knob / local testing (short budgets
+  // exercise the auto-continue chain without waiting real minutes).
+  const FLOW_WALL_MS = (() => {
+    const tuned = parseInt(String(process.env.NELTH_FLOW_BUDGET_MS || ''), 10);
+    if (Number.isFinite(tuned) && tuned >= 10_000) return tuned;
+    return process.env.VERCEL ? 280_000 : 285_000;
+  })();
+  const flowWallAt = Date.now() + FLOW_WALL_MS;
+  let activeCallTimeout: AbortSignal | null = null; // the current call's timeout signal (truncation classification)
+  /** True when the CURRENT upstream call was killed by its time budget. */
+  const callTimedOut = (): boolean => activeCallTimeout?.aborted === true;
+  /** Signal for one upstream call: per-call cap, flow-wall remainder, user stop. */
+  const upstreamSignal = (): AbortSignal => {
+    const remaining = flowWallAt - Date.now();
+    const callTimeout = AbortSignal.timeout(Math.max(8_000, Math.min(285_000, remaining)));
+    activeCallTimeout = callTimeout;
+    return typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([callTimeout, taskSignal])
+      : callTimeout;
+  };
+  /** Abortable wrapper for engines that don't take a signal (the keyless
+   *  z-ai fallback): errors the stream when the budget fires so the reader
+   *  loop sees the same AbortError a gateway fetch would. */
+  const signalGuardedStream = (
+    src: ReadableStream<Uint8Array>,
+    signal: AbortSignal
+  ): ReadableStream<Uint8Array> =>
+    new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const onAbort = () => {
+          try {
+            controller.error(new DOMException('The operation was aborted due to timeout', 'AbortError'));
+          } catch { /* already errored/closed */ }
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+        const reader = src.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          controller.close();
+        } catch (e) {
+          try { controller.error(e); } catch { /* already errored */ }
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+          try { reader.cancel(); } catch { /* best effort */ }
+        }
+      },
+      cancel(reason) {
+        try { src.cancel(reason); } catch { /* best effort */ }
+      },
+    });
   const callUpstream = (body: Record<string, any>): Promise<Response> =>
     kiloFallback
       ? (async () => {
           // z-ai engine bridge: same two models, OpenAI-compatible Response —
           // reasoning flags map onto the SDK's thinking switch.
           const { zaiUpstreamResponse } = await import('@/lib/zai-llm');
-          return zaiUpstreamResponse({
+          const signal = upstreamSignal();
+          const res = await zaiUpstreamResponse({
             messages: body.messages ?? [],
             stream: body.stream === true,
             temperature: body.temperature,
@@ -1075,12 +1234,19 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
                 ? 'enabled'
                 : 'disabled',
           });
+          if (body.stream === true && res.body) {
+            return new Response(signalGuardedStream(res.body, signal), {
+              status: res.status,
+              headers: res.headers,
+            });
+          }
+          return res;
         })()
       : fetch(url, {
           method: 'POST',
           headers,
           body: JSON.stringify(body),
-          signal,
+          signal: upstreamSignal(),
         });
 
   /**
@@ -1161,7 +1327,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       }
       return json({ detail: 'Task aborted' }, 499);
     }
-    const detail = e instanceof Error ? e.message : 'Connection error';
+    const isBudgetAbort = callTimedOut() || (e as any)?.name === 'TimeoutError' || (e as any)?.name === 'AbortError';
+    const detail = isBudgetAbort
+      ? 'Le modèle a mis trop de temps à répondre (limite de temps de la plateforme). Réessayez — la question reste dans la conversation.'
+      : e instanceof Error
+        ? e.message
+        : 'Connection error';
     if (sessionId && chatId) {
       await clearThinkingStatus();
       await emit({ type: 'chat:message:error', data: { error: { content: detail }, done: true } });
@@ -1196,7 +1367,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // always lands in time. Gated on the chat still being untitled so
   // follow-up turns never churn an existing title.
   const titlePromise: Promise<string | null> = (async () => {
-    if (!isSavedChatId(chatId) || !backgroundTasks.title_generation || isTemporaryChatId(chatId)) {
+    if (
+      isContinuation ||
+      !isSavedChatId(chatId) ||
+      !backgroundTasks.title_generation ||
+      isTemporaryChatId(chatId)
+    ) {
       return null;
     }
     try {
@@ -1220,7 +1396,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     done = true,
     output?: any[] | null,
     files?: any[] | null,
-    rawContent?: string | null
+    rawContent?: string | null,
+    extraMeta?: Record<string, any> | null
   ) => {
     if (!isSavedChatId(chatId) || !assistantMessageId) return;
     // rawContent: the full generated text BEFORE document-block extraction
@@ -1240,12 +1417,13 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       ...(usage ? { usage } : {}),
       ...(files && files.length ? { files } : {}),
       ...(webCitations ? { sources: webCitations } : {}),
-      ...(done || llmContent || usedSkills.length
+      ...(done || llmContent || usedSkills.length || extraMeta
         ? {
             meta: {
               ...(done ? { response_ended_at: nowSec() } : {}),
               ...(llmContent ? { llm_content: llmContent } : {}),
               ...(usedSkills.length ? { used_skills: usedSkills } : {}),
+              ...(extraMeta ?? {}),
             },
           }
         : {}),
@@ -1470,7 +1648,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   if (sessionId) {
     const runStreamBody = async (): Promise<Response> => {
     const completionId = crypto.randomUUID();
-    let aggregate = '';
+    // Continuation seeding: the interrupted round's partial text starts INSIDE
+    // `aggregate` and the native accumulator — every emitted snapshot then
+    // carries base+new (the frontend REPLACES output/content wholesale, so
+    // without the seed the first event would wipe the partial code off the
+    // screen), and the final done event naturally carries the full text.
+    let aggregate = contBase?.content ?? '';
     let usage: any = null;
 
     // Reasoning tag detection (Python tag_output_handler port): plain-choices
@@ -1485,7 +1668,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       if (output.length) {
         await emit({
           type: 'chat:completion',
-          data: { id: completionId, done: false, output },
+          data: {
+            id: completionId,
+            done: false,
+            output: contBase ? [...contBase.output, ...output] : output,
+          },
         });
       }
     };
@@ -1493,7 +1680,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // Native reasoning channel (Kilo gateway / OpenRouter-style providers):
     // `delta.reasoning` carries the chain-of-thought separately from the
     // content — full structured `output` snapshots from the first chunk on.
-    const nativeReasoning = new NativeReasoningAccumulator();
+    // Continuation rounds use a distinct item-id suffix: the round's thinking
+    // renders as its own block while the (seeded) message item carries the
+    // full base+new content under the round's own id.
+    const nativeReasoning = new NativeReasoningAccumulator(isContinuation ? '_c' : '');
+    if (contBase?.content) nativeReasoning.pushContent(contBase.content);
     let lastNativeEmit = 0;
     const emitNative = async (force = false) => {
       const now = Date.now();
@@ -1503,7 +1694,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       if (output.length) {
         await emit({
           type: 'chat:completion',
-          data: { id: completionId, done: false, output },
+          data: {
+            id: completionId,
+            done: false,
+            output: contBase ? [...contBase.output, ...output] : output,
+          },
         });
       }
     };
@@ -1624,7 +1819,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // back (the UI shows no text meanwhile) and rewritten by the repair call
     // at stream end; a clean answer is released untouched.
     let narrationBuf = '';
-    let narrationMode: 'buffering' | 'suppressing' | 'passthrough' = 'buffering';
+    // Continuation rounds start mid-code: the narration hold-back (and its
+    // stream-end repair, which would rewrite base+new as one text) must never
+    // engage — everything flows through untouched.
+    let narrationMode: 'buffering' | 'suppressing' | 'passthrough' = isContinuation
+      ? 'passthrough'
+      : 'buffering';
     const narrationPush = (delta: string): string => {
       if (narrationMode === 'passthrough') return delta;
       narrationBuf += delta;
@@ -1674,6 +1874,16 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
 
     const processContentDelta = async (delta: string): Promise<void> => {
       aggregate += delta;
+      if (contBase && !nativeReasoning.active) {
+        // Continuation round before any (new) reasoning: plain append — the
+        // base already rides `aggregate` and the screen; no narration valve,
+        // no <think> tag detection on mid-code text. Once reasoning for this
+        // round arrives, the native branch takes over (snapshots carry the
+        // seeded base+new content).
+        await clearThinkingStatus();
+        await emitContentDelta(delta);
+        return;
+      }
       if (nativeReasoning.active) {
         // Structured snapshots only (plain deltas would double-append).
         nativeReasoning.pushContent(delta);
@@ -1786,7 +1996,86 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       }
     };
 
-    const consumeUpstream = async (response: Response): Promise<'completed' | 'restarted'> => {
+    /** Compute the round's current full text (continuation-aware: the base
+     *  is seeded inside aggregate / the native accumulator, so this is always
+     *  base+new — what finalizeTruncated persists and what the auto-continue
+     *  round would re-load as ITS base). */
+    const currentRoundText = (): string => {
+      try {
+        if (nativeReasoning.active) {
+          return getOutputText(nativeReasoning.snapshot(Date.now()) as any) || aggregate;
+        }
+        const snap = reasoning.snapshot(Date.now()) as any;
+        return getOutputText(snap) || aggregate;
+      } catch {
+        return aggregate;
+      }
+    };
+
+    /**
+     * Graceful time-budget truncation (serverless auto-continue).
+     *
+     * A thinking-model generation of a very long code file can outrun the
+     * platform's maxDuration (Vercel caps a function at 300s on this plan —
+     * measured repro: 53.9KB of landing-page code streamed, then the raw
+     * "Chat completion stream failed" banner). Instead of that banner:
+     *
+     *   1. emit `nelth:continue` — a bridge-private marker (an unknown event
+     *      type for the compiled frontend: harmless without the bridge);
+     *   2. persist the partial answer (done:false, raw text intact) so the
+     *      continuation round and any reload see exactly where it stopped;
+     *   3. emit the normal done event carrying the partial — the loader.js
+     *      SSE bridge WITHHOLDS it and re-requests with __nelth_continue (a
+     *      fresh serverless invocation with its own full budget), piping the
+     *      continuation's events into the same message: the code continues in
+     *      ONE message, no user action. Without the bridge (native socket
+     *      topology, outdated cache) the done event simply finalizes the
+     *      partial — graceful either way, never an error banner.
+     */
+    const finalizeTruncated = async (): Promise<Response> => {
+      const nativeFinish = nativeReasoning.finish();
+      let truncatedOutput: any[] | null;
+      let truncatedContent: string;
+      if (nativeFinish.usedStructured) {
+        const nativeOut = nativeFinish.output ?? [];
+        truncatedOutput = contBase ? [...contBase.output, ...nativeOut] : nativeOut;
+        truncatedContent = nativeFinish.content;
+      } else {
+        const fr = reasoning.finish();
+        const tagOut = fr.output ?? [];
+        truncatedOutput = fr.usedStructured ? (contBase ? [...contBase.output, ...tagOut] : tagOut) : null;
+        truncatedContent = fr.usedStructured ? fr.content : aggregate;
+      }
+      console.warn(
+        `[v12-flow] time budget exhausted mid-generation (${FLOW_WALL_MS}ms) — ` +
+          `truncated at ${truncatedContent.length} chars for auto-continue`
+      );
+      await clearThinkingStatus();
+      await emit({ type: 'nelth:continue', data: { reason: 'time-budget', contentLength: truncatedContent.length } });
+      await emit({
+        type: 'status',
+        data: { action: 'chat', description: 'Génération longue — poursuite automatique…', done: true },
+      });
+      await persistAssistant(truncatedContent, usage, false, truncatedOutput, null, truncatedContent, {
+        truncated: true,
+        file_intent: userAskedForFile,
+      });
+      finishTask();
+      await emit({
+        type: 'chat:completion',
+        data: {
+          done: true,
+          ...(truncatedOutput ? { output: truncatedOutput, content: truncatedContent } : { content: truncatedContent }),
+          ...(usage ? { usage } : {}),
+          ...(webCitations?.length ? { sources: webCitations } : {}),
+        },
+      });
+      return nullJson();
+    };
+
+    const consumeUpstream = async (
+      response: Response
+    ): Promise<'completed' | 'restarted' | 'truncated'> => {
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -1821,6 +2110,18 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           // message done from the stop flow itself).
           console.log('[v12-flow] generation aborted by user');
         } else {
+          // Time-budget abort with a substantial partial → graceful
+          // truncation for the auto-continue chain (no error banner — the
+          // exact "Chat completion stream failed on long code" complaint).
+          // Anything else (early network failure, empty stream) keeps the
+          // original error surface.
+          const timedOut =
+            callTimedOut() ||
+            (e as any)?.name === 'TimeoutError' ||
+            (e as any)?.name === 'AbortError';
+          if (timedOut && currentRoundText().trim() && sessionId && chatId) {
+            return 'truncated';
+          }
           console.error('[v12-flow] stream error', e);
           await clearThinkingStatus();
           await emit({
@@ -1837,7 +2138,13 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // with that ONE pack's full instructions injected after the model's own
     // marker message — a tool-call round trip. The 19 other packs never
     // enter the context (Claude.ai-style lazy loading).
+    let pass2Truncated = false;
     const pass1 = await consumeUpstream(upstream);
+    // Time budget exhausted mid-code (pass 1) → graceful truncation: the
+    // auto-continue chain takes over; nothing after this point should run.
+    if (pass1 === 'truncated') {
+      return await finalizeTruncated();
+    }
     // Stream ended before the gate could decide (very short answer, no
     // marker): release the held content tokens through the normal machinery
     // (reasoning already streamed live — nothing to release there).
@@ -1887,14 +2194,28 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
             return nullJson();
           }
           skillGate = null; // pass 2 streams freely (no gate)
-          await consumeUpstream(res2);
+          const pass2 = await consumeUpstream(res2);
+          if (pass2 === 'truncated') {
+            pass2Truncated = true;
+          }
         } catch (e) {
           if (!taskSignal.aborted) {
-            console.error('[v12-flow] skill pass-2 failed', e);
-            await emit({
-              type: 'chat:message:error',
-              data: { error: { content: 'Chat completion stream failed' }, done: true },
-            });
+            // The pass-2 call itself died (rare: TTFB longer than the budget
+            // remainder). With streamed partial content this is still the
+            // graceful truncation path — otherwise the original error banner.
+            const timedOut =
+              callTimedOut() ||
+              (e as any)?.name === 'TimeoutError' ||
+              (e as any)?.name === 'AbortError';
+            if (timedOut && aggregate.trim() && sessionId && chatId) {
+              pass2Truncated = true;
+            } else {
+              console.error('[v12-flow] skill pass-2 failed', e);
+              await emit({
+                type: 'chat:message:error',
+                data: { error: { content: 'Chat completion stream failed' }, done: true },
+              });
+            }
           }
         } finally {
           await emit({
@@ -1903,6 +2224,10 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           });
         }
       }
+    }
+    // Truncation hit during the skill pass-2 stream → same graceful path.
+    if (pass2Truncated) {
+      return await finalizeTruncated();
     }
 
     // Final reasoning snapshot (closes open reasoning items with duration).
@@ -1920,11 +2245,20 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     let finalOutput: any[] | null;
     let finalContent: string;
     if (nativeFinish.usedStructured) {
-      finalOutput = nativeFinish.output;
+      // Continuation rounds: keep the interrupted rounds' reasoning items
+      // ahead of this round's — the done event replaces the whole output
+      // array on the frontend (and persistence) with the composed history.
+      const nativeOut = nativeFinish.output ?? [];
+      finalOutput = contBase ? [...contBase.output, ...nativeOut] : nativeOut;
       finalContent = nativeFinish.content;
     } else {
       const finalReasoning = reasoning.finish();
-      finalOutput = finalReasoning.usedStructured ? finalReasoning.output : null;
+      const tagOut = finalReasoning.output ?? [];
+      finalOutput = finalReasoning.usedStructured
+        ? contBase
+          ? [...contBase.output, ...tagOut]
+          : tagOut
+        : null;
       finalContent = finalReasoning.usedStructured ? finalReasoning.content : aggregate;
     }
 

@@ -1092,33 +1092,149 @@ html.nsrc-lock{overflow:hidden}
 
       const chatId = bodyObj.chat_id || null;
       const messageId = bodyObj.id || null;
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      try {
-        for (;;) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          buffer += decoder.decode(chunk.value, { stream: true });
-          let idx;
-          while ((idx = buffer.indexOf('\n')) >= 0) {
-            const line = buffer.slice(0, idx).trim();
-            buffer = buffer.slice(idx + 1);
-            if (!line.startsWith('data:')) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === '[DONE]') continue;
-            try {
-              const env = JSON.parse(payload);
-              if (env && typeof env === 'object' && env.data && env.data.type) {
-                pushEvent(env); // full socket-event envelope from the backend
+      // Envelope ids (authoritative): a NEW chat's id is generated server-side
+      // and only exists on the event envelopes — the continuation request must
+      // carry it (plus the target assistant message id) explicitly.
+      let envChatId = chatId;
+      let envMessageId = messageId;
+
+      // ---- Auto-continue chain (long code vs the serverless time cap) ----
+      // The backend caps a completion at its time budget (Vercel maxDuration
+      // ~300s). When a thinking-model generation of a very long code file
+      // outruns it, the backend emits the `nelth:continue` marker with the
+      // partial answer: WITHHOLD the round's done event, re-request with
+      // __nelth_continue (a FRESH serverless invocation with its own full
+      // budget) and keep piping the events into the same fake-socket stream.
+      // The compiled app just sees one long generation — the code lands in a
+      // single message, no error banner, no user action. Without the bridge
+      // marker the behavior is exactly the previous one.
+      const MAX_CONT_ROUNDS = 3;
+      const contCtl = new AbortController();
+      let contRounds = 0;
+      let truncated = false; // marker seen in the CURRENT response
+      let everTruncated = false;
+      const abortChain = () => {
+        try {
+          contCtl.abort();
+        } catch (e) {
+          /* already aborted */
+        }
+      };
+      if (init && init.signal) {
+        if (init.signal.aborted) abortChain();
+        else init.signal.addEventListener('abort', abortChain, { once: true });
+      }
+
+      const readEvents = async (response) => {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        try {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf('\n')) >= 0) {
+              const line = buffer.slice(0, idx).trim();
+              buffer = buffer.slice(idx + 1);
+              if (!line.startsWith('data:')) continue;
+              const payload = line.slice(5).trim();
+              if (!payload || payload === '[DONE]') continue;
+              let env;
+              try {
+                env = JSON.parse(payload);
+              } catch (e) {
+                continue; // skip malformed line
               }
-            } catch (e) {
-              /* skip malformed line */
+              if (!env || typeof env !== 'object' || !env.data || !env.data.type) continue;
+              if (typeof env.chat_id === 'string' && env.chat_id) envChatId = env.chat_id;
+              if (typeof env.message_id === 'string' && env.message_id) envMessageId = env.message_id;
+              const t = env.data.type;
+              // Bridge-private marker: the backend hit its time budget with a
+              // partial answer. (Harmless without this layer — the compiled
+              // app's dispatcher ignores unknown event types.)
+              if (t === 'nelth:continue') {
+                truncated = true;
+                everTruncated = true;
+                continue;
+              }
+              // Withhold the truncated round's done event — superseded by the
+              // continuation chain (or the bare-done fallback below).
+              if (truncated && t === 'chat:completion' && env.data.data && env.data.data.done) {
+                continue;
+              }
+              // Post-truncation error/list events would close the message on
+              // the app side while the chain is still working — swallow them.
+              if (truncated && (t === 'chat:message:error' || t === 'chat:list')) {
+                continue;
+              }
+              pushEvent(env); // full socket-event envelope from the backend
             }
           }
+        } catch (e) {
+          /* client aborted — the app's own abort flow takes over */
+          abortChain();
         }
-      } catch (e) {
-        /* client aborted — the app's own abort flow takes over */
+      };
+
+      await readEvents(res);
+      while (truncated && contRounds < MAX_CONT_ROUNDS && !contCtl.signal.aborted && envMessageId) {
+        truncated = false;
+        contRounds++;
+        try {
+          const contBody = Object.assign({}, bodyObj, {
+            __nelth_continue: true,
+            chat_id: envChatId || bodyObj.chat_id || undefined,
+            id: envMessageId,
+          });
+          if (contBody.chat_id === undefined) delete contBody.chat_id;
+          const contInit = Object.assign({}, init, {
+            body: JSON.stringify(contBody),
+            signal: contCtl.signal,
+          });
+          const res2 = await nativeFetch(input, contInit);
+          const ct2 = (res2.headers.get('content-type') || '').toLowerCase();
+          if (!ct2.includes('text/event-stream')) break; // JSON error path → fallback finalize
+          await readEvents(res2);
+        } catch (e) {
+          break; // network/abort → fallback finalize
+        }
+      }
+      if (init && init.signal) {
+        try {
+          init.signal.removeEventListener('abort', abortChain);
+        } catch (e) {
+          /* best effort */
+        }
+      }
+
+      // Fallback finalize: a truncated round whose continuation chain could
+      // not complete (round cap reached / continuation request failed).
+      // A BARE done event (no content) makes the compiled app finalize with
+      // the message's CURRENT accumulated content — the full chain output or
+      // the partial, either way graceful — and a hint tells the user how to
+      // finish manually when the cap was the limit.
+      if (everTruncated && envMessageId) {
+        pushEvent({
+          chat_id: envChatId,
+          message_id: envMessageId,
+          data: { type: 'chat:completion', data: { done: true } },
+        });
+        if (truncated) {
+          pushEvent({
+            chat_id: envChatId,
+            message_id: envMessageId,
+            data: {
+              type: 'status',
+              data: {
+                action: 'chat',
+                description: 'Limite de temps atteinte — tapez « continue » pour poursuivre la génération',
+                done: true,
+              },
+            },
+          });
+        }
       }
 
       // The socket-mode HTTP response is `null` JSON — mirror it exactly so
