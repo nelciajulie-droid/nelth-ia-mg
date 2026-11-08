@@ -1,0 +1,249 @@
+import type { ApiUser } from '@/lib/auth';
+import {
+  vibesGenerateVideo,
+  vibesPollBatch,
+  downloadVibesVideo,
+  type VibesAspectRatio,
+  type VibesResolution,
+} from '@/lib/imagine/vibes';
+
+/**
+ * Built-in video generation engine — Nelth vibes gateway (nelcia.space-z.ai).
+ *
+ * Text→video only in V1: the animate (image→video) endpoint requires the
+ * source image to live in the vibes project's own media library, which the
+ * chat pipeline cannot populate (chat images come from the Nelthai engine).
+ *
+ * The chain mirrors image-generation.ts:
+ *
+ *   • submit   — POST /api/vibes/videos/generate → batchId (fast retry on a
+ *                quick 502: no job was created server-side, an immediate
+ *                re-submit costs nothing);
+ *   • poll     — POST /api/vibes/batches/{id}/poll?timeout=5 every ~4s until
+ *                isComplete, tolerating a few consecutive poll blips (the
+ *                batch keeps running server-side);
+ *   • download — grab the MP4 bytes before the CDN URL expires;
+ *   • persist  — through the files upload pipeline so the chat message
+ *                carries a durable /api/v1/files/{id}/content URL.
+ *
+ * Live phases ('sending' | 'rendering' | 'finalizing') are surfaced through
+ * onPhase so the UI can label the generating card, exactly like images.
+ */
+
+export type VideoPhase = 'sending' | 'rendering' | 'finalizing';
+
+export interface GenerateVideoOptions {
+  /** Live phases — displayed on the generating card. */
+  onPhase?: (phase: VideoPhase) => void;
+  /** Fired when a submission failed and another one starts. */
+  onRetry?: (attemptIndex: number, totalAttempts: number) => void;
+  /** Target aspect ratio (default 16:9). */
+  aspectRatio?: VibesAspectRatio;
+  /** Target resolution (default 480p — observed ~35-60s at 480p). */
+  resolution?: VibesResolution;
+}
+
+export type GeneratedVideo = { bytes: Buffer; contentType: string };
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Global budget keeps the whole flow inside the serverless budget (Vercel
+ * maxDuration 300s): ~215s of submit+poll+download, then persistence.
+ */
+const RETRY_GLOBAL_DEADLINE_MS = 215_000;
+/** A submit that fails fast (<20s) left no server-side job → retry at once. */
+const FAST_SUBMIT_FAIL_MS = 20_000;
+const MAX_SUBMIT_ATTEMPTS = 3;
+/** How long a single batch may take to complete before the turn fails. */
+const POLL_TIMEOUT_MS = 180_000;
+const POLL_INTERVAL_MS = 4_000;
+/** Consecutive poll failures tolerated before giving up on a batch. */
+const MAX_POLL_BLIPS = 4;
+
+/** Collect the playable video URLs of a batch snapshot. */
+function videoUrlsOf(batch: { content?: VibesBatchContentLike[] }): string[] {
+  const urls = (batch.content ?? [])
+    .map((c) => (c && typeof c.videoUrl === 'string' ? c.videoUrl : null))
+    .filter((u): u is string => /^https?:\/\//i.test(u));
+  return [...new Set(urls)];
+}
+
+type VibesBatchContentLike = { videoUrl?: unknown };
+
+/**
+ * Poll a video batch to completion → the generated video URLs.
+ * Throws on batch error, poll exhaustion or timeout.
+ */
+async function waitForVibesVideo(batchId: string): Promise<string[]> {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let blips = 0;
+  let lastError: unknown = null;
+
+  for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Video generation timed out after ${Math.round(POLL_TIMEOUT_MS / 1000)}s` +
+          (lastError instanceof Error ? ` (last poll error: ${lastError.message})` : '')
+      );
+    }
+    try {
+      const batch = await vibesPollBatch(batchId);
+      blips = 0;
+
+      if (batch.hasError === true) {
+        throw new Error(
+          `Video generation failed: ${typeof batch.error === 'string' && batch.error ? batch.error : 'the batch ended in error'}`
+        );
+      }
+
+      const urls = videoUrlsOf(batch);
+      // The batch flips isComplete only after the MP4 is fully rendered —
+      // videoUrl may appear earlier (while isLoading) but the bytes are only
+      // final then. Wait for the terminal state, EXCEPT when the URL has
+      // been stable across two consecutive polls (belt and braces for
+      // batches whose isComplete never flips).
+      if (batch.isComplete === true && urls.length) return urls;
+
+      if (batch.isComplete === true && !urls.length) {
+        throw new Error('Video generation failed: the batch completed without a video');
+      }
+    } catch (e) {
+      // A terminal outcome parsed above must propagate immediately.
+      if (e instanceof Error && e.message.startsWith('Video generation')) throw e;
+      lastError = e;
+      if (++blips >= MAX_POLL_BLIPS) {
+        throw new Error(
+          `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+}
+
+/**
+ * Generate a video with the vibes engine → raw MP4 bytes.
+ *
+ * Submission is retried when it fails FAST (a quick 502 means no job was
+ * created server-side); a batch that already runs is never re-rolled, only
+ * its polling continues until the global deadline.
+ */
+export async function generateVideo(
+  prompt: string,
+  options: GenerateVideoOptions = {}
+): Promise<GeneratedVideo> {
+  if (!prompt || !prompt.trim()) {
+    throw new Error('Prompt is required for video generation');
+  }
+
+  const deadline = Date.now() + RETRY_GLOBAL_DEADLINE_MS;
+  let lastFailure: unknown = null;
+
+  for (let attempt = 0; attempt < MAX_SUBMIT_ATTEMPTS; attempt++) {
+    // Only the SUBMIT is retried, and only on fast failures — a slow failure
+    // or a batch already accepted leaves the retry loop (the poll phase
+    // handles its own transient blips).
+    if (attempt > 0 && Date.now() > deadline) break;
+
+    const submitStartedAt = Date.now();
+    try {
+      options.onPhase?.('sending');
+      const { batchId } = await vibesGenerateVideo({
+        prompt: prompt.trim(),
+        aspectRatio: options.aspectRatio,
+        resolution: options.resolution,
+        variations: 1,
+      });
+
+      options.onPhase?.('rendering');
+      const urls = await waitForVibesVideo(batchId);
+
+      options.onPhase?.('finalizing');
+      let lastErr: unknown = new Error('The video service produced no downloadable video');
+      for (const url of urls) {
+        try {
+          return await downloadVibesVideo(url);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      lastFailure = lastErr;
+    } catch (e) {
+      lastFailure = e;
+      // Poll-phase terminal failures (batch error/timeout) are NOT retried —
+      // the subject was likely refused; only fast submit blips restart.
+      if (e instanceof Error && e.message.startsWith('Video generation')) {
+        console.error('[video-generation] batch failed:', e.message);
+        break;
+      }
+      const fast = Date.now() - submitStartedAt < FAST_SUBMIT_FAIL_MS;
+      if (!fast) {
+        console.error('[video-generation] submit failed (slow — no retry):', e);
+        break;
+      }
+      console.warn(`[video-generation] fast submit blip (attempt ${attempt + 1}) — retrying`);
+      if (attempt < MAX_SUBMIT_ATTEMPTS - 1) {
+        try {
+          options.onRetry?.(attempt + 1, MAX_SUBMIT_ATTEMPTS);
+        } catch {
+          /* UI callback must never break the retry chain */
+        }
+      }
+    }
+  }
+
+  // Every attempt failed (or the budget ran out): a French, actionable message.
+  console.error(
+    '[video-generation] all attempts failed:',
+    lastFailure instanceof Error ? lastFailure.message : String(lastFailure)
+  );
+  throw new Error(
+    'La génération de vidéo a échoué après plusieurs tentatives. Le service de vidéos est probablement momentanément indisponible ou a refusé ce sujet. Essayez de reformuler votre demande (décrivez la scène, le mouvement, le style) puis relancez.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Persistence through the files upload pipeline
+// ---------------------------------------------------------------------------
+
+export type SavedVideoFile = {
+  id: string;
+  url: string;
+  name: string;
+  type: string;
+  content_type: string;
+};
+
+/** Generate + persist through the files upload pipeline (image parity). */
+export async function generateAndSaveVideo(
+  user: ApiUser,
+  prompt: string,
+  metadata: Record<string, any> = {},
+  options: GenerateVideoOptions = {}
+): Promise<SavedVideoFile> {
+  const { bytes, contentType } = await generateVideo(prompt, options);
+  const { uploadFileHandler } = await import('@/server/routers/files');
+  const fileItem = await uploadFileHandler(
+    user,
+    {
+      bytes,
+      filename: `generated-video-${Date.now()}.mp4`,
+      contentType: contentType.startsWith('video/') ? contentType : 'video/mp4',
+    },
+    { model: 'video-generation', source: 'video_generation', ...metadata },
+    false
+  );
+  const id = fileItem?.id;
+  if (!id) {
+    throw new Error('Failed to save the generated video');
+  }
+  const meta = (fileItem?.meta ?? {}) as Record<string, any>;
+  return {
+    id,
+    url: `/api/v1/files/${id}/content`,
+    name: meta.name ?? fileItem?.filename ?? 'generated-video.mp4',
+    type: 'video',
+    content_type: meta.content_type ?? 'video/mp4',
+  };
+}
