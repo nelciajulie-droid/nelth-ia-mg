@@ -6,6 +6,11 @@ import { APP_REGISTRY, getAppById } from '@/lib/apps/app-registry';
 import type { AppDefinition, AppConnection, ConnectorListItem } from '@/lib/apps/app-types';
 import { WEBUI_AUTH_COOKIE_SAME_SITE, WEBUI_AUTH_COOKIE_SECURE } from '@/lib/models/auths';
 import { googleCredsConfigured } from '@/lib/connectors/google';
+import {
+  googleClientId,
+  googleClientSecret,
+  googleConnectorRedirectUri,
+} from '@/lib/apps/google-oauth-defaults';
 
 /**
  * @ App mention picker — HTTP surface. /api/v1/connectors/*
@@ -19,6 +24,14 @@ import { googleCredsConfigured } from '@/lib/connectors/google';
  *                              "not configured" answer listing the env vars.
  *   GET    /:id/callback    → OAuth callback: validates the state cookie,
  *                              exchanges the code, upserts the connection.
+ *
+ * Google round-trip: the user's Cloud client authorizes ONLY the production
+ * root as redirect URI (lib/apps/google-oauth-defaults.ts) — Google lands the
+ * code+state on "/" and loader.js forwards them to /:id/callback (the state
+ * cookie rides along: Path=/, same-origin fetch). When the redirect's origin
+ * doesn't match the requesting origin (sandbox/localhost), /:id/connect
+ * answers an actionable message instead of a redirect that could never
+ * complete (the state cookie would live on the other origin).
  *   DELETE /:id             → disconnect.
  *
  * Built-in connectors (web_search) need no connection — always `ready`.
@@ -82,10 +95,12 @@ const ENV_BY_PROVIDER: Record<string, string[]> = {
 
 function providerCredentials(provider: string): ProviderEndpoints | null {
   if (provider === 'google') {
-    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) return null;
+    // Real user credentials (env GOOGLE_CLIENT_ID/SECRET first, committed
+    // defaults otherwise — see lib/apps/google-oauth-defaults.ts).
+    if (!googleClientId() || !googleClientSecret()) return null;
     return {
-      clientId: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      clientId: googleClientId(),
+      clientSecret: googleClientSecret(),
       authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
       tokenUrl: 'https://oauth2.googleapis.com/token',
     };
@@ -133,6 +148,15 @@ function providerCredentials(provider: string): ProviderEndpoints | null {
     };
   }
   return null;
+}
+
+/** Redirect URI sent to the provider — authorize AND token exchange must
+ * carry the exact same value. Google: the single root URI its Cloud client
+ * authorizes (loader.js forwards the root return to the callback). Others:
+ * the origin-based callback, navigated to directly. */
+function connectorRedirectUri(provider: string, origin: string, appId: string): string {
+  if (provider === 'google') return googleConnectorRedirectUri();
+  return `${origin}/api/v1/connectors/${appId}/callback`;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +270,31 @@ export const routes: Route[] = [
       }
 
       const origin = requestOrigin(ctx.req);
-      const redirectUri = `${origin}/api/v1/connectors/${app.id}/callback`;
+      const redirectUri = connectorRedirectUri(provider, origin, app.id);
+
+      // Google redirects ONLY to the URI its Cloud client authorizes (the
+      // production root). Starting the flow from another origin (sandbox,
+      // localhost) would strand the state cookie on the wrong origin — the
+      // return could never validate. Say so instead of a dead-end redirect.
+      if (provider === 'google') {
+        let redirectOrigin = '';
+        try {
+          redirectOrigin = new URL(redirectUri).origin;
+        } catch {
+          redirectOrigin = '';
+        }
+        if (redirectOrigin && redirectOrigin !== origin) {
+          return ctx.json({
+            status: 'unavailable_here',
+            detail:
+              `Connexion ${app.name} indisponible depuis ${origin} : ce client Google n'autorise la ` +
+              `redirection que vers ${redirectUri} — ouvrez le site de production et relancez « Connecter » ` +
+              `depuis le sélecteur @.`,
+            env: [],
+          });
+        }
+      }
+
       const state = `${uuid()}.${ctx.user!.id}.${app.id}`;
 
       const params = new URLSearchParams({
@@ -294,9 +342,11 @@ export const routes: Route[] = [
       }
 
       // Token exchange (standard code flow — same mechanics the login OAuth
-      // callback runs, scoped to the connector's permissions).
+      // callback runs, scoped to the connector's permissions). The
+      // redirect_uri MUST equal the authorize request's — the same helper
+      // builds it (Google: its authorized root, forwarded from "/").
       const origin = requestOrigin(ctx.req);
-      const redirectUri = `${origin}/api/v1/connectors/${app.id}/callback`;
+      const redirectUri = connectorRedirectUri(provider, origin, app.id);
       const tokenBody = new URLSearchParams({
         grant_type: 'authorization_code',
         code,

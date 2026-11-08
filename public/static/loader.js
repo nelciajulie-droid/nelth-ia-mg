@@ -3174,8 +3174,23 @@ html.dark .nap-chip{background:rgba(255,255,255,.05);border-color:rgba(255,255,2
 .nap-chip-x:hover{opacity:1;background:rgba(0,0,0,.07)}
 html.dark .nap-chip-x:hover{background:rgba(255,255,255,.12)}
 
+/* --- root OAuth return toast (connection result after the Google
+       round-trip lands on "/") --- */
+.nap-oauth-toast{position:fixed;left:50%;bottom:calc(26px + env(safe-area-inset-bottom));
+  transform:translateX(-50%) translateY(8px);z-index:10000;max-width:min(460px,calc(100vw - 32px));
+  padding:11px 18px;border-radius:12px;background:#ffffff;border:1px solid #e5e5e5;color:#0d0d0d;
+  font-size:13.5px;font-weight:500;line-height:1.45;text-align:center;cursor:pointer;
+  box-shadow:0 12px 40px rgba(0,0,0,.14),0 2px 8px rgba(0,0,0,.06);
+  opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s cubic-bezier(.22,1,.36,1)}
+.nap-oauth-toast.nap-toast-show{opacity:1;transform:translateX(-50%);pointer-events:auto}
+html.dark .nap-oauth-toast{background:#2b2b2b;border-color:rgba(255,255,255,.1);color:#ececec;
+  box-shadow:0 12px 44px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.3)}
+.nap-oauth-toast.nap-ok{border-color:rgba(5,150,105,.45)}
+.nap-oauth-toast.nap-err{border-color:rgba(220,38,38,.45)}
+
 @media (prefers-reduced-motion:reduce){
   .nap-popup{transition:none}
+  .nap-oauth-toast{transition:none}
 }
     `;
     document.head.appendChild(style);
@@ -3814,6 +3829,132 @@ html.dark .nap-chip-x:hover{background:rgba(255,255,255,.12)}
     }
     return chatFetch(input, init);
   };
+
+  // ------------------------------------------------- root OAuth return flow
+  // The user's Google Cloud client authorizes ONLY the site ROOT as redirect
+  // URI — the OAuth round-trip lands on "/?code=…&state=<uuid>.<userId>.<appId>".
+  // Forward it to the connector callback (the state cookie — Path=/ — rides
+  // the same-origin fetch), then toast the REAL result and refresh the
+  // registry so chips/statuses update. Also handles the callback's full-page
+  // 307 return "/?connected=<appId>" and a refused consent "?error=…&state=…".
+  // Login-OAuth states (dot-free hex) are left alone: that flow is disabled
+  // and owns its own callback path.
+  const CONNECTOR_IDS = [
+    'gmail', 'gdrive', 'gcal', 'slack', 'github', 'notion', 'outlook', 'onedrive', 'web_search',
+  ];
+  let oauthToastTimer = 0;
+
+  function oauthToast(text, kind) {
+    if (!document.body) return;
+    let el = document.getElementById('nelth-oauth-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'nelth-oauth-toast';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
+      el.addEventListener('click', () => el.classList.remove('nap-toast-show'));
+      document.body.appendChild(el);
+    }
+    el.className = 'nap-oauth-toast' + (kind === 'ok' ? ' nap-ok' : kind === 'err' ? ' nap-err' : '');
+    el.textContent = text;
+    requestAnimationFrame(() => el.classList.add('nap-toast-show'));
+    if (oauthToastTimer) clearTimeout(oauthToastTimer);
+    oauthToastTimer = setTimeout(
+      () => el.classList.remove('nap-toast-show'),
+      kind === 'err' ? 8000 : 6000
+    );
+  }
+
+  function cleanRootUrl() {
+    try {
+      history.replaceState(null, '', location.pathname);
+    } catch (e) {
+      /* private mode — the params simply stay */
+    }
+  }
+
+  /** Connector states are "<uuid>.<userId>.<appId>" — the last dot-part must
+   *  be a known connector id (login states are dot-free → null). */
+  function connectorStateApp(state) {
+    if (!state) return null;
+    const parts = String(state).split('.');
+    if (parts.length < 3) return null;
+    const appId = parts[parts.length - 1];
+    return CONNECTOR_IDS.indexOf(appId) >= 0 ? appId : null;
+  }
+
+  function appNameOf(appId) {
+    const known = registry.find((c) => c && c.id === appId);
+    return known && known.name ? known.name : appId;
+  }
+
+  function celebrateConnect(appId) {
+    loadRegistry(true).then(() => {
+      oauthToast(appNameOf(appId) + ' — connecté ✓', 'ok');
+    });
+  }
+
+  (function handleRootOAuthReturn() {
+    const qs = new URLSearchParams(location.search);
+    const backConnected = qs.get('connected');
+    const oauthCode = qs.get('code');
+    const oauthError = qs.get('error');
+    const oauthState = qs.get('state');
+    const stateApp = connectorStateApp(oauthState);
+
+    if (backConnected && CONNECTOR_IDS.indexOf(backConnected) >= 0) {
+      // Full-page return from the callback's 307 → clean + celebrate.
+      cleanRootUrl();
+      celebrateConnect(backConnected);
+      return;
+    }
+    if (oauthCode && stateApp) {
+      // Root OAuth return → forward to the callback; fetch keeps the session
+      // (authHeaders) and the state cookie (same-origin, Path=/).
+      cleanRootUrl();
+      const fwd =
+        '/api/v1/connectors/' +
+        encodeURIComponent(stateApp) +
+        '/callback?code=' +
+        encodeURIComponent(oauthCode) +
+        '&state=' +
+        encodeURIComponent(oauthState);
+      oauthToast('Finalisation de la connexion ' + appNameOf(stateApp) + '…', '');
+      fetch(fwd, { headers: authHeaders(), credentials: 'same-origin' })
+        .then((r) =>
+          r.text().then((t) => ({ ok: r.ok, url: r.url || '', text: t }))
+        )
+        .then((res) => {
+          // The callback answers 307 → "/?connected=<appId>"; fetch follows
+          // it — response.url reveals the final landing.
+          const m = /[?&]connected=([^&]+)/.exec(res.url);
+          if (res.ok && m) {
+            celebrateConnect(decodeURIComponent(m[1]));
+          } else {
+            let detail = '';
+            try {
+              detail = (JSON.parse(res.text) || {}).detail || '';
+            } catch (e) {
+              /* non-JSON error body */
+            }
+            oauthToast(
+              detail || 'Connexion échouée — relancez-la depuis le sélecteur @.',
+              'err'
+            );
+            loadRegistry(true);
+          }
+        })
+        .catch(() => {
+          oauthToast('Connexion impossible — réseau indisponible.', 'err');
+        });
+      return;
+    }
+    if (oauthError && stateApp) {
+      // Consent refused at the provider (Google → ?error=access_denied).
+      cleanRootUrl();
+      oauthToast('Connexion ' + appNameOf(stateApp) + ' annulée.', 'err');
+    }
+  })();
 
   // -------------------------------------------------------------------- boot
   const start = () => {
