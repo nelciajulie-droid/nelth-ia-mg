@@ -2894,3 +2894,113 @@ html.nsrc-lock{overflow:hidden}
     start();
   }
 })();
+
+/* ====================================================================
+ * CONTROLS PANEL GUARDIAN — the chat « Contrôles » panel is retired.
+ *
+ * The header button is already hidden (custom.css hides the sliders
+ * button in the lg:mr-1 cluster), but the panel itself could still
+ * surface through three side doors:
+ *   1. the MOBILE right-edge swipe — the SwipeablePanel shell listens
+ *      for touchstart on window (bubble, passive) and reveals the
+ *      full-screen drawer (min-h-[100dvh]) from a finger dragged in
+ *      from the right edge. On a phone this fires CONSTANTLY by
+ *      accident (scrolling near the edge) — the « toujours affiché »
+ *      report. A capture-phase listener stops those touches before
+ *      the shell's listener ever sees them (left-edge sidebar swipe
+ *      untouched).
+ *   2. citation / file-nav clicks set the panel store directly
+ *      (showControls.set(true)) — auto-open.
+ *   3. any residual open state surviving a hot navigation.
+ * This layer closes the panel through its OWN Close button the frame
+ * it mounts — the app store resets to false, the drawer animates out,
+ * unmounts and releases the body scroll lock. custom.css keeps both
+ * surfaces from ever painting a frame in the meantime.
+ *
+ * Surfaces (verified unique in the compiled bundle):
+ *   • mobile drawer:  [data-swipe-panel="right"]  (the swipeable modal)
+ *   • desktop dock:   div.h-full.z-10.bg-white.dark:bg-gray-900 (the
+ *     resizable sidebar, storageKey chatControlsSize) + its 1px resize
+ *     handle sibling.
+ * The panel's Close button is locale-proof: the only textless button
+ * carrying the lucide X glyph (path starting "M6 18 18 6").
+ * ==================================================================== */
+(() => {
+  'use strict';
+  if (window.__NELTH_CONTROLS_GUARD__) return;
+  window.__NELTH_CONTROLS_GUARD__ = true;
+
+  // 1 — kill the right-edge swipe gesture at capture phase. The shell
+  //     registers touchstart on window (bubble); stopping propagation
+  //     during the window capture phase keeps the event from ever
+  //     reaching it, so the drag never starts, the drawer never mounts,
+  //     the scroll lock never engages.
+  window.addEventListener(
+    'touchstart',
+    (e) => {
+      const t = e.touches && e.touches[0];
+      if (!t) return;
+      if (t.clientX > window.innerWidth - 24) e.stopPropagation();
+    },
+    { capture: true, passive: true }
+  );
+
+  // 2 — auto-close. Cooldown: clicking Close starts a ~210ms exit
+  //     animation during which the surface is still mounted — do not
+  //     re-click (and do not dispatch Escape) until it has settled.
+  const COOLDOWN_MS = 450;
+  let lastCloseAt = 0;
+
+  function panelSurfaces() {
+    const out = [];
+    const drawer = document.querySelector('[data-swipe-panel="right"]');
+    if (drawer && drawer.isConnected) out.push(drawer);
+    const docks = document.querySelectorAll('div.h-full.z-10.bg-white.dark\\:bg-gray-900');
+    for (let i = 0; i < docks.length; i++) {
+      if (docks[i].isConnected) out.push(docks[i]);
+    }
+    return out;
+  }
+
+  function findCloseButton(surface) {
+    const btns = surface.querySelectorAll('button');
+    for (let i = 0; i < btns.length; i++) {
+      const b = btns[i];
+      if ((b.textContent || '').trim()) continue; // tab buttons carry labels
+      const path = b.querySelector('svg path');
+      const d = path ? path.getAttribute('d') || '' : '';
+      if (d.indexOf('M6 18 18 6') === 0) return b; // lucide X glyph
+    }
+    return null;
+  }
+
+  function guard() {
+    if (Date.now() - lastCloseAt < COOLDOWN_MS) return;
+    const surfaces = panelSurfaces();
+    for (let i = 0; i < surfaces.length; i++) {
+      const close = findCloseButton(surfaces[i]);
+      if (close) {
+        lastCloseAt = Date.now();
+        close.click();
+        return;
+      }
+    }
+    // No Close button (call overlay replaces the tab row) — the swipe
+    // drawer at least owns an Escape handler; give it one try.
+    if (surfaces.length && document.querySelector('[data-swipe-panel="right"]')) {
+      lastCloseAt = Date.now();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+  }
+
+  const start = () => {
+    const obs = new MutationObserver(guard);
+    obs.observe(document.body, { childList: true, subtree: true });
+    guard();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();

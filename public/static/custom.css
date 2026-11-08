@@ -55,6 +55,37 @@ div.lg\:mr-1 button:has(svg path[d^="M10.5 6h9.75"]) {
         display: none !important;
 }
 
+/* ── Chat controls panel: retired ────────────────────────────────────────────
+ * Hiding the header button (above) is not enough — the panel itself can
+ * still surface through side doors: the mobile right-edge swipe gesture
+ * (the SwipeablePanel shell reveals its full-screen drawer from a finger
+ * dragged in from the right edge — constantly accidental on phones),
+ * citation / file-nav clicks that set the panel store directly, and any
+ * residual open state surviving a hot navigation. These rules keep BOTH
+ * surfaces from ever painting a frame:
+ *   • mobile drawer: [data-swipe-panel="right"] — the swipeable modal's
+ *     root attribute, set ONLY by this panel (verified once in the
+ *     compiled bundle; the left sidebar uses no swipe panel);
+ *   • desktop dock: div.h-full.z-10.bg-white.dark:bg-gray-900 — the
+ *     resizable sidebar's className, a unique class combo in the bundle
+ *     (storageKey chatControlsSize);
+ *   • the 1px resize handle that mounts alongside the dock.
+ * loader.js (CONTROLS PANEL GUARDIAN) additionally closes the panel
+ * through its own Close button the frame it mounts, so the app store
+ * resets to false and the drawer's body scroll-lock is released —
+ * display:none alone would leave that lock armed. */
+[data-swipe-panel="right"] {
+        display: none !important;
+}
+
+div.h-full.z-10.bg-white.dark\:bg-gray-900 {
+        display: none !important;
+}
+
+div[role="separator"]:has(+ div.h-full.z-10.bg-white.dark\:bg-gray-900) {
+        display: none !important;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * LAYOUT REPAIR — geometry corrections only (visual design untouched).
  *
