@@ -84,9 +84,8 @@ function messageContent(m: any): string {
       }
       // Video-only legacy turns (vibes engine) — same natural-sentence
       // pattern: the model knows a video exists and can be iterated on.
-      // The files carry type 'file' (the compiled frontend's message grid
-      // only renders ["image","file"]) — the video nature comes from the
-      // content_type / .mp4 name.
+      // The files carry type 'video' (older turns 'file') — the video
+      // nature is read from the type / content_type / .mp4 name.
       const isVideoFile = (f: any) =>
         f?.type === 'video' ||
         String(f?.content_type ?? '').startsWith('video/') ||
@@ -1041,16 +1040,23 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         },
         sourceImage,
       });
+      // type 'video' — the compiled message grid only renders
+      // ["image","file"] (its each filters on those two types), so a video
+      // attachment NEVER paints a native file card: the loader.js layer owns
+      // the whole video display (generation card → reveal player, history
+      // players). The 'file' type showed a raw "generated-video-….mp4 — 2.3 MB"
+      // card while the URL resolved — that flash is gone.
       const files = [{
-        type: 'file',
+        type: 'video',
         url: file.url,
         name: file.name,
         content_type: file.content_type || 'video/mp4',
         size: file.size,
       }];
 
-      await emit({ type: 'chat:message:files', data: { files } });
-
+      // Persist BEFORE the files event: loader.js resolves the video URL
+      // from the chat history the moment the turn ends — the entry must
+      // already be there (first-attempt hit, no 800ms retry loops).
       if (isSavedChatId(chatId) && assistantMessageId) {
         // meta.llm_content — what the NEXT turn's LLM context sees for this
         // video turn (natural assistant sentence, image-turn parity).
@@ -1067,6 +1073,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           meta: { response_ended_at: nowSec(), llm_content: llmContent },
         } as any);
       }
+
+      await emit({ type: 'chat:message:files', data: { files } });
 
       // Title from the prompt (image-chat parity).
       if (isSavedChatId(chatId) && backgroundTasks.title_generation && !isTemporaryChatId(chatId)) {

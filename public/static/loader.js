@@ -1912,7 +1912,9 @@ html.nsrc-lock{overflow:hidden}
  *     flips to 'Generated' + final duration,
  *   • the card then IS the player: <video controls autoplay muted loop
  *     playsinline> (no lightbox hop — the video carries its own controls);
- *     the native files-grid video stays hidden.
+ *     the video attachment carries type 'video' — the compiled message
+ *     grid only maps ["image","file"], so NO native file card ever paints
+ *     (the old "generated-video-….mp4 — 2.3 MB" flash is gone).
  *
  * Works with both event transports (native socket.io and the SSE bridge):
  * it watches the DOM, not the events.
@@ -1993,11 +1995,11 @@ html.nsrc-lock{overflow:hidden}
       '.nelth-vidc-hide{display:none !important}',
 
       /* ---------------------------------------------------------- history
-         videos — the compiled frontend renders the generated video as a
-         generic FILE card (type 'file': its message grid only renders
-         ["image","file"]). This layer replaces those cards with inline
-         players (.nelth-vidh); the URL is resolved from the chat history
-         API (same path as the live reveal). */
+         videos — legacy 'file' turns render a generic FILE card (button):
+         those cards are replaced with inline players (.nelth-vidh). Newer
+         type-'video' turns render NOTHING natively — their players are
+         inserted from the resolved history entries. Same URL resolution
+         path as the live reveal (cached 15s). */
       '.nelth-vidh{width:min(100%,480px);border-radius:1rem;border:1px solid #e5e5e5;',
       'overflow:hidden;background:#000;isolation:isolate}',
       'html.dark .nelth-vidh{border-color:#262626}',
@@ -2274,11 +2276,11 @@ html.nsrc-lock{overflow:hidden}
   }
 
   // ------------------------------------------- video URL resolution (API)
-  // The compiled frontend renders the generated video as a generic FILE
-  // card (its message grid only renders ["image","file"]) — the card shows
-  // the NAME but never exposes the URL in the DOM. The URL is read from the
-  // chat history API: the message element's id IS the history key, and the
-  // backend persists the message BEFORE the files event / done status.
+  // The video attachment carries type 'video' — the compiled message grid
+  // maps only ["image","file"], so nothing renders natively and the URL is
+  // never in the DOM. It is read from the chat history API: the message
+  // element's id IS the history key, and the backend persists the message
+  // BEFORE the files event / done status (reordered for exactly this).
   const chatCache = new Map(); // chatId → { at, data }
   function fetchChatCached(chatId, maxAgeMs) {
     const hit = chatCache.get(chatId);
@@ -2355,10 +2357,13 @@ html.nsrc-lock{overflow:hidden}
   }
 
   /** Detect the generated video's native FILE CARD (a button whose label
-   *  carries the .mp4 name) inside the message → async URL resolution →
-   *  reveal. */
+   *  carries the .mp4 name — LEGACY 'file'-typed turns; newer turns attach
+   *  type 'video' and render nothing natively) inside the message → async
+   *  URL resolution → reveal. The native card is hidden SYNCHRONOUSLY the
+   *  moment it appears (the scoped observer calls this before paint) — the
+   *  raw "generated-video-….mp4 — 2.3 MB" card must never be seen. */
   function checkReveal(state) {
-    if (state.revealed || state.resolving || !state.card.isConnected) return;
+    if (state.revealed || !state.card.isConnected) return;
     const messageEl = state.statusBox.closest('[id^="message-"]') || state.card.parentElement;
     if (!messageEl) return;
     const btns = messageEl.querySelectorAll('button');
@@ -2367,26 +2372,31 @@ html.nsrc-lock{overflow:hidden}
       if (state.card.contains(btn)) continue;
       const txt = (btn.textContent || '').trim();
       if (/\.mp4(\s|$)/i.test(txt)) {
-        state.nativeCard = btn;
-        state.resolving = true;
-        resolveVideoUrl(messageEl, 4).then((entry) => {
-          state.resolving = false;
-          if (entry && entry.url && !state.revealed && state.card.isConnected) {
-            reveal(state, entry.url);
-          }
-        });
+        // hide BEFORE paint — and re-hide if Svelte recreated the button
+        // while the URL resolution is still in flight.
+        if (state.nativeCard !== btn) {
+          state.nativeCard = btn;
+          hideNativeCard(state);
+        }
+        if (!state.resolving) {
+          state.resolving = true;
+          resolveVideoUrl(messageEl, 4).then((entry) => {
+            state.resolving = false;
+            if (entry && entry.url && !state.revealed && state.card.isConnected) {
+              reveal(state, entry.url);
+            }
+          });
+        }
         return;
       }
     }
   }
 
   // ------------------------------------------------- history video players
-  /** File cards (.mp4 names) in messages WITHOUT an active generation card
-   *  → replace with an inline player. The URL comes from the chat history
-   *  (same resolution path); the native card stays hidden, restorable. */
-  const upgradedCards = new WeakSet();
-
-  function buildHistoryPlayer(btn, entry) {
+  /** The inline player DOM (.nelth-vidh): <video controls> + a slim bar
+   *  (name · Télécharger). Shared by the legacy-card swap and the
+   *  type-'video' message players. */
+  function buildPlayerDom(entry) {
     const wrap = document.createElement('div');
     wrap.className = 'nelth-vidh';
     const video = document.createElement('video');
@@ -2410,7 +2420,18 @@ html.nsrc-lock{overflow:hidden}
     bar.appendChild(dl);
     wrap.appendChild(video);
     wrap.appendChild(bar);
+    return wrap;
+  }
 
+  /** LEGACY 'file'-typed turns: file cards (.mp4 names) in messages WITHOUT
+   *  an active generation card → replace with an inline player. The URL
+   *  comes from the chat history (same resolution path); the native card is
+   *  hidden at once (never painted on chat load — restored if the resolution
+   *  fails). */
+  const upgradedCards = new WeakSet();
+
+  function buildHistoryPlayer(btn, entry) {
+    const wrap = buildPlayerDom(entry);
     // Insert after the card's own wrapper; hide the card (never the whole
     // files grid — other files of the message stay visible).
     const cardWrap = btn.parentElement && !/overflow-x-auto/.test(String(btn.parentElement.className || ''))
@@ -2439,19 +2460,114 @@ html.nsrc-lock{overflow:hidden}
       }
       if (owned) continue;
       upgradedCards.add(btn);
+      // Hide the native card IMMEDIATELY (before it ever paints on chat
+      // load) — the player replaces it; restored if resolution fails.
+      const cardWrap = btn.parentElement && !/overflow-x-auto/.test(String(btn.parentElement.className || ''))
+        ? btn.parentElement
+        : btn;
+      cardWrap.classList.add('nelth-vidc-hide');
       void resolveVideoUrl(messageEl, 2).then((entry) => {
-        if (entry && entry.url && btn.isConnected) buildHistoryPlayer(btn, entry);
+        if (entry && entry.url && btn.isConnected) {
+          buildHistoryPlayer(btn, entry);
+        } else if (cardWrap.isConnected) {
+          cardWrap.classList.remove('nelth-vidc-hide');
+        }
       });
+    }
+  }
+
+  /** type-'video' turns (the new attach type): the compiled message grid
+   *  renders NOTHING for them (it only maps ["image","file"]) — no native
+   *  card exists to swap. The player is inserted where the files grid would
+   *  sit (first child of the .chat-assistant inner container), the URL
+   *  resolved from the chat history API. */
+  const upgradedVideos = new WeakMap(); // messageEl → { entry, wrap }
+  const videosResolvedEmpty = new WeakSet(); // messageEl → looked, no video
+  const videosInFlight = new WeakSet(); // resolution guard
+
+  function insertHistoryVideoPlayer(messageEl, entry) {
+    const wrap = buildPlayerDom(entry);
+    const container = messageEl.querySelector('.chat-assistant > div') || messageEl;
+    container.insertBefore(wrap, container.firstChild);
+    return wrap;
+  }
+
+  function upgradeHistoryVideos() {
+    const els = document.querySelectorAll('[id^="message-"]');
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      if (videosResolvedEmpty.has(el) || videosInFlight.has(el)) continue;
+      if (el.querySelector('.nelth-vidh') || el.querySelector('.nelth-vidc')) continue;
+      // Legacy 'file'-typed message (a .mp4 card button is in the DOM) →
+      // upgradeHistoryCards owns it — never both paths on one message.
+      let hasLegacyCard = false;
+      const btns = el.querySelectorAll('button');
+      for (let j = 0; j < btns.length; j++) {
+        if (/\.mp4(\s|$)/i.test((btns[j].textContent || '').trim())) { hasLegacyCard = true; break; }
+      }
+      if (hasLegacyCard) continue;
+      // Messages with an ACTIVE generation card → the live reveal owns them.
+      let owned = false;
+      for (const s of cards.values()) {
+        if (s.card.isConnected && el.contains(s.card)) { owned = true; break; }
+      }
+      if (owned) continue;
+      const rec = upgradedVideos.get(el);
+      if (rec) {
+        // Svelte re-render dropped the player — re-insert (URL known).
+        if (!el.contains(rec.wrap) && el.isConnected) {
+          rec.wrap = insertHistoryVideoPlayer(el, rec.entry);
+        }
+        continue;
+      }
+      videosInFlight.add(el);
+      void videoEntryOf(el, 15000).then((entry) => {
+        videosInFlight.delete(el);
+        if (!entry || !entry.url || !el.isConnected) {
+          if (!entry) videosResolvedEmpty.add(el);
+          return;
+        }
+        const wrap = insertHistoryVideoPlayer(el, entry);
+        upgradedVideos.set(el, { entry, wrap });
+      }).catch(() => { videosInFlight.delete(el); });
     }
   }
 
   // ------------------------------------------------------------- scanning
   function scan() {
-    // 1 — drop dead cards (chat switch, message re-render, navigation).
+    // 1 — dead cards. A card whose MESSAGE vanished (chat switch, re-render,
+    //     navigation) is dropped at once. A card whose STATUS ROW vanished
+    //     while the video is still unrevealed gets ONE resolution attempt
+    //     first — with type 'video' nothing renders natively, and the app
+    //     can drop the status row at the done status: the video entry is
+    //     already persisted (the backend upserts BEFORE the files event), so
+    //     resolving here reveals instead of losing the player. Revealed
+    //     cards survive a dead status row — the player stays.
     for (const [box, state] of cards) {
-      if (!state.card.isConnected || !box.isConnected) {
+      if (!state.card.isConnected) {
         dropCard(state);
         cards.delete(box);
+        continue;
+      }
+      if (!box.isConnected && !state.revealed && !state.resolveStarted && !state.resolving) {
+        state.resolveStarted = true;
+        state.resolving = true;
+        const messageEl = state.card.closest('[id^="message-"]');
+        if (messageEl) {
+          resolveVideoUrl(messageEl, 3).then((entry) => {
+            state.resolving = false;
+            if (entry && entry.url && !state.revealed && state.card.isConnected) {
+              reveal(state, entry.url);
+            } else if (!state.revealed) {
+              dropCard(state);
+              cards.delete(state.statusBox);
+            }
+          });
+        } else {
+          state.resolving = false;
+          dropCard(state);
+          cards.delete(box);
+        }
       }
     }
 
@@ -2487,10 +2603,12 @@ html.nsrc-lock{overflow:hidden}
       //     between scans; this is the safety net).
       checkReveal(state);
 
-      // 5 — generation ended (the shimmer row is gone): resolve the video
-      //     URL from the chat history — the message is persisted BEFORE the
-      //     done status fires. Reveal on success; hand the message back to
-      //     the native rendering when no video is found (error / abort).
+      // 5 — generation ended (the shimmer row is gone — or the row itself
+      //     left, handled in step 1): resolve the video URL from the chat
+      //     history — the message is persisted BEFORE the done status fires.
+      //     Reveal on success; drop the card when no video is found (error /
+      //     abort) — with type 'video' there is no native rendering to hand
+      //     back to, the error message takes over.
       if (!state.revealed && !live && !state.resolveStarted) {
         state.resolveStarted = true;
         state.resolving = true;
@@ -2516,9 +2634,11 @@ html.nsrc-lock{overflow:hidden}
       }
     }
 
-    // 6 — history videos: .mp4 file cards without an active generation →
-    //     inline players (URL resolved from the chat history API).
+    // 6 — history videos: legacy 'file' cards (.mp4 buttons) → inline
+    //     players; newer type-'video' messages render nothing natively —
+    //     their players are inserted from the resolved history entries.
     upgradeHistoryCards();
+    upgradeHistoryVideos();
   }
 
   let scanPending = false;

@@ -310,7 +310,9 @@ export async function generateAndSaveVideo(
     id,
     url: `/api/v1/files/${id}/content`,
     name: meta.name ?? fileItem?.filename ?? 'generated-video.mp4',
-    type: 'file',
+    // 'video' — the compiled message grid maps only ["image","file"], so
+    // nothing renders natively (loader.js owns the whole video display).
+    type: 'video',
     content_type: meta.content_type ?? 'video/mp4',
     size: bytes.length,
   };
