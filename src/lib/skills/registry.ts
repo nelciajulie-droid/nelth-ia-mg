@@ -209,8 +209,6 @@ ${content}
  */
 export class SkillGate {
   private buffer = '';
-  /** Reasoning deltas received while undecided — replayed on 'plain'. */
-  public pendingReasoning = '';
   /** True once a valid skill marker was seen (restart needed). */
   public restart = false;
   public skillName: string | null = null;

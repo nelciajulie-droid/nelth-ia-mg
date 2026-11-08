@@ -1508,12 +1508,14 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       }
     };
 
-    // Thinking-phase UX (Kilo-style gateways buffer the whole chain-of-thought
-    // server-side — verified live: the entire reasoning arrives in one burst
-    // at the exact moment the content starts): announce the block immediately
-    // so the user sees "Thinking…" during the silent phase instead of staring
-    // at nothing, and anchor the duration to the request send so the final
-    // "Réflexion pendant N secondes" reflects the real thinking time.
+    // Thinking-phase UX: announce the block immediately so the user sees
+    // "Réflexion" during the (possibly silent) thinking phase instead of
+    // staring at nothing, and anchor the duration to the request send so the
+    // final "Réflexion pendant N secondes" reflects the real thinking time.
+    // With the skill gate no longer holding reasoning, incremental providers
+    // stream their chain-of-thought LIVE into this block as it is produced;
+    // a provider that genuinely buffers server-side still lands one burst,
+    // which the paced reveal below types out progressively.
     if (isKilo && reqBody.reasoning?.enabled === true) {
       nativeReasoning.announceThinking(upstreamStartedAt);
       await emitNative(true);
@@ -1731,21 +1733,24 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
             ? obj.choices[0].delta.reasoning_content
             : '');
         if (reasoningDelta) {
-          if (skillGate && !skillGate.decided) {
-            skillGate.pendingReasoning += reasoningDelta;
-          } else {
-            await processReasoningDelta(reasoningDelta);
-          }
+          // LIVE reasoning through the skill gate: the USE_SKILL marker can
+          // only ever appear in the CONTENT channel, so reasoning deltas
+          // never affect the gate decision — stream them to the user the
+          // moment they arrive. (The old pendingReasoning buffer held the
+          // ENTIRE chain-of-thought silently through the thinking phase: a
+          // thinking model produces reasoning for ~20-30s BEFORE any content
+          // exists, so the user stared at a bare "Réflexion" placeholder and
+          // only saw the full reasoning text in one frame when the first
+          // content chunk finally decided the gate — the exact bug this fixes.)
+          await processReasoningDelta(reasoningDelta);
         }
         if (delta) {
           if (skillGate && !skillGate.decided) {
             const action = skillGate.push(delta);
             if (action === 'plain') {
-              // Marker definitively absent → release the held prefix
-              // (buffered reasoning first, then content) and stream on.
-              const pending = skillGate.pendingReasoning;
-              skillGate.pendingReasoning = '';
-              if (pending) await processReasoningDelta(pending);
+              // Marker definitively absent → release the held content prefix
+              // and stream on. (Reasoning was already streamed live above —
+              // nothing reasoning-side is ever held.)
               const flush = skillGate.flushPlain();
               if (flush) await processContentDelta(flush);
             }
@@ -1834,11 +1839,9 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // enter the context (Claude.ai-style lazy loading).
     const pass1 = await consumeUpstream(upstream);
     // Stream ended before the gate could decide (very short answer, no
-    // marker): release the held tokens through the normal machinery.
+    // marker): release the held content tokens through the normal machinery
+    // (reasoning already streamed live — nothing to release there).
     if (pass1 === 'completed' && skillGate && !skillGate.decided) {
-      const pending = skillGate.pendingReasoning;
-      skillGate.pendingReasoning = '';
-      if (pending) await processReasoningDelta(pending);
       const flush = skillGate.flushPlain();
       if (flush) await processContentDelta(flush);
     }

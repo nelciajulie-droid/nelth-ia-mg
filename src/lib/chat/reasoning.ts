@@ -293,20 +293,18 @@ export function parseCompleteOutput(content: string, startedAt = Date.now()): Ou
  * one reasoning item followed by one message item — following the exact
  * same emission contract as the tag-based accumulator above.
  *
- * Kilo-style gateways buffer the WHOLE chain-of-thought server-side and
- * deliver it in a single burst at the exact moment the content starts
- * (verified live: first reasoning chunk and first content chunk share the
- * same timestamp). Without the request-start anchor, the measured
- * "thinking duration" is therefore ~0s ("Thought for less than a second")
- * and without the synthetic placeholder the user stares at nothing during
- * the entire silent thinking phase. `announceThinking()` fixes both.
+ * Incremental providers stream the chain-of-thought LIVE: each delta grows
+ * the reasoning item and the user watches the model think in real time. A
+ * provider that buffers the reasoning server-side and delivers it as one
+ * late burst gets the paced-reveal typing instead (advanceReveal). The
+ * request-start anchor keeps the measured thinking duration honest in both
+ * modes (the phase starts when the request is sent, not when chunks land).
  */
 export class NativeReasoningAccumulator {
   private reasoningText = '';
   /** Chars of the buffered chain-of-thought currently visible in snapshots
-   *  (paced reveal — the Kilo-style gateways deliver the whole reasoning in
-   *  ONE burst, so the emission is decoupled from the ingestion: see
-   *  advanceReveal()). */
+   *  (paced reveal — decouples emission from ingestion for burst-style
+   *  providers; see advanceReveal()). */
   private revealedChars = 0;
   private contentText = '';
   /** Request-send timestamp — anchors the reasoning phase (see announceThinking). */
@@ -363,16 +361,15 @@ export class NativeReasoningAccumulator {
   }
 
   /**
-   * Paced reveal step. Kilo-style gateways buffer the ENTIRE chain-of-thought
-   * server-side and deliver it in a single burst the instant the content
-   * starts (verified live: all reasoning chunks share the arrival timestamp
-   * of the first content chunk). Emitting the burst as-is produces an empty
-   * "Thinking…" block that fills and completes within a single frame — the
-   * user never sees the reasoning live. Instead the burst is re-emitted
-   * progressively (~16 ticks regardless of length ≈ 1.5s at a 90ms tick),
-   * giving the o1-style "watch it think" experience. Incremental providers
-   * are unaffected: their deltas are small, the reveal catches up with the
-   * buffer within a tick or two. Returns true while text remains hidden.
+   * Paced reveal step — only relevant for burst-style providers that land
+   * the whole chain-of-thought at once. Emitting a large burst as-is
+   * produces an empty "Thinking…" block that fills within a single frame —
+   * the user never sees the reasoning live. Instead the burst is re-emitted
+   * progressively (~24 ticks ≈ 1-1.5s at the 90ms tick), giving the
+   * o1-style "watch it think" experience. Incremental providers are
+   * unaffected: their deltas are small, the reveal catches up with the
+   * buffer within a tick or two and the text is effectively live.
+   * Returns true while text remains hidden.
    */
   advanceReveal(): boolean {
     const total = this.reasoningText.length;
