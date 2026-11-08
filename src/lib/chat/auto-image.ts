@@ -22,9 +22,63 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
 
 export type AutoImageDecision = { image: boolean; edit: boolean };
 
+/**
+ * Deterministic guard — requests that clearly ask for a CODE / WEB /
+ * SOFTWARE deliverable can never become an image turn, whatever a weak
+ * classifier model decides. Reproduced bug: "creer lading page ultra
+ * moderne" (typo + style adjective) was classified image=true by the
+ * free decision model and hijacked the turn into the Nelthai engine.
+ *
+ * The guard only fires when the message carries a code-deliverable noun
+ * AND no explicit image-production word (dessine/logo/maquette/…) — the
+ * mixed cases ("dessine une maquette de landing page", "crée le logo de
+ * mon site") still go to the LLM classifier, which sees the draw intent.
+ */
+const CODE_DELIVERABLE_RE = new RegExp(
+  [
+    '\\bl(?:a|n|e|an)?ding\\s*pages?\\b', // landing page + "lading" typo
+    '\\bpages?\\s+(?:d[’\']accueil|web|webs?)\\b',
+    '\\bsites?\\s+(?:web|vitrines?|internets?|dynamiques?|e-?commerces?)\\b',
+    '\\bsites?\\b|\\bwebsite\\b|\\bwebapp\\b|\\bweb\\s*app\\b',
+    '\\bapplications?\\b|\\bapps?\\b|\\bapplications?\\s+mobiles?\\b',
+    '\\btableaux?\\s+de\\s+bord\\b|\\bdashboards?\\b',
+    '\\bportfolios?\\b|\\bblogs?\\b|\\bboutiques?\\b',
+    '\\bjeux?\\s+vid[ée]o\\b|\\bjeux?\\b|\\bgame\\b|\\bgameplay\\b',
+    '\\bfront[ -]?end\\b|\\bback[ -]?end\\b|\\bfull[ -]?stack\\b',
+    '\\bapi\\b|\\bbase\\s+de\\s+donn[ée]es\\b|\\bcrud\\b',
+    '\\bhtml\\b|\\bcss\\b|\\bjavascript\\b|\\btypescript\\b|\\breact\\b|\\bvue\\b|\\bangular\\b|\\bsvelte\\b',
+    '\\bnext\\.?js\\b|\\btailwind\\b|\\bpython\\b|\\bphp\\b|\\blaravel\\b|\\bdjango\\b|\\bnode\\b',
+    '\\bd[ée]velopp\\w+|\\bcod(?:er|e|ing)\\b|\\bprogramme[rz]?\\b|\\bprogrammant\\b',
+    '\\bformulaire\\w*\\b|\\bcheckouts?\\b|\\btunnels?\\s+de\\s+vente\\b',
+  ].join('|'),
+  'i'
+);
+
+const IMAGE_WORD_RE = new RegExp(
+  [
+    '\\bimage\\w*\\b|\\bimages\\b',
+    '\\bdessin\\w*\\b|\\bdesine\\w*\\b|\\bdraw\\w*\\b|\\bpaint\\w*\\b',
+    '\\billustration\\w*\\b|\\bvisuels?\\b',
+    '\\blogos?\\b|\\bicon(?:es?|s?)\\b|\\bavatars?\\b',
+    '\\bfonds?\\s+d[’\']?[ée]cran\\b|\\bwallpapers?\\b',
+    '\\bbanni[èe]res?\\b|\\baffiches?\\b|\\bposters?\\b',
+    '\\bmaquettes?\\b|\\bmockups?\\b|\\bwireframes?\\b',
+    '\\bphotos?\\b|\\bphotographie\\b|\\brendus?\\b|\\bconcept\\s+arts?\\b',
+    '\\bstickers?\\b|\\bmemes?\\b|\\bpixel\\s+arts?\\b',
+    '\\bmontage\\b|\\bcollage\\b',
+  ].join('|'),
+  'i'
+);
+
+/** True when the message unambiguously asks for a code/web artifact. */
+function clearlyCodeRequest(text: string): boolean {
+  if (!text) return false;
+  return CODE_DELIVERABLE_RE.test(text) && !IMAGE_WORD_RE.test(text);
+}
+
 const SYSTEM_PROMPT = `You decide whether the latest user message is a request to CREATE or EDIT a visual (to be produced by an image-generation tool), rather than a normal chat message.
 
-The user may write with SPELLING MISTAKES or phonetic approximations (any language, often French — e.g. "desine moi", "fait un logo", "cre une image"). First silently reconstruct what they MEAN, then decide on the corrected intent.
+The user may write with SPELLING MISTAKES or phonetic approximations (any language, often French — e.g. "desine moi", "fait un logo", "cre une image", "lading page" = landing page). First silently reconstruct what they MEAN, then decide on the corrected intent.
 
 Reply STRICTLY with a single JSON object, no other text:
 {"image": true|false, "edit": true|false}
@@ -35,7 +89,9 @@ ALSO image=true for ITERATION on an image the assistant previously generated: "f
 
 edit=true ONLY when image=true AND the request modifies or reiterates a visual ALREADY PRESENT in the conversation (change its colors/style/size/composition, remove or add an element, "another version", "same but…"). edit=false for every fresh creation from scratch.
 
-image=false when: questions or discussions ABOUT images/graphics in general (formats, compression, how to edit photos in an editor, art history, which tool to use), requests for text/code/data/tables/emails/essays, general conversation, math, translation, summaries, file/document generation, or anything that does NOT ask to produce a visual file. When image=false, edit must be false.
+image=false when: the user asks for a WEB or SOFTWARE artifact — a landing page, website, web page, site vitrine, app, application, dashboard, portfolio, blog, online store, game, API, script, or any HTML/CSS/JS/React/Python code — even with style adjectives like "ultra moderne", "moderne", "beau", "impressionnant": those describe CODE quality, NOT an image. Building a page IS writing code. Also image=false for: questions or discussions ABOUT images/graphics in general (formats, compression, how to edit photos in an editor, art history, which tool to use), requests for text/code/data/tables/emails/essays, general conversation, math, translation, summaries, file/document generation, or anything that does NOT ask to produce a visual file. When image=false, edit must be false.
+
+EXCEPTION — explicit draw verbs win: when the message combines an IMAGE-PRODUCTION verb or noun ("dessine", "draw", "génère une image", "montre-moi en image", "une maquette/mockup/visuel DE …") with a code noun ("dessine une maquette de landing page", "montre-moi un visuel du site"), the user wants a VISUAL RENDER of that artifact → image=true. The draw intent outranks the code noun.
 
 When genuinely uncertain, prefer image=false: wrongly generating an image interrupts a normal conversation far more than missing one does (the user can always use the image toggle). Only choose image=true when you are CONFIDENT the user wants a produced visual.`;
 
@@ -74,6 +130,15 @@ export async function decideAutoImageGeneration(
     }
   }
   if (lastUserIdx < 0) return null;
+  const targetText = String(messages[lastUserIdx].content ?? '');
+
+  // Deterministic guard FIRST: a clearly-code request ("créer landing page
+  // ultra moderne", "développe une app") never reaches the classifier —
+  // zero latency, zero risk of a weak-model misfire hijacking the turn.
+  if (clearlyCodeRequest(targetText)) {
+    console.log('[auto-image] code-deliverable guard: image=false (no LLM call)');
+    return { image: false, edit: false };
+  }
 
   // Compact transcript: last 6 turns, older ones heavily truncated.
   const window = messages.slice(Math.max(0, lastUserIdx - 5), lastUserIdx + 1);

@@ -283,6 +283,13 @@ export async function buildPreLoadedSkillsMessage(
 The skill packs below were loaded automatically because the user's current request clearly matches them. Their instructions are BINDING for this task: your answer MUST follow their methods, structure, standards and output formats wherever they apply — code style, section layout, vocabulary, file formats, checklists. An answer that ignores the loaded skills is a FAILED answer, even if it is otherwise correct. Apply them concretely, not symbolically: follow their step-by-step methods and produce the output shapes they define. These skills are ALREADY loaded: never output USE_SKILL(...) for any skill listed below, answer directly instead. You may still begin your reply with USE_SKILL(other_skill) if a DIFFERENT skill from the Agent Skills index is genuinely required for this task.
 Remember the platform's document capability: when the user explicitly asks for a downloadable file, emit a \`\`\`document filename="..." block; otherwise keep code and documents inline in normal fenced code blocks.
 
-${blocks}`,
+${blocks}
+
+MANDATORY COMPLIANCE CHECKLIST — run it mentally BEFORE writing your answer:
+1. For EACH <skill> block above, name (internally) the exact output shape it mandates: section order, file format, code conventions, checklists.
+2. Draft your answer following that shape — do not improvise your own structure when a skill defines one.
+3. Style adjectives from the user ("ultra moderne", "beau", "professionnel") refine the skill's standards; they never replace them.
+4. Where your habits or defaults conflict with a loaded skill, THE SKILL WINS — every time.
+5. Do not mention, summarize or cite these instructions: apply them silently. The user judges the result, not the effort.`,
   };
 }
