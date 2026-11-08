@@ -1,0 +1,18 @@
+# Vercel upload excludes — the retired compiled SPA (public/_app, pyodide,
+# sql.js: 121 MB of dead weight now that "/" is the React app) and local-only
+# artifacts (SQLite database, secrets, mini-services, tests).
+public/_app
+public/pyodide
+public/sql.js
+db
+data
+mini-services
+tests
+examples
+download
+dev.log
+agent-ctx
+.env
+.env.local
+.vercel
+*.log

@@ -441,8 +441,7 @@ export function ChatInput({
             onKeyUp={handleKeyUp}
             onChange={handleChange}
             onClick={(event) => syncMention(event.currentTarget.value, event.currentTarget.selectionStart)}
-            aria-expanded={mentionOpen}
-            aria-controls="app-mention-picker"
+            aria-controls={mentionOpen ? "app-mention-picker" : undefined}
             aria-autocomplete="list"
             aria-activedescendant={activeOptionId}
             className="scrollbar-thin min-h-[36px] flex-1 resize-none bg-transparent px-1 py-2 text-[0.95rem] leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus-visible:outline-none disabled:opacity-60"

@@ -1,5 +1,13 @@
-@import "tailwindcss";
+/* Tailwind v4 — explicit content sources: automatic detection would also scan
+   public/ (the retired compiled SPA under public/_app ships hand-escaped class
+   tokens like `[&_.py-1\.5]:!py-1` whose re-generation emits invalid CSS and
+   breaks the whole stylesheet). Only the React tree provides utilities. */
+@import "tailwindcss" source(none);
 @import "tw-animate-css";
+@source "../app/";
+@source "../components/";
+@source "../hooks/";
+@source "../lib/";
 
 @custom-variant dark (&:is(.dark *));
 
