@@ -1925,7 +1925,11 @@ html.nsrc-lock{overflow:hidden}
   window.__NELTH_VID_CARD__ = true;
 
   const VID_STATUS_RE = /^Generating video/i;
-  const PHASE_RE = /Generating video\s*[·—–-]\s*([a-z]+)/i;
+  // 'Generating video (9:16) · rendering' — the ratio tag (group 1) rides
+  // along since the AI now picks the best format per prompt (16:9 / 1:1 /
+  // 9:16 only); the live phase is group 2.
+  const PHASE_RE = /Generating video\s*(?:\((\d{1,2}:\d{1,2})\))?\s*[·—–-]\s*([a-z]+)/i;
+  const RATIO_RE = /\((\d{1,2}:\d{1,2})\)/;
   const reduceMotionMq = window.matchMedia
     ? window.matchMedia('(prefers-reduced-motion: reduce)')
     : { matches: false };
@@ -2134,6 +2138,32 @@ html.nsrc-lock{overflow:hidden}
     state.card.setAttribute('aria-label', label === 'Generated' ? 'Generated video' : 'Generating video — ' + label);
   }
 
+  /** Placeholder shape follows the CHOSEN ratio (9:16 → tall, 1:1 → square)
+   *  so the user sees the selected format while the video renders — the
+   *  reveal then refines to the video's natural dimensions (16:9 is the CSS
+   *  default, nothing to do). */
+  function applyPlaceholderRatio(state) {
+    if (state.ratioApplied || !state.ratio || state.ratio === '16:9') return;
+    var tall = state.ratio === '9:16';
+    var w = tall ? 288 : 420; // 9:16 width capped by the 512px height budget
+    var h = tall ? 512 : 420;
+    state.card.style.width = 'min(100%, ' + w + 'px)';
+    state.card.style.aspectRatio = w + ' / ' + h;
+  }
+
+  /** Status text → footer label + placeholder ratio ('rendering · 9:16').
+   *  The ratio tag arrives with the very first status ('Generating video
+   *  (9:16)…') and persists across phase rows. */
+  function applyStatusText(state, text) {
+    var phaseM = text.match(PHASE_RE);
+    var ratioM = text.match(RATIO_RE);
+    if (ratioM) state.ratio = ratioM[1];
+    applyPlaceholderRatio(state);
+    var label = phaseM ? phaseM[2].toLowerCase() : 'Generating video';
+    if (state.ratio) label += ' · ' + state.ratio;
+    setLabel(state, label);
+  }
+
   /** Hide the native FILE CARD of the generated video (the card IS the
    *  player now). Only the card's own wrapper — never the whole files grid
    *  (other files of the message stay visible). */
@@ -2241,6 +2271,7 @@ html.nsrc-lock{overflow:hidden}
       startedAt: Date.now(),
       seconds: 0,
       label: 'Generating video',
+      ratio: null,
       revealed: false,
       finishedAt: null,
       ratioApplied: false,
@@ -2588,14 +2619,13 @@ html.nsrc-lock{overflow:hidden}
     for (const state of cards.values()) {
       if (!state.card.isConnected) continue;
 
-      // 3 — live phase label from the current status text. Once revealed the
-      //     footer stays on 'Generated' (the trailing '· finalizing' phase
-      //     must not overwrite it).
+      // 3 — live phase label + chosen ratio from the current status text.
+      //     Once revealed the footer stays on 'Generated' (the trailing
+      //     '· finalizing' phase must not overwrite it).
       const live = state.statusBox.querySelector('.shimmer');
       if (live && !state.revealed) {
         const text = (live.textContent || '').trim();
-        const m = text.match(PHASE_RE);
-        setLabel(state, m ? m[1].toLowerCase() : 'Generating video');
+        applyStatusText(state, text);
       }
 
       // 4 — reveal check: the video's FILE CARD (the .mp4 button) triggers

@@ -63,21 +63,39 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Aspect-ratio / resolution hints parsed from the user's phrasing — the
  * user asks naturally ("en vertical pour un reel", "en HD") and the format
  * follows. 16:9 + 480p by default (observed ~35-60s at 480p).
+ *
+ * `aspectExplicit` is true ONLY when a format keyword was actually found in
+ * the phrasing — the caller then lets the explicit request outrank the
+ * decision model's content-based pick (the model obeys explicit formats too,
+ * this is the deterministic belt-and-braces).
  */
 export function detectVideoFormat(text: string): {
   aspectRatio: VibesAspectRatio;
+  aspectExplicit: boolean;
   resolution: VibesResolution;
 } {
   const t = text || '';
-  const aspectRatio: VibesAspectRatio = /\b(vertical|verticale|portrait|story|stories|reels?|tiktok|shorts?|9:16|16:9\s*invers[ée]?)\b/i.test(t)
-    ? '9:16'
-    : /\b(carr[ée]e?|square|1:1)\b/i.test(t)
-      ? '1:1'
-      : '16:9';
+  const verticalRe =
+    /\b(vertical|verticale|portrait|story|stories|reels?|tiktok|shorts?|9\s*[:x]\s*16|16\s*[:x]\s*9\s*invers[ée]?)\b/i;
+  const squareRe = /\b(carr[ée]e?|square|1\s*[:x]\s*1)\b/i;
+  const wideRe =
+    /\b(paysage|landscape|horizontale?|widescreen|16\s*[:x]\s*9|format\s+cin[ée]ma|cinematic\s+wide)\b/i;
+  let aspectRatio: VibesAspectRatio = '16:9';
+  let aspectExplicit = false;
+  if (verticalRe.test(t)) {
+    aspectRatio = '9:16';
+    aspectExplicit = true;
+  } else if (squareRe.test(t)) {
+    aspectRatio = '1:1';
+    aspectExplicit = true;
+  } else if (wideRe.test(t)) {
+    aspectRatio = '16:9';
+    aspectExplicit = true;
+  }
   const resolution: VibesResolution = /\b(hd|720p|haute\s+r[ée]solution|high\s*(?:quality|res)|hq)\b/i.test(t)
     ? '720p'
     : '480p';
-  return { aspectRatio, resolution };
+  return { aspectRatio, aspectExplicit, resolution };
 }
 
 /**
@@ -98,7 +116,7 @@ const MAX_POLL_BLIPS = 4;
 function videoUrlsOf(batch: { content?: VibesBatchContentLike[] }): string[] {
   const urls = (batch.content ?? [])
     .map((c) => (c && typeof c.videoUrl === 'string' ? c.videoUrl : null))
-    .filter((u): u is string => /^https?:\/\//i.test(u));
+    .filter((u): u is string => typeof u === 'string' && /^https?:\/\//i.test(u));
   return [...new Set(urls)];
 }
 

@@ -872,10 +872,14 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // image-to-image job). `autoVideo`/`autoVideoAnimate` feed section 3.4ter
   // (the vibes video engine — text→video, or image→video when an image is
   // attached / `autoVideoAnimate` flagged an "anime cette image" turn).
+  // `autoVideoRatio` carries the decision model's per-prompt format pick
+  // (16:9 / 1:1 / 9:16 ONLY — the best ratio for THIS video; an explicit
+  // format keyword in the phrasing still outranks it, see 3.4ter).
   let autoImage = false;
   let autoImageEdit = false;
   let autoVideo = false;
   let autoVideoAnimate = false;
+  let autoVideoRatio: '16:9' | '1:1' | '9:16' | undefined;
 
   if (wantsWebSearch) {
     if (await webSearchAllowed()) {
@@ -921,6 +925,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       );
       autoVideo = videoDecision?.video === true;
       autoVideoAnimate = autoVideo && videoDecision?.animate === true;
+      autoVideoRatio = videoDecision?.aspectRatio;
       autoImage = !autoVideo && imageDecision?.image === true;
       autoImageEdit = autoImage && imageDecision?.edit === true;
       if (!autoImage && !autoVideo && searchDecision?.search && searchDecision.query) {
@@ -1003,26 +1008,49 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       console.log('[v12-flow] image-to-video (animate) with a source image');
     }
 
+    // Text→video ratio — the decision model picked the best format for THIS
+    // prompt (16:9 / 1:1 / 9:16 only); an EXPLICIT format keyword in the
+    // user's phrasing always outranks the model's inference, and the keyword
+    // fallback (16:9) closes the chain when the model omitted the field.
+    // Image→video NEVER sends a ratio: the vibes animate engine follows the
+    // SOURCE image's own ratio.
+    const { detectVideoFormat } = await import('@/lib/video-generation');
+    const detected = detectVideoFormat(prompt);
+    const videoAspectRatio = sourceImage
+      ? undefined
+      : detected.aspectExplicit
+        ? detected.aspectRatio
+        : (autoVideoRatio ?? detected.aspectRatio);
+    if (!sourceImage) {
+      console.log(
+        `[v12-flow] video aspect ratio — ${videoAspectRatio}` +
+          (detected.aspectExplicit ? ' (explicit user format)' : autoVideoRatio ? ' (model pick)' : ' (default)')
+      );
+    }
+
     // Live phase label — same status-row contract as the image engine
     // ('Generating video · sending | rendering | finalizing'): the video
     // card layer in loader.js swaps the shimmer row for the generation card.
+    // The chosen ratio rides along in parentheses ('Generating video (9:16) ·
+    // rendering') so the user SEES which format was selected — and the card
+    // takes the placeholder shape of that ratio right away.
+    const ratioTag = sourceImage || !videoAspectRatio ? '' : ` (${videoAspectRatio})`;
     const videoPhaseStatus = (phase: string | null) =>
       emit({
         type: 'status',
         data: {
           action: 'video_generation',
-          description: phase ? `Generating video · ${phase}` : 'Generating video…',
+          description: phase ? `Generating video${ratioTag} · ${phase}` : `Generating video${ratioTag}…`,
           done: false,
         },
       });
     await videoPhaseStatus(null);
     await clearThinkingStatus(); // the generation card's status takes over
     try {
-      const { generateAndSaveVideo, detectVideoFormat } = await import('@/lib/video-generation');
-      const { aspectRatio, resolution } = detectVideoFormat(prompt);
+      const { generateAndSaveVideo } = await import('@/lib/video-generation');
       const file = await generateAndSaveVideo(user, prompt, { chat_id: chatId }, {
-        aspectRatio,
-        resolution,
+        aspectRatio: videoAspectRatio,
+        resolution: detected.resolution,
         onPhase: (phase) => {
           void videoPhaseStatus(phase);
         },

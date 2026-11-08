@@ -36,6 +36,7 @@ export type AutoImageDecision = { image: boolean; edit: boolean };
  */
 const CODE_DELIVERABLE_RE = new RegExp(
   [
+    '\\bsvgs?\\b', // SVG / vector markup — code, never a raster image turn
     '\\bl(?:a|n|e|an)?ding\\s*pages?\\b', // landing page + "lading" typo
     '\\bpages?\\s+(?:d[’\']accueil|web|webs?)\\b',
     '\\bsites?\\s+(?:web|vitrines?|internets?|dynamiques?|e-?commerces?)\\b',
@@ -53,6 +54,22 @@ const CODE_DELIVERABLE_RE = new RegExp(
   ].join('|'),
   'i'
 );
+
+/**
+ * SVG hard guard — "créer un SVG d'un chien" is a CODE deliverable: the
+ * assistant writes the XML markup directly in its answer. It can NEVER
+ * become an image turn, whatever draw verbs or image words accompany it
+ * ("dessine-moi le SVG d'un chien", "convertis cette image en SVG") — the
+ * image engine produces raster pictures, not SVG files. Reproduced bug:
+ * "creer un svg d'un chien" was classified image=true by the free decision
+ * model ("créer un … d'un chien" looks like a visual request) and hijacked
+ * the turn into the Nelthai engine.
+ */
+const SVG_REQUEST_RE = /\bsvgs?\b/i;
+
+function clearlySvgRequest(text: string): boolean {
+  return SVG_REQUEST_RE.test(text || '');
+}
 
 const IMAGE_WORD_RE = new RegExp(
   [
@@ -113,9 +130,9 @@ ALSO image=true for ITERATION on an image the assistant previously generated: "f
 
 edit=true ONLY when image=true AND the request modifies or reiterates a visual ALREADY PRESENT in the conversation (change its colors/style/size/composition, remove or add an element, "another version", "same but…"). edit=false for every fresh creation from scratch.
 
-image=false when: the user asks for a WEB or SOFTWARE artifact — a landing page, website, web page, site vitrine, app, application, dashboard, portfolio, blog, online store, game, API, script, or any HTML/CSS/JS/React/Python code — even with style adjectives like "ultra moderne", "moderne", "beau", "impressionnant": those describe CODE quality, NOT an image. Building a page IS writing code. Also image=false for: questions or discussions ABOUT images/graphics in general (formats, compression, how to edit photos in an editor, art history, which tool to use), requests for text/code/data/tables/emails/essays, general conversation, math, translation, summaries, file/document generation, or anything that does NOT ask to produce a visual file. When image=false, edit must be false.
+image=false when: the user asks for a WEB or SOFTWARE artifact — a landing page, website, web page, site vitrine, app, application, dashboard, portfolio, blog, online store, game, API, script, or any HTML/CSS/JS/React/Python code — even with style adjectives like "ultra moderne", "moderne", "beau", "impressionnant": those describe CODE quality, NOT an image. Building a page IS writing code. Also image=false for: any SVG or vector-graphics CODE request ("crée un SVG", "génère le SVG d'un chien", "dessine-moi un SVG", "convertis cette image en SVG") — an SVG is XML markup the assistant writes in its answer, NOT an image-generation output, and this rule OVERRIDES any draw verb; questions or discussions ABOUT images/graphics in general (formats, compression, how to edit photos in an editor, art history, which tool to use), requests for text/code/data/tables/emails/essays, general conversation, math, translation, summaries, file/document generation, or anything that does NOT ask to produce a visual raster file. When image=false, edit must be false.
 
-EXCEPTION — explicit draw verbs win: when the message combines an IMAGE-PRODUCTION verb or noun ("dessine", "draw", "génère une image", "montre-moi en image", "une maquette/mockup/visuel DE …") with a code noun ("dessine une maquette de landing page", "montre-moi un visuel du site"), the user wants a VISUAL RENDER of that artifact → image=true. The draw intent outranks the code noun.
+EXCEPTION — explicit draw verbs win: when the message combines an IMAGE-PRODUCTION verb or noun ("dessine", "draw", "génère une image", "montre-moi en image", "une maquette/mockup/visuel DE …") with a code noun ("dessine une maquette de landing page", "montre-moi un visuel du site"), the user wants a VISUAL RENDER of that artifact → image=true. The draw intent outranks the code noun. The exception NEVER covers SVG: an SVG request stays image=false whatever the verb — an SVG is code, and the image engine cannot produce one.
 
 When genuinely uncertain, prefer image=false: wrongly generating an image interrupts a normal conversation far more than missing one does (the user can always use the image toggle). Only choose image=true when you are CONFIDENT the user wants a produced visual.`;
 
@@ -160,7 +177,14 @@ export async function decideAutoImageGeneration(
   // ultra moderne", "développe une app") never reaches the classifier —
   // zero latency, zero risk of a weak-model misfire hijacking the turn. A
   // clearly-VIDEO request ("crée une vidéo", "fais un clip") equally stays
-  // out: the video engine owns that turn, not the image engine.
+  // out: the video engine owns that turn, not the image engine. And an SVG
+  // request is ALWAYS code — even "dessine-moi le SVG d'un chien" (the
+  // classifier cannot be trusted to know an SVG is XML, so this guard runs
+  // before it, unconditionally).
+  if (clearlySvgRequest(targetText)) {
+    console.log('[auto-image] svg-code guard: image=false (no LLM call)');
+    return { image: false, edit: false };
+  }
   if (clearlyCodeRequest(targetText)) {
     console.log('[auto-image] code-deliverable guard: image=false (no LLM call)');
     return { image: false, edit: false };

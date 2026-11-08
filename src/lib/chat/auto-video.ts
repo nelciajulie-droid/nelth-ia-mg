@@ -20,7 +20,15 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
  * re-rolling from a context-free prompt.
  */
 
-export type AutoVideoDecision = { video: boolean; animate: boolean };
+export type AutoVideoDecision = {
+  video: boolean;
+  animate: boolean;
+  /** Best aspect ratio for THIS video — 16:9 / 1:1 / 9:16 ONLY, picked by
+   *  the decision model from the prompt content (an explicit user format
+   *  request always wins). Meaningful only when video=true; ignored for
+   *  animate turns (image→video follows the SOURCE image's own ratio). */
+  aspectRatio?: '16:9' | '1:1' | '9:16';
+};
 
 /**
  * Deterministic guards — requests that clearly ask for a CODE / WEB artifact
@@ -31,6 +39,7 @@ export type AutoVideoDecision = { video: boolean; animate: boolean };
  */
 const CODE_DELIVERABLE_RE = new RegExp(
   [
+    '\\bsvgs?\\b', // SVG / vector markup — code, never a video turn
     '\\bl(?:a|n|e|an)?ding\\s*pages?\\b',
     '\\bpages?\\s+(?:d[’\']accueil|web|webs?)\\b',
     '\\bsites?\\s+(?:web|vitrines?|internets?|dynamiques?|e-?commerces?)\\b',
@@ -65,6 +74,17 @@ const IMAGE_WORD_RE = new RegExp(
   'i'
 );
 
+/**
+ * SVG hard guard — an SVG request ("crée un SVG d'un chien") is a CODE
+ * deliverable the assistant writes; it can never become a video turn,
+ * whatever animate verbs accompany it. Mirror of the auto-image guard.
+ */
+const SVG_REQUEST_RE = /\bsvgs?\b/i;
+
+function clearlySvgRequest(text: string): boolean {
+  return SVG_REQUEST_RE.test(text || '');
+}
+
 const VIDEO_WORD_RE = new RegExp(
   [
     '\\bvid[ée]os?\\b|\\bvideo\\w*\\b',
@@ -96,20 +116,28 @@ const SYSTEM_PROMPT = `You decide whether the latest user message is a request t
 The user may write with SPELLING MISTAKES or phonetic approximations (any language, often French — e.g. "cre une video", "fait un clip", "anim ca"). First silently reconstruct what they MEAN, then decide on the corrected intent.
 
 Reply STRICTLY with a single JSON object, no other text:
-{"video": true|false, "animate": true|false}
+{"video": true|false, "animate": true|false, "aspectRatio": "16:9"|"1:1"|"9:16"}
 
 video=true ONLY when the user clearly wants a VIDEO FILE produced: a short clip, animation, animated scene, motion clip, reel / story / TikTok / short, promo or product video, "a video of a cat walking", a moving version of a picture… Typical phrasings (any language): "génère/crée/fais-moi une vidéo de…", "fais un clip de…", "une vidéo où…", "mets-le en vidéo", "anime cette image", "fais bouger cette photo", "make a video of…", "generate a video…", "create an animation of…", "animate this image".
 ALSO video=true when the message carries an attached image AND asks to animate/bring it to life — in that case ALSO set animate=true.
 
 animate=true ONLY when video=true AND the request animates an image ALREADY PRESENT (attached to this message or generated earlier in the conversation): "anime cette image", "fais-la bouger", "mets cette photo en vidéo", "animate this", "make it move". animate=false for every video created from scratch (pure text→video).
 
-video=false when: the user asks for a STATIC IMAGE — a drawing, painting, illustration, logo, icon, poster, photo, wallpaper, banner, mockup (that is the IMAGE tool's job, not video) — a WEB or SOFTWARE artifact (landing page, website, app, dashboard, game, code), text deliverables (emails, essays, translations, summaries, video-SCRIPT writing: "écris un script vidéo" is text, NOT a video file), general conversation, math, or questions ABOUT video editing/formats/tools in general. When video=false, animate must be false.
+aspectRatio — when video=true AND animate=false (a text→video from scratch), choose the aspect ratio that will give the BEST result for THIS specific video. You MUST pick exactly one of "16:9", "1:1", "9:16" — never anything else, never omit the field.
+• An EXPLICIT format request from the user ALWAYS wins: vertical / portrait / format vertical / 9:16 / story / story Instagram / reel / TikTok / short / Shorts → "9:16"; carré / square / format carré / 1:1 → "1:1"; horizontal / paysage / landscape / widescreen / 16:9 / format cinéma → "16:9".
+• With no explicit format, infer from the CONTENT of the requested video: a single centered subject, a product on a plain background, a logo-like or looping animation, a face/bust close-up → "1:1"; a standing/dancing person, vertical action, phone-screen content, social-media-style clips, a full-portrait subject → "9:16"; landscape scenery, cinematic or wide shots, vehicles, city, nature, several elements side by side, horizontal action, general scenes → "16:9".
+• When video=false OR animate=true, set aspectRatio to "16:9" (it is ignored anyway).
+
+video=false when: the user asks for a STATIC IMAGE — a drawing, painting, illustration, logo, icon, poster, photo, wallpaper, banner, mockup (that is the IMAGE tool's job, not video) — a WEB or SOFTWARE artifact (landing page, website, app, dashboard, game, code), an SVG or vector-graphics CODE request ("crée un SVG d'un chien" — that is markup the assistant writes, never a video), text deliverables (emails, essays, translations, summaries, video-SCRIPT writing: "écris un script vidéo" is text, NOT a video file), general conversation, math, or questions ABOUT video editing/formats/tools in general. When video=false, animate must be false.
 
 When genuinely uncertain, prefer video=false: wrongly generating a video interrupts a normal conversation far more than missing one does. Only choose video=true when you are CONFIDENT the user wants a produced video file.`;
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
+
+/** The three aspect ratios the vibes engine accepts — nothing else. */
+const VIDEO_RATIOS = ['16:9', '1:1', '9:16'] as const;
 
 /** Extract the first plausible JSON object from a raw LLM answer. */
 function parseDecision(raw: string): AutoVideoDecision | null {
@@ -120,7 +148,15 @@ function parseDecision(raw: string): AutoVideoDecision | null {
   try {
     const parsed = JSON.parse(content.slice(start, end + 1));
     const video = parsed?.video === true || parsed?.video === 'true';
-    return { video, animate: video && (parsed?.animate === true || parsed?.animate === 'true') };
+    const rawRatio = String(parsed?.aspectRatio ?? '').trim();
+    const aspectRatio = (VIDEO_RATIOS as readonly string[]).includes(rawRatio)
+      ? (rawRatio as AutoVideoDecision['aspectRatio'])
+      : undefined;
+    return {
+      video,
+      animate: video && (parsed?.animate === true || parsed?.animate === 'true'),
+      aspectRatio,
+    };
   } catch {
     return null;
   }
@@ -145,9 +181,14 @@ export async function decideAutoVideoGeneration(
   const targetText = String(messages[lastUserIdx].content ?? '');
 
   // Deterministic guards FIRST: a clearly-code request ("créer landing page
-  // ultra moderne") never reaches the classifier, and a clearly-image request
-  // ("dessine un logo") belongs to the image engine — zero latency, zero risk
-  // of a weak-model misfire hijacking the turn.
+  // ultra moderne") never reaches the classifier, a clearly-image request
+  // ("dessine un logo") belongs to the image engine, and an SVG request is
+  // ALWAYS code — zero latency, zero risk of a weak-model misfire hijacking
+  // the turn.
+  if (clearlySvgRequest(targetText)) {
+    console.log('[auto-video] svg-code guard: video=false (no LLM call)');
+    return { video: false, animate: false };
+  }
   if (clearlyCodeRequest(targetText)) {
     console.log('[auto-video] code-deliverable guard: video=false (no LLM call)');
     return { video: false, animate: false };
@@ -182,7 +223,7 @@ export async function decideAutoVideoGeneration(
           ],
           stream: false,
           temperature: 0,
-          max_tokens: 100,
+          max_tokens: 120,
           thinking: false,
         });
         const content: string = data?.choices?.[0]?.message?.content ?? '';
