@@ -155,8 +155,12 @@ export const RAG_CONFIG_DEFAULTS: Record<string, unknown> = {
   'rag.content_extraction.supported_media_mime_types': null,
   'rag.pdf_extract_images': false,
   'rag.pdf_loader_mode': 'page',
-  // web search
-  'web.search.enable': false,
+  // web search — enabled by default (mirrors root-handlers.ts: the frontend
+  // feature flag `enable_web_search` defaults to true; the pipeline gate in
+  // v12-flow.ts reads the same key with default true). Admins can still turn
+  // it off from the workspace settings, which persists web.search.enable in
+  // the config table and overrides this default.
+  'web.search.enable': true,
   'web.search.confirmation.enable': false,
   'web.search.confirmation.content': '',
   'web.search.engine': process.env.WEB_SEARCH_ENGINE || '',

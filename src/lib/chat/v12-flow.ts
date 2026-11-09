@@ -953,7 +953,14 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     const { configGet } = await import('@/lib/config');
     const { hasPermission } = await import('@/lib/access-control');
     const { DEFAULT_USER_PERMISSIONS } = await import('@/lib/constants');
-    const webSearchEnabled = await configGet<boolean>('web.search.enable', false);
+    // Default TRUE — aligned with root-handlers.ts (`enable_web_search` is
+    // served to the frontend with default true) and with the pre-Supabase
+    // state where the admin settings had persisted web.search.enable=true in
+    // the (now removed) SQLite config table. The old `false` default made the
+    // UI offer the Web Search toggle while the pipeline silently refused to
+    // run it — breaking BOTH the manual toggle and the auto engagement
+    // ("Recherche Web Auto", which funnels through the same check).
+    const webSearchEnabled = await configGet<boolean>('web.search.enable', true);
     if (!webSearchEnabled) return false;
     if (user.role === 'admin') return true;
     const defaultPermissions = await configGet<any>('user.permissions', DEFAULT_USER_PERMISSIONS);
