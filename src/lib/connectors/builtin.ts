@@ -20,6 +20,7 @@
  */
 import {
   googleCredsConfigured,
+  googleCredsAvailable,
   gmailSearch,
   gmailGetMessage,
   gmailSend,
@@ -33,6 +34,45 @@ import {
 } from './google';
 
 export type { GoogleApiResult };
+
+// ---------------------------------------------------------------------------
+// Per-user Google credential (connector_connection row)
+// ---------------------------------------------------------------------------
+
+/** builtin def id → registry connector_id (app-registry.ts, OAuth rows). */
+const REGISTRY_ID_BY_DEF: Record<string, string> = {
+  'connector:gmail': 'gmail',
+  'connector:gcalendar': 'gcal',
+  'connector:gdrive': 'gdrive',
+  // gcontacts: no dedicated registry entry — falls back to the server env
+};
+
+/**
+ * Refresh token of the CURRENT USER's OAuth connection for a connector.
+ * Memoized for 30s per (user, connector) — a multi-tool turn reads the row
+ * once. Returns null when the user has no connection (demo/env fallback).
+ */
+const userTokenCache = new Map<string, { token: string | null; exp: number }>();
+async function userGoogleRefreshToken(defId: string, userId?: string | null): Promise<string | null> {
+  if (!userId) return null;
+  const registryId = REGISTRY_ID_BY_DEF[defId];
+  if (!registryId) return null;
+  const key = `${userId}:${registryId}`;
+  const hit = userTokenCache.get(key);
+  if (hit && hit.exp > Date.now()) return hit.token;
+  let token: string | null = null;
+  try {
+    const { db } = await import('@/lib/db');
+    const row: any = await db.connectorConnection.findFirst({
+      where: { user_id: userId, connector_id: registryId, status: 'connected' },
+    });
+    token = typeof row?.refresh_token === 'string' && row.refresh_token ? row.refresh_token : null;
+  } catch {
+    token = null; // table missing/unreadable — env fallback
+  }
+  userTokenCache.set(key, { token, exp: Date.now() + 30_000 });
+  return token;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -129,12 +169,24 @@ export function builtinOpenapi(def: BuiltinConnectorDef): Record<string, any> {
   };
 }
 
-/** operationId → local handler (used by lib/chat/connectors.ts execution). */
+/** operationId → local handler (used by lib/chat/connectors.ts execution).
+ *
+ * `userId` (when known — the chat flow always has it) wires the PER-USER
+ * OAuth connection: Google tools execute with the refresh token the user
+ * granted through the @ picker's « Connecter » flow, falling back to the
+ * server env account, then to demo mode. The handler signature gains an
+ * optional second argument `rt` (resolved refresh token or null). */
 export function builtinHandlers(
-  def: BuiltinConnectorDef
+  def: BuiltinConnectorDef,
+  userId?: string | null
 ): Record<string, (args: Record<string, any>) => unknown | Promise<unknown>> {
   const map: Record<string, (args: Record<string, any>) => unknown | Promise<unknown>> = {};
-  for (const t of def.tools) map[t.operationId] = t.handler;
+  for (const t of def.tools) {
+    map[t.operationId] = async (args: Record<string, any>) => {
+      const rt = await userGoogleRefreshToken(def.id, userId);
+      return (t.handler as any)(args, rt);
+    };
+  }
   return map;
 }
 
@@ -147,9 +199,9 @@ export function getBuiltinConnector(id: string): BuiltinConnectorDef | null {
 // ---------------------------------------------------------------------------
 
 const DEMO_NOTICE =
-  'MODE DÉMO : données simulées — aucun compte Google n’est connecté à l’application. ' +
-  'L’administrateur peut activer les vraies données en ajoutant GOOGLE_CLIENT_ID, ' +
-  'GOOGLE_CLIENT_SECRET et GOOGLE_REFRESH_TOKEN aux variables d’environnement.';
+  'MODE DÉMO : données simulées — aucun compte Google n’est connecté pour vous. ' +
+  'Ouvrez le sélecteur « @ » dans la zone de message et cliquez sur « Connecter » ' +
+  'pour autoriser votre compte Google (données réelles ensuite).';
 
 function withDemoNotice(payload: Record<string, any>): Record<string, any> {
   return { ...payload, _demo: true, _notice: DEMO_NOTICE };
@@ -406,17 +458,17 @@ const gmailDef: BuiltinConnectorDef = {
         { name: 'query', in: 'query', required: true, type: 'string', description: 'Mots-clés de recherche (ex: « facture orange »).' },
         { name: 'max_results', in: 'query', type: 'integer', description: 'Nombre maximum d’e-mails (1 à 10, 5 par défaut).', default: 5 },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const query = strArg(args, 'query', 'messages récents');
         const max = clampMax(args);
-        if (googleCredsConfigured()) {
-          const list = await gmailSearch(query, max);
+        if (googleCredsAvailable(rt)) {
+          const list = await gmailSearch(query, max, rt);
           if (!list) return withDemoNotice({ query, emails: demoEmails(query, max, false) });
           if (!list.ok) return googleError(list, 'Gmail (recherche)');
           const ids: { id: string }[] = Array.isArray(list.data?.messages) ? list.data.messages.slice(0, max) : [];
           const emails = await Promise.all(
             ids.map(async (m) => {
-              const detail = await gmailGetMessage(m.id);
+              const detail = await gmailGetMessage(m.id, rt);
               return detail?.ok ? gmailMessageToEmail(detail.data) : { id: m.id, error: 'détails indisponibles' };
             })
           );
@@ -434,16 +486,16 @@ const gmailDef: BuiltinConnectorDef = {
       parameters: [
         { name: 'max_results', in: 'query', type: 'integer', description: 'Nombre maximum d’e-mails (1 à 10, 5 par défaut).', default: 5 },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const max = clampMax(args);
-        if (googleCredsConfigured()) {
-          const list = await gmailSearch('is:unread', max);
+        if (googleCredsAvailable(rt)) {
+          const list = await gmailSearch('is:unread', max, rt);
           if (!list) return withDemoNotice({ emails: demoEmails('is:unread', max, true) });
           if (!list.ok) return googleError(list, 'Gmail (non lus)');
           const ids: { id: string }[] = Array.isArray(list.data?.messages) ? list.data.messages.slice(0, max) : [];
           const emails = await Promise.all(
             ids.map(async (m) => {
-              const detail = await gmailGetMessage(m.id);
+              const detail = await gmailGetMessage(m.id, rt);
               return detail?.ok ? gmailMessageToEmail(detail.data) : { id: m.id, error: 'détails indisponibles' };
             })
           );
@@ -463,13 +515,13 @@ const gmailDef: BuiltinConnectorDef = {
         { name: 'subject', in: 'body', required: true, type: 'string', description: 'Objet de l’e-mail.' },
         { name: 'body', in: 'body', required: true, type: 'string', description: 'Corps du message (texte brut).' },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const to = strArg(args, 'to');
         const subject = strArg(args, 'subject', '(sans objet)');
         const body = strArg(args, 'body');
         if (!to) return { error: 'Paramètre « to » manquant.' };
-        if (googleCredsConfigured()) {
-          const res = await gmailSend(to, subject, body);
+        if (googleCredsAvailable(rt)) {
+          const res = await gmailSend(to, subject, body, rt);
           if (!res) return withDemoNotice({ sent: false, to, subject, note: 'Identifiants Google indisponibles — envoi simulé refusé.' });
           if (!res.ok) return googleError(res, 'Gmail (envoi)');
           return { sent: true, to, subject, message_id: res.data?.id, mode: 'live' };
@@ -503,10 +555,10 @@ const calendarDef: BuiltinConnectorDef = {
         { name: 'range', in: 'query', type: 'string', description: 'Période : today, tomorrow ou week.', enum: ['today', 'tomorrow', 'week'], default: 'today' },
         { name: 'max_results', in: 'query', type: 'integer', description: 'Nombre maximum d’événements (1 à 10, 5 par défaut).', default: 5 },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const range = ['today', 'tomorrow', 'week'].includes(String(args.range)) ? String(args.range) : 'today';
         const max = clampMax(args);
-        if (googleCredsConfigured()) {
+        if (googleCredsAvailable(rt)) {
           const timeMin = range === 'tomorrow' ? parisDayRange(1).timeMinIso : range === 'week' ? parisDayRange(0).timeMinIso : parisDayRange(0).timeMinIso;
           const timeMax =
             range === 'tomorrow'
@@ -514,7 +566,7 @@ const calendarDef: BuiltinConnectorDef = {
               : range === 'week'
                 ? parisDayRange(7).timeMaxIso
                 : parisDayRange(0).timeMaxIso;
-          const res = await calendarListEvents(timeMin, timeMax, max);
+          const res = await calendarListEvents(timeMin, timeMax, max, rt);
           if (!res) return demoEvents(range, max);
           if (!res.ok) return googleError(res, 'Calendar (liste)');
           const items: any[] = Array.isArray(res.data?.items) ? res.data.items : [];
@@ -550,7 +602,7 @@ const calendarDef: BuiltinConnectorDef = {
         { name: 'description', in: 'body', type: 'string', description: 'Description de l’événement.' },
         { name: 'location', in: 'body', type: 'string', description: 'Lieu de l’événement.' },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const title = strArg(args, 'title');
         const date = strArg(args, 'date');
         const start = strArg(args, 'start_time');
@@ -565,14 +617,17 @@ const calendarDef: BuiltinConnectorDef = {
           endTime = `${String(end.getHours()).padStart(2, '0')}:${String(end.getMinutes()).padStart(2, '0')}`;
         }
         const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : parisDate(1);
-        if (googleCredsConfigured()) {
-          const res = await calendarCreateEvent({
-            summary: title,
-            start: { dateTime: `${dateOk}T${startTime}:00`, timeZone: 'Europe/Paris' },
-            end: { dateTime: `${dateOk}T${endTime}:00`, timeZone: 'Europe/Paris' },
-            ...(strArg(args, 'description') ? { description: strArg(args, 'description') } : {}),
-            ...(strArg(args, 'location') ? { location: strArg(args, 'location') } : {}),
-          });
+        if (googleCredsAvailable(rt)) {
+          const res = await calendarCreateEvent(
+            {
+              summary: title,
+              start: { dateTime: `${dateOk}T${startTime}:00`, timeZone: 'Europe/Paris' },
+              end: { dateTime: `${dateOk}T${endTime}:00`, timeZone: 'Europe/Paris' },
+              ...(strArg(args, 'description') ? { description: strArg(args, 'description') } : {}),
+              ...(strArg(args, 'location') ? { location: strArg(args, 'location') } : {}),
+            },
+            rt
+          );
           if (!res) return withDemoNotice({ created: false, note: 'Identifiants Google indisponibles — création simulée refusée.' });
           if (!res.ok) return googleError(res, 'Calendar (création)');
           return { created: true, event: { id: res.data?.id, title, date: dateOk, start_time: startTime, end_time: endTime }, mode: 'live' };
@@ -610,11 +665,11 @@ const driveDef: BuiltinConnectorDef = {
         { name: 'query', in: 'query', required: true, type: 'string', description: 'Mots-clés de recherche de fichier.' },
         { name: 'max_results', in: 'query', type: 'integer', description: 'Nombre maximum de fichiers (1 à 10, 5 par défaut).', default: 5 },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const query = strArg(args, 'query', 'documents');
         const max = clampMax(args);
-        if (googleCredsConfigured()) {
-          const res = await driveSearch(query, max);
+        if (googleCredsAvailable(rt)) {
+          const res = await driveSearch(query, max, rt);
           if (!res) return demoDriveFiles(query, max, false);
           if (!res.ok) return googleError(res, 'Drive (recherche)');
           const files: any[] = Array.isArray(res.data?.files) ? res.data.files : [];
@@ -637,10 +692,10 @@ const driveDef: BuiltinConnectorDef = {
       parameters: [
         { name: 'max_results', in: 'query', type: 'integer', description: 'Nombre maximum de fichiers (1 à 10, 5 par défaut).', default: 5 },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const max = clampMax(args);
-        if (googleCredsConfigured()) {
-          const res = await driveRecent(max);
+        if (googleCredsAvailable(rt)) {
+          const res = await driveRecent(max, rt);
           if (!res) return demoDriveFiles('', max, true);
           if (!res.ok) return googleError(res, 'Drive (récents)');
           const files: any[] = Array.isArray(res.data?.files) ? res.data.files : [];
@@ -672,11 +727,11 @@ const contactsDef: BuiltinConnectorDef = {
         { name: 'query', in: 'query', required: true, type: 'string', description: 'Nom ou e-mail recherché.' },
         { name: 'max_results', in: 'query', type: 'integer', description: 'Nombre maximum de contacts (1 à 10, 5 par défaut).', default: 5 },
       ],
-      handler: async (args) => {
+      handler: async (args, rt) => {
         const query = strArg(args, 'query', 'contact');
         const max = clampMax(args);
-        if (googleCredsConfigured()) {
-          const res = await contactsSearch(query, max);
+        if (googleCredsAvailable(rt)) {
+          const res = await contactsSearch(query, max, rt);
           if (!res) return demoContacts(query, max);
           if (!res.ok) return googleError(res, 'Contacts');
           const people: any[] = Array.isArray(res.data?.results) ? res.data.results : [];

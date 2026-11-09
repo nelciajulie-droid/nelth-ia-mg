@@ -819,7 +819,9 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
           buildConnectorResultsMessage,
         } = await import('@/lib/chat/connectors');
         type ConnectorCallResult = import('@/lib/chat/connectors').ConnectorCallResult;
-        const connectors = await resolveFormConnectors(formToolIds, formToolServers);
+        // userId wires per-user OAuth connections into the built-in Google
+        // connectors (gmail/gcal/gdrive refresh tokens — connector_connection).
+        const connectors = await resolveFormConnectors(formToolIds, formToolServers, user.id);
         console.log(
           `[v12-flow] connectors requested (${serverSelections.join(', ') || 'direct'}) → resolved: ${
             connectors.map((c) => `${c.name}(${c.specs.length} tools)`).join(', ') || 'none'

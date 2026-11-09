@@ -1,22 +1,17 @@
 /**
- * Google APIs — shared OAuth (offline refresh-token) client used by the
- * built-in connectors (Gmail, Calendar, Drive, Contacts).
+ * Google APIs — shared OAuth client used by the built-in connectors
+ * (Gmail, Calendar, Drive, Contacts).
  *
- * Credentials (all three required) are read from the environment:
- *   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
- * When they are absent the built-in connectors fall back to DEMO MODE
- * (simulated data, clearly flagged in every result). Add them on Vercel
- * (Project → Settings → Environment Variables) to go live:
- *   1. Google Cloud Console → APIs & Services → enable Gmail, Calendar,
- *      Drive and People APIs for the project;
- *   2. OAuth consent screen → add the scopes:
- *      https://www.googleapis.com/auth/gmail.modify
- *      https://www.googleapis.com/auth/calendar
- *      https://www.googleapis.com/auth/drive.readonly
- *      https://www.googleapis.com/auth/contacts.readonly
- *   3. OAuth client (Web) → copy client id/secret;
- *   4. Authorize once with access_type=offline&prompt=consent and copy the
- *      refresh_token into the environment.
+ * Two credential sources, tried in order:
+ *   1. PER-USER connection (the @ picker's "Connecter" flow): the refresh
+ *      token stored in connector_connection for the requesting user is
+ *      passed by the caller (lib/chat/connectors.ts executeOne → builtin
+ *      handlers) — the API is called AS THAT USER.
+ *   2. Server-wide env (GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN) — the legacy
+ *      single-account mode, still honored when no user token is available.
+ *
+ * When NEITHER is available the built-in connectors fall back to DEMO MODE
+ * (simulated data, clearly flagged in every result).
  */
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
@@ -25,7 +20,8 @@ interface CachedToken {
   exp: number;
 }
 
-let cached: CachedToken | null = null;
+/** Access-token cache, keyed by the refresh token that minted it. */
+const tokenCache = new Map<string, CachedToken>();
 
 /** True when the three Google OAuth environment variables are present. */
 export function googleCredsConfigured(): boolean {
@@ -36,10 +32,24 @@ export function googleCredsConfigured(): boolean {
   );
 }
 
-/** Refresh-token flow → short-lived access token (null when unavailable). */
-export async function getGoogleAccessToken(): Promise<string | null> {
-  if (!googleCredsConfigured()) return null;
-  if (cached && cached.exp > Date.now() + 60_000) return cached.token;
+/** True when either credential source can produce an access token. */
+export function googleCredsAvailable(refreshToken?: string | null): boolean {
+  return Boolean(refreshToken || googleCredsConfigured());
+}
+
+/**
+ * Refresh-token flow → short-lived access token.
+ * `refreshToken` (per-user connection) takes priority; the env triplet is
+ * the fallback. Returns null when no source is available/valid.
+ */
+export async function getGoogleAccessToken(refreshToken?: string | null): Promise<string | null> {
+  const userToken = typeof refreshToken === 'string' && refreshToken ? refreshToken : null;
+  const envToken = googleCredsConfigured() ? (process.env.GOOGLE_REFRESH_TOKEN as string) : null;
+  const rt = userToken ?? envToken;
+  if (!rt || !process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) return null;
+
+  const hit = tokenCache.get(rt);
+  if (hit && hit.exp > Date.now() + 60_000) return hit.token;
   try {
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
@@ -47,7 +57,7 @@ export async function getGoogleAccessToken(): Promise<string | null> {
       body: new URLSearchParams({
         client_id: process.env.GOOGLE_CLIENT_ID as string,
         client_secret: process.env.GOOGLE_CLIENT_SECRET as string,
-        refresh_token: process.env.GOOGLE_REFRESH_TOKEN as string,
+        refresh_token: rt,
         grant_type: 'refresh_token',
       }),
       signal: AbortSignal.timeout(10_000),
@@ -59,7 +69,7 @@ export async function getGoogleAccessToken(): Promise<string | null> {
     const data: any = await res.json();
     const token = data?.access_token;
     if (typeof token !== 'string' || !token) return null;
-    cached = { token, exp: Date.now() + (Number(data.expires_in) || 3600) * 1000 };
+    tokenCache.set(rt, { token, exp: Date.now() + (Number(data.expires_in) || 3600) * 1000 });
     return token;
   } catch (e) {
     console.error('[google-auth] token refresh error', e);
@@ -77,9 +87,10 @@ export interface GoogleApiResult {
 export async function googleApi(
   url: string,
   init: RequestInit = {},
-  timeoutMs = 20_000
+  timeoutMs = 20_000,
+  refreshToken?: string | null
 ): Promise<GoogleApiResult | null> {
-  const token = await getGoogleAccessToken();
+  const token = await getGoogleAccessToken(refreshToken);
   if (!token) return null; // credentials absent → caller uses demo mode
   try {
     const res = await fetch(url, {
@@ -141,19 +152,23 @@ export function gmailMessageToEmail(msg: GmailHeaderMsg): Record<string, any> {
 
 export async function gmailSearch(
   query: string,
-  maxResults: number
+  maxResults: number,
+  refreshToken?: string | null
 ): Promise<GoogleApiResult | null> {
   const url =
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?` +
     `q=${encodeURIComponent(query)}&maxResults=${maxResults}`;
-  return googleApi(url);
+  return googleApi(url, {}, 20_000, refreshToken);
 }
 
-export async function gmailGetMessage(id: string): Promise<GoogleApiResult | null> {
+export async function gmailGetMessage(
+  id: string,
+  refreshToken?: string | null
+): Promise<GoogleApiResult | null> {
   const url =
     `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
     `?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`;
-  return googleApi(url);
+  return googleApi(url, {}, 20_000, refreshToken);
 }
 
 /** RFC 2822 message → base64url raw payload for messages.send. */
@@ -169,11 +184,21 @@ export function buildRawEmail(to: string, subject: string, body: string): string
   return Buffer.from(lines.join('\r\n'), 'utf-8').toString('base64url');
 }
 
-export async function gmailSend(to: string, subject: string, body: string): Promise<GoogleApiResult | null> {
-  return googleApi('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    body: JSON.stringify({ raw: buildRawEmail(to, subject, body) }),
-  });
+export async function gmailSend(
+  to: string,
+  subject: string,
+  body: string,
+  refreshToken?: string | null
+): Promise<GoogleApiResult | null> {
+  return googleApi(
+    'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+    {
+      method: 'POST',
+      body: JSON.stringify({ raw: buildRawEmail(to, subject, body) }),
+    },
+    20_000,
+    refreshToken
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -183,20 +208,29 @@ export async function gmailSend(to: string, subject: string, body: string): Prom
 export async function calendarListEvents(
   timeMinIso: string,
   timeMaxIso: string,
-  maxResults: number
+  maxResults: number,
+  refreshToken?: string | null
 ): Promise<GoogleApiResult | null> {
   const url =
     `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
     `timeMin=${encodeURIComponent(timeMinIso)}&timeMax=${encodeURIComponent(timeMaxIso)}` +
     `&singleEvents=true&orderBy=startTime&maxResults=${maxResults}`;
-  return googleApi(url);
+  return googleApi(url, {}, 20_000, refreshToken);
 }
 
-export async function calendarCreateEvent(event: Record<string, any>): Promise<GoogleApiResult | null> {
-  return googleApi('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
-    method: 'POST',
-    body: JSON.stringify(event),
-  });
+export async function calendarCreateEvent(
+  event: Record<string, any>,
+  refreshToken?: string | null
+): Promise<GoogleApiResult | null> {
+  return googleApi(
+    'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+    {
+      method: 'POST',
+      body: JSON.stringify(event),
+    },
+    20_000,
+    refreshToken
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -205,22 +239,26 @@ export async function calendarCreateEvent(event: Record<string, any>): Promise<G
 
 export async function driveSearch(
   query: string,
-  maxResults: number
+  maxResults: number,
+  refreshToken?: string | null
 ): Promise<GoogleApiResult | null> {
   const escaped = String(query).replace(/(['\\])/g, '\\$1');
   const url =
     `https://www.googleapis.com/drive/v3/files?` +
     `q=${encodeURIComponent(`fullText contains '${escaped}' and trashed = false`)}` +
     `&pageSize=${maxResults}&fields=files(id,name,mimeType,size,modifiedTime,webViewLink)`;
-  return googleApi(url);
+  return googleApi(url, {}, 20_000, refreshToken);
 }
 
-export async function driveRecent(maxResults: number): Promise<GoogleApiResult | null> {
+export async function driveRecent(
+  maxResults: number,
+  refreshToken?: string | null
+): Promise<GoogleApiResult | null> {
   const url =
     `https://www.googleapis.com/drive/v3/files?` +
     `pageSize=${maxResults}&orderBy=modifiedTime%20desc&trashed=false` +
     `&fields=files(id,name,mimeType,size,modifiedTime,webViewLink)`;
-  return googleApi(url);
+  return googleApi(url, {}, 20_000, refreshToken);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,11 +267,12 @@ export async function driveRecent(maxResults: number): Promise<GoogleApiResult |
 
 export async function contactsSearch(
   query: string,
-  maxResults: number
+  maxResults: number,
+  refreshToken?: string | null
 ): Promise<GoogleApiResult | null> {
   const url =
     `https://people.googleapis.com/v1/people:searchContacts?` +
     `query=${encodeURIComponent(query)}&readMask=names,emailAddresses,phoneNumbers` +
     `&pageSize=${Math.min(Math.max(maxResults, 1), 50)}`;
-  return googleApi(url);
+  return googleApi(url, {}, 20_000, refreshToken);
 }

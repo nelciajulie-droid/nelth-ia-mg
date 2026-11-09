@@ -136,15 +136,17 @@ async function resolveOneConnection(
   };
 }
 
-/** A built-in connector def → ResolvedConnector (local execution). */
-function toResolvedBuiltin(def: BuiltinConnectorDef): ResolvedConnector {
+/** A built-in connector def → ResolvedConnector (local execution).
+ *  `userId` wires the PER-USER OAuth connection (refresh token) into the
+ *  Google tool handlers — see builtinHandlers(). */
+function toResolvedBuiltin(def: BuiltinConnectorDef, userId?: string | null): ResolvedConnector {
   return {
     name: def.name,
     url: `builtin://${def.id}`,
     authHeaders: {},
     openapi: builtinOpenapi(def),
     specs: convertOpenapiToToolPayload(builtinOpenapi(def)),
-    builtinHandlers: builtinHandlers(def),
+    builtinHandlers: builtinHandlers(def, userId),
   };
 }
 
@@ -159,7 +161,8 @@ function toResolvedBuiltin(def: BuiltinConnectorDef): ResolvedConnector {
  */
 export async function resolveFormConnectors(
   toolIds: string[],
-  directServers: any[]
+  directServers: any[],
+  userId?: string | null
 ): Promise<ResolvedConnector[]> {
   const out: ResolvedConnector[] = [];
   const seenUrls = new Set<string>();
@@ -195,7 +198,7 @@ export async function resolveFormConnectors(
       // Built-in connectors first — no admin connection, no spec fetch.
       const builtin = getBuiltinConnector(wanted);
       if (builtin) {
-        push(toResolvedBuiltin(builtin));
+        push(toResolvedBuiltin(builtin, userId));
         continue;
       }
       const entry = byEntryId.get(wanted);

@@ -386,16 +386,33 @@ export const routes: Route[] = [
 
       const now = nowNs();
       const scopes = Array.isArray(tokenJson?.scope) ? tokenJson.scope : String(tokenJson?.scope ?? '');
+      // PERSIST THE TOKENS — the connect flow's whole point: tool execution
+      // (lib/connectors/google.ts) reads them back from this row to call the
+      // provider's API AS THE USER. Google is asked access_type=offline&
+      // prompt=consent so refresh_token is always granted; providers that
+      // don't issue one (GitHub) keep a short-lived access token only.
+      // A re-authorization that omits the refresh token (Google edge case)
+      // PRESERVES the previously stored one instead of wiping it.
       const existing = (await db.connectorConnection.findFirst({
         where: { user_id: userId, connector_id: app.id },
       })) as unknown as ConnectionRow | null;
-      const data = {
+      const refreshToken =
+        (typeof tokenJson?.refresh_token === 'string' && tokenJson.refresh_token) ||
+        (existing as any)?.refresh_token ||
+        null;
+      const expiresIn = Number(tokenJson?.expires_in);
+      const data: Record<string, unknown> = {
         status: 'connected',
         provider,
         account,
         scopes: JSON.stringify(scopes),
         updated_at: now,
       };
+      if (accessToken) data.access_token = accessToken;
+      if (refreshToken) data.refresh_token = refreshToken;
+      if (Number.isFinite(expiresIn) && expiresIn > 0) {
+        data.token_expires_at = Date.now() + expiresIn * 1000;
+      }
       if (existing) {
         await db.connectorConnection.update({ where: { id: existing.id }, data });
       } else {

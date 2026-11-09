@@ -663,6 +663,11 @@ model ConnectorConnection {
   provider     String? // oauth provider family reused from the login OAuth env contract
   account      String? // connected account label (email / login)
   scopes       String? // JSON array of granted scopes
+  // OAuth tokens (per-user connections) — the @ picker's "Connecter" flow
+  // stores them here; tool execution reads them (lib/connectors/google.ts).
+  access_token      String? // short-lived bearer (token_expires_at)
+  refresh_token     String? // long-lived offline token (Google access_type=offline)
+  token_expires_at  Float? // epoch ms — access_token expiry
   created_at   Float // time_ns
   updated_at   Float // time_ns
 
