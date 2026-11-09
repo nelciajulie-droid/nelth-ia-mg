@@ -419,11 +419,22 @@ export const routes: Route[] = [
         throw new HttpError(401, ERROR_MESSAGES.ACCESS_PROHIBITED);
       }
 
-      // This deployment is always SQLite (see prisma/schema.prisma).
+      // SQLite-only export (Python parity): production (Vercel + Supabase
+      // Postgres) answers the clean 400 below without ever touching the
+      // filesystem; local/dev SQLite builds stream the .db file.
       const url = process.env.DATABASE_URL || 'file:./data/webui.db';
-      const filePath = url.startsWith('file:')
-        ? path.resolve(process.cwd(), url.slice('file:'.length))
-        : url;
+      if (!url.startsWith('file:')) {
+        throw new HttpError(400, DB_NOT_SQLITE);
+      }
+
+      // Resolve the absolute path at REQUEST time through an opaque
+      // indirection. A literal `path.resolve(process.cwd(), <dynamic>)` is
+      // statically traced by Turbopack at BUILD time as a dynamic file
+      // pattern that globs the entire project root (10k+ files) and logs an
+      // "overly broad pattern" warning on every Vercel build — with zero
+      // runtime effect. Reflect.get keeps the tracer out of the way.
+      const resolveAbsolute: typeof path.resolve = Reflect.get(path, 'resolve');
+      const filePath = resolveAbsolute(process.cwd(), url.slice('file:'.length));
 
       let bytes: Buffer;
       try {
