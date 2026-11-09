@@ -56,17 +56,48 @@ function resolveDatabaseUrl(): string {
 const databaseUrl = resolveDatabaseUrl()
 
 /**
- * Cap the Prisma connection pool (Supabase session pooler hard limit).
+ * RUNTIME datasource URL — Supabase transaction pooler.
  *
- * The session pooler (port 5432, pgbouncer session mode) allows a TOTAL of
- * ~15 server-side client slots for the whole database — shared by EVERY app
+ * The session pooler (port 5432, session mode) allows a TOTAL of ~15
+ * server-side client slots for the whole database, shared by EVERY app
  * instance pointing at it (local dev server + each serverless function
- * instance). Prisma's default pool (num_cpus×2+1, up to 17+ on a big host)
- * can single-handedly exhaust the pooler: intermittent
+ * instance). Serverless horizontal scaling saturates that budget no matter
+ * how small the per-client pool: reproduced as intermittent
  * `FATAL: (EMAXCONNSESSION) max clients reached in session mode - pool_size:
- * 15` on the first query of a request (auth lookup → empty 500). A small
- * per-client cap keeps every instance well under the shared budget; bursts
- * beyond the cap queue briefly (pool_timeout) instead of erroring.
+ * 15` on the first query of a request (auth lookup → empty 500).
+ *
+ * The transaction pooler (port 6543, transaction mode) multiplexes every
+ * client over a shared backend pool — thousands of concurrent clients — the
+ * mode designed for serverless. Prisma needs `pgbouncer=true` there (no
+ * prepared statements); this app only issues simple CRUD (no $transaction /
+ * LISTEN / advisory locks), verified compatible.
+ *
+ * `prisma db push` (CLI) keeps using the session-mode .env URL — the
+ * transform lives ONLY in this runtime client. Kill-switch:
+ * NELTH_DB_SESSION_POOLER=1 forces the previous session-pooler behavior.
+ */
+function runtimeDatasourceUrl(url: string): string {
+  if (!url) return url
+  if (process.env.NELTH_DB_SESSION_POOLER === '1') return capConnectionPool(url)
+  try {
+    const u = new URL(/^postgres:\/\//.test(url) ? url.replace(/^postgres:/, 'postgresql:') : url)
+    if (/\.pooler\.supabase\.com$/i.test(u.hostname) && (u.port === '' || u.port === '5432')) {
+      u.port = '6543'
+      u.searchParams.set('pgbouncer', 'true')
+      u.searchParams.set('connection_limit', '5')
+      u.searchParams.delete('pool_timeout') // multiplexed — no hard slot budget
+      return u.toString()
+    }
+  } catch {
+    /* unparsable — fall through to the plain cap */
+  }
+  return capConnectionPool(url)
+}
+
+/**
+ * Cap the Prisma connection pool (used for non-Supabase URLs / kill-switch).
+ * A small per-client cap keeps every instance under the server budget;
+ * bursts beyond the cap queue briefly (pool_timeout) instead of erroring.
  */
 function capConnectionPool(url: string): string {
   if (!url) return url
@@ -81,7 +112,7 @@ const globalForPrisma = globalThis as unknown as {
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    ...(databaseUrl ? { datasources: { db: { url: capConnectionPool(databaseUrl) } } } : {}),
+    ...(databaseUrl ? { datasources: { db: { url: runtimeDatasourceUrl(databaseUrl) } } } : {}),
     log: process.env.PRISMA_LOG === 'query' ? ['query'] : ['error'],
   })
 
