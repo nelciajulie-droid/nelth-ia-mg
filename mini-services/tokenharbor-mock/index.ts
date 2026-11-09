@@ -65,6 +65,14 @@ function buildAnswer(body: any): string {
       `Le thinking est désactivé (${thinking}) et je réponds en direct, token par token.`
     );
   }
+  if (/strip-test/i.test(lastText)) {
+    // Narration + real answer in the same stream — the flash pattern the
+    // v12-flow narration valve must suppress and locally strip.
+    return (
+      `The user wants a test of the narration strip. No file requested, so inline answer.\n\n` +
+      `Voici la VRAIE réponse locale : la narration de tête a été supprimée et seul ce paragraphe subsiste.`
+    );
+  }
   return (
     `Mock TokenHarbor — Nelth-4.0_Flash (deepseek-v4.1-flash) en ligne. ` +
     `Réponse en streaming direct, thinking désactivé (${thinking}). ` +
@@ -86,6 +94,16 @@ Bun.serve({
 
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
       const body = await req.json().catch(() => ({}));
+
+      // Narration-kill switch for E2E: when the last message is the v12-flow
+      // REPAIR instruction, fail with 500 so the local-strip fallback runs.
+      const lastMsg = Array.isArray(body?.messages) ? body.messages[body.messages.length - 1] : null;
+      const lastContent = typeof lastMsg?.content === 'string' ? lastMsg.content : '';
+      if (/^These were your internal analysis notes/.test(lastContent.trim())) {
+        console.log('[TokenHarbor-MOCK] repair call → 500 (forcing the local-strip fallback)');
+        return Response.json({ error: { message: 'mock repair failure' } }, { status: 500 });
+      }
+
       const answer = buildAnswer(body);
 
       if (body?.stream === true) {

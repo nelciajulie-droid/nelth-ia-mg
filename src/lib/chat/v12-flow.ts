@@ -205,6 +205,25 @@ const NARRATION_START_RE = new RegExp(
 );
 
 /**
+ * Local narration strip — LAST-RESORT fallback when the LLM repair pass
+ * fails or times out (observed on the TokenHarbor flash model: the
+ * non-streaming repair call outruns the serverless time budget). The
+ * flash-style narration is a leading paragraph — the real answer follows
+ * right after the paragraph break. Drops the narration paragraph ONLY when
+ * a substantial remainder survives; otherwise returns the input unchanged.
+ */
+function localStripNarration(content: string): string {
+  const trimmed = content.trimStart();
+  if (!NARRATION_START_RE.test(trimmed)) return content;
+  let cut = trimmed.search(/\n\s*\n/); // paragraph break first
+  if (cut < 0) cut = trimmed.indexOf('\n'); // single newline fallback
+  if (cut < 0) return content;
+  const rest = trimmed.slice(cut).replace(/^[\s\n]+/, '');
+  if (rest.trim().length < 40) return content; // nothing substantial after — keep raw
+  return rest;
+}
+
+/**
  * Continuation instruction for auto-continue rounds (see finalizeTruncated
  * and the __nelth_continue mode): the serverless platform caps a single
  * completion request (Vercel maxDuration 300s), and a thinking-model
@@ -1868,7 +1887,10 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         try { src.cancel(reason); } catch { /* best effort */ }
       },
     });
-  const callUpstream = (body: Record<string, any>): Promise<Response> =>
+  const callUpstream = (
+    body: Record<string, any>,
+    signalOverride?: AbortSignal
+  ): Promise<Response> =>
     kiloFallback
       ? (async () => {
           // z-ai engine bridge: same two models, OpenAI-compatible Response —
@@ -1898,7 +1920,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           method: 'POST',
           headers,
           body: JSON.stringify(body),
-          signal: upstreamSignal(),
+          signal: signalOverride ?? upstreamSignal(),
         });
 
   /**
@@ -1906,8 +1928,16 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
    * held-back internal analysis into the direct final answer. The full
    * llmMessages context rides along (web sources included) so [N] citation
    * markers stay meaningful in the rewritten answer.
+   *
+   * `timeoutMs` caps the attempt (TokenHarbor flash: the free gateway is slow
+   * on non-streaming calls — a short cap lets the local-strip fallback land
+   * quickly instead of stalling until the flow wall aborts).
    */
-  const repairNarration = async (narrationText: string): Promise<string> => {
+  const repairTimeoutSignal = (ms: number): AbortSignal => {
+    const timeout = AbortSignal.timeout(ms);
+    return typeof AbortSignal.any === 'function' ? AbortSignal.any([timeout, taskSignal]) : timeout;
+  };
+  const repairNarration = async (narrationText: string, timeoutMs?: number): Promise<string> => {
     const messages = [
       ...llmMessages,
       { role: 'assistant', content: narrationText.slice(0, 8000) },
@@ -1930,12 +1960,13 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       stream_options: undefined,
     };
     delete body.stream_options;
-    let res = await callUpstream(body);
+    const repairSignal = timeoutMs ? repairTimeoutSignal(timeoutMs) : undefined;
+    let res = await callUpstream(body, repairSignal);
     if (!res.ok) {
       // Provider flake retry (same guard as the main call — the free dots
       // model occasionally 400s a perfectly valid request).
       await new Promise((r) => setTimeout(r, 600));
-      res = await callUpstream(body);
+      res = await callUpstream(body, repairSignal);
     }
     if (!res.ok) throw new Error(`repair upstream ${res.status}`);
     const data = await res.json().catch(() => null);
@@ -2225,17 +2256,25 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
 
     // Narration repair (non-streaming API clients): same dots-3 "note"
     // behavior — the model answered with its internal analysis. Detect +
-    // rewrite into the direct final answer.
+    // rewrite into the direct final answer (LLM pass, then local strip).
     if (NARRATION_START_RE.test(content.trimStart())) {
+      let repaired = '';
       try {
-        const repaired = await repairNarration(content);
-        if (repaired) {
-          console.log('[v12-flow] narration repaired (non-streaming) —', repaired.length, 'chars');
-          content = repaired;
-          if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
-        }
+        repaired = await repairNarration(content, isTH ? 12_000 : undefined);
       } catch (e) {
         console.error('[v12-flow] narration repair failed (non-streaming)', e);
+      }
+      if (repaired) {
+        console.log('[v12-flow] narration repaired (non-streaming) —', repaired.length, 'chars');
+        content = repaired;
+        if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
+      } else {
+        const stripped = localStripNarration(content);
+        if (stripped !== content) {
+          console.log('[v12-flow] narration locally stripped (non-streaming) —', stripped.length, 'chars');
+          content = stripped;
+          if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
+        }
       }
     }
 
@@ -2949,18 +2988,37 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // of the UI the whole stream. Convert it into the clean final answer —
     // the done event below carries `content`, which REPLACES the message
     // content on the frontend, so the user goes straight from the generating
-    // state to the clean answer. On repair failure the raw narration is the
-    // fallback (same content the old behavior displayed, minus the stream).
+    // state to the clean answer. On repair failure the LOCAL STRIP runs
+    // before the raw fallback: the flash-style narration is a leading
+    // paragraph with the real answer right after it, so dropping the prefix
+    // keeps the answer clean without another gateway round-trip.
     if (narrationMode === 'suppressing' && finalContent.trim()) {
+      // Flash models (TokenHarbor): short cap on the LLM repair — the free
+      // gateway is slow on non-streaming calls and the flow wall is mostly
+      // spent by the main stream; fail fast, strip locally.
+      let repaired = '';
       try {
-        const repaired = await repairNarration(finalContent);
-        if (repaired) {
-          console.log('[v12-flow] narration repaired —', repaired.length, 'chars');
-          finalContent = repaired;
+        repaired = await repairNarration(finalContent, isTH ? 12_000 : undefined);
+      } catch (e) {
+        console.error('[v12-flow] narration repair failed — trying the local strip', e);
+      }
+      if (repaired) {
+        console.log('[v12-flow] narration repaired —', repaired.length, 'chars');
+        finalContent = repaired;
+        finalOutput = null;
+      } else {
+        const stripped = localStripNarration(finalContent);
+        if (stripped !== finalContent) {
+          console.log(
+            '[v12-flow] narration locally stripped —',
+            finalContent.length,
+            '→',
+            stripped.length,
+            'chars'
+          );
+          finalContent = stripped;
           finalOutput = null;
         }
-      } catch (e) {
-        console.error('[v12-flow] narration repair failed — falling back to the raw content', e);
       }
     }
 
