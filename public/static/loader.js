@@ -2988,6 +2988,15 @@ html.nsrc-lock{overflow:hidden}
  *     handle sibling.
  * The panel's Close button is locale-proof: the only textless button
  * carrying the lucide X glyph (path starting "M6 18 18 6").
+ *
+ * ARTIFACT PREVIEW EXEMPTION (fix « Aperçu » du bloc de code) : the
+ * same dock/drawer hosts the ARTIFACTS CANVAS (id="artifacts-container"),
+ * opened by the code-block « Preview / Aperçu » button — its own Close
+ * button uses a different glyph (heroicons x-mark, "M6.28 5.22…"), so
+ * findCloseButton would not match it, but the Escape fallback below
+ * (mobile drawer) would still dismiss a legit preview. A surface that
+ * contains #artifacts-container is therefore NEVER auto-closed here —
+ * mirror of the :not(:has(#artifacts-container)) guards in custom.css.
  * ==================================================================== */
 (() => {
   'use strict';
@@ -3041,8 +3050,14 @@ html.nsrc-lock{overflow:hidden}
   function guard() {
     if (Date.now() - lastCloseAt < COOLDOWN_MS) return;
     const surfaces = panelSurfaces();
-    for (let i = 0; i < surfaces.length; i++) {
-      const close = findCloseButton(surfaces[i]);
+    // ARTIFACT PREVIEW EXEMPTION — a surface hosting the artifacts canvas
+    // (code-block « Aperçu » / HTML preview) is a legitimate view: never
+    // auto-close it. Its own Close button (different glyph) unmounts it.
+    const closable = surfaces.filter(
+      (s) => !s.querySelector('#artifacts-container')
+    );
+    for (let i = 0; i < closable.length; i++) {
+      const close = findCloseButton(closable[i]);
       if (close) {
         lastCloseAt = Date.now();
         close.click();
@@ -3050,8 +3065,14 @@ html.nsrc-lock{overflow:hidden}
       }
     }
     // No Close button (call overlay replaces the tab row) — the swipe
-    // drawer at least owns an Escape handler; give it one try.
-    if (surfaces.length && document.querySelector('[data-swipe-panel="right"]')) {
+    // drawer at least owns an Escape handler; give it one try. (Never
+    // dispatched for a drawer hosting the artifact preview.)
+    const drawer = document.querySelector('[data-swipe-panel="right"]');
+    if (
+      closable.length &&
+      drawer &&
+      !drawer.querySelector('#artifacts-container')
+    ) {
       lastCloseAt = Date.now();
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     }

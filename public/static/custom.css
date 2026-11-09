@@ -55,7 +55,7 @@ div.lg\:mr-1 button:has(svg path[d^="M10.5 6h9.75"]) {
         display: none !important;
 }
 
-/* ── Chat controls panel: retired ────────────────────────────────────────────
+/* ── Chat controls panel: retired (artifact preview EXEMPT) ──────────────────
  * Hiding the header button (above) is not enough — the panel itself can
  * still surface through side doors: the mobile right-edge swipe gesture
  * (the SwipeablePanel shell reveals its full-screen drawer from a finger
@@ -73,16 +73,31 @@ div.lg\:mr-1 button:has(svg path[d^="M10.5 6h9.75"]) {
  * loader.js (CONTROLS PANEL GUARDIAN) additionally closes the panel
  * through its own Close button the frame it mounts, so the app store
  * resets to false and the drawer's body scroll-lock is released —
- * display:none alone would leave that lock armed. */
-[data-swipe-panel="right"] {
+ * display:none alone would leave that lock armed.
+ *
+ * ARTIFACT PREVIEW EXEMPTION (fix « Aperçu » du bloc de code) : the very
+ * same dock hosts the ARTIFACTS CANVAS — the side panel that renders the
+ * HTML/SVG preview opened by the code-block « Preview / Aperçu » button
+ * (stores: showControls=true + showArtifacts=true; canvas root has
+ * id="artifacts-container"; verified in the compiled bundle BwPFp-FS.js).
+ * The unconditional display:none below therefore also killed the preview
+ * feature — clicking « Aperçu » fed the hidden iframe but nothing opened.
+ * Each rule now carries :not(:has(#artifacts-container)) so the dock and
+ * drawer stay hidden ONLY when their content is the retired Controls (or
+ * call overlay / embeds) view; the artifact preview mounts the canvas and
+ * paints normally. Closing the preview unmounts the dock entirely (own
+ * Close button → showControls=false), so no extra closed-state rule is
+ * needed. The guardian in loader.js was updated with the same exemption
+ * (it skips — never closes — a surface hosting #artifacts-container). */
+[data-swipe-panel="right"]:not(:has(#artifacts-container)) {
         display: none !important;
 }
 
-div.h-full.z-10.bg-white.dark\:bg-gray-900 {
+div.h-full.z-10.bg-white.dark\:bg-gray-900:not(:has(#artifacts-container)) {
         display: none !important;
 }
 
-div[role="separator"]:has(+ div.h-full.z-10.bg-white.dark\:bg-gray-900) {
+div[role="separator"]:has(+ div.h-full.z-10.bg-white.dark\:bg-gray-900:not(:has(#artifacts-container))) {
         display: none !important;
 }
 
