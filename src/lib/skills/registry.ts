@@ -133,6 +133,61 @@ ${lines}${hintBlock}${loadedBlock}`;
   return prompt;
 }
 
+// ---------------------------------------------------------------------------
+// Manifest relevance — prompt diet for the first token
+// ---------------------------------------------------------------------------
+
+/**
+ * Lexical signal that a turn plausibly benefits from the FULL skills index
+ * (work-type vocabulary: files, design, sites, games, 3D, documents…).
+ * The full manifest is ~5 000 prompt tokens — on free-tier models that is
+ * ~8-10s of PREFILL before the first output token on EVERY message. Chit-chat,
+ * simple Q&A and greetings get the condensed manifest instead (~150 tokens),
+ * work requests keep the complete index + examples + hint machinery.
+ */
+const SKILL_RELEVANCE_RE = new RegExp(
+  [
+    // document / file generation
+    'pdf|word|excel|powerpoint|ppt|docx|xlsx|csv|fichier|file|document|rapport|report|pr[eé]sentation|slides?|m[eé]moire|thesis|cv|resume|lettre|letter|contrat|contract|facture|invoice',
+    // design / frontend / web
+    'design|interface|ui|ux|th[eè]me|theme|css|html|react|svelte|vue|angular|component|composant|landing|site|web|app|application|page|prototype|maquette|mockup|wireframe|figma|logo|poster|affiche|banni[eè]re|banner|brand|marque|guideline|charte',
+    // media / interactive
+    'jeu|game|3d|webgl|three|animation|gsap|scroll|framer|motion|vid[eé]o|artifact|dashboard|infograph|sch[eé]ma|diagramme|diagram|graphique|chart',
+    // engineering / tooling
+    'api|mcp|serveur|server|endpoint|clone|webapp|e2e|playwright|cypress|vitest|jest|automat|script|code|coder|programme|debug|refactor|migration|database|sql|regex|algorithm',
+  ].join('|'),
+  'i'
+);
+
+/** True when the turn's phrasing plausibly matches a skill domain. */
+export function skillsManifestRelevant(userText: string | null | undefined): boolean {
+  if (!userText || !userText.trim()) return false;
+  if (hintSkillForUserMessage(userText)) return true;
+  return SKILL_RELEVANCE_RE.test(userText);
+}
+
+/**
+ * Condensed skills manifest (~150 tokens vs ~5 000): the protocol + the bare
+ * skill NAMES, no descriptions/examples. The model can still request any
+ * skill with USE_SKILL(name) — the gate resolves it and loads the full pack —
+ * but trivial turns no longer pay the full index's prefill latency.
+ */
+export async function getCondensedSkillManifest(): Promise<string | null> {
+  if (!SKILL_CATALOG.length && !LIBRARY_SKILLS.length && !DESIGN_SKILL_CATALOG.length) return null;
+  if (!(await skillsEnabled())) return null;
+  const catalogNames = new Set(SKILL_CATALOG.map((s) => s.name));
+  const names = [
+    ...SKILL_CATALOG.map((s) => s.name),
+    ...DESIGN_SKILL_CATALOG.filter((s) => !catalogNames.has(s.name)).map((s) => s.name),
+    ...LIBRARY_SKILLS.filter((s) => !catalogNames.has(s.name)).map((s) => s.name),
+  ];
+  return (
+    'AGENT SKILLS — expert instruction packs can be injected into this conversation. If — and only if — the user\'s ' +
+    `request clearly requires one of: ${names.join(', ')} — make the FIRST line of your reply exactly ` +
+    'USE_SKILL(skill_name) to load it. Otherwise reply normally and never mention this protocol.'
+  );
+}
+
 export function skillNames(): Set<string> {
   return new Set([
     ...SKILL_CATALOG.map((s) => s.name),

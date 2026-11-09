@@ -736,7 +736,20 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       }
     }
     preSelectedNames.push(...preSelected.map((s) => s.name));
-    const skillManifest = await getSkillManifestPrompt(rawLastUserText, preSelectedNames);
+    // Prompt diet: the FULL skills manifest is ~5 000 prompt tokens — on
+    // free-tier models that is ~8-10s of prefill before the first output
+    // token, paid on EVERY message (measured in prod: Réflexion ~10s while
+    // a bare-prompt call to the same model answers instantly). Work-type
+    // requests (generation vocabulary / pre-selected or @-selected skills)
+    // keep the complete index + examples + hint; everything else gets the
+    // condensed manifest (~150 tokens) — USE_SKILL remains available either
+    // way, the streaming gate resolves it against the full catalog.
+    const manifestRelevant =
+      preSelected.length > 0 ||
+      (await import('@/lib/skills/registry')).skillsManifestRelevant(rawLastUserText);
+    const skillManifest = manifestRelevant
+      ? await getSkillManifestPrompt(rawLastUserText, preSelectedNames)
+      : await (await import('@/lib/skills/registry')).getCondensedSkillManifest();
     if (skillManifest) {
       skillsActive = true;
       const hasSkillsPrompt = llmMessages.some(
