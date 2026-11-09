@@ -1032,6 +1032,51 @@ html.nsrc-lock{overflow:hidden}
 
   // ------------------------------------------------ chat completions patch
   const nativeFetch = window.fetch.bind(window);
+
+  // JSON-response sanitizer for chat completions. The compiled chat helper
+  // parses EVERY non-SSE response as JSON — `if (!res.ok) throw await
+  // res.json()` — so an EMPTY body (platform 502 before the function
+  // answered, gateway cut, aborted invocation) makes that exact line throw
+  // "Failed to execute 'json' on 'Response': Unexpected end of JSON input"
+  // and surfaces the cryptic TypeError to the user. Buffer the body once;
+  // empty or non-JSON → replace with a parseable payload the app can show.
+  const sanitizeChatJson = async (res) => {
+    try {
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/event-stream')) return res; // stream — untouched
+      let text = '';
+      try {
+        text = await res.text();
+      } catch (e) {
+        return res; // unreadable — the app's own error path applies
+      }
+      if (text.trim() !== '') {
+        try {
+          JSON.parse(text);
+          return new Response(text, {
+            status: res.status,
+            headers: { 'content-type': ct || 'application/json' },
+          });
+        } catch (e) {
+          /* non-JSON body — replaced below */
+        }
+      }
+      // Empty (or non-JSON) body: give the compiled helper something it can
+      // parse — `null` for ok responses (socket-mode parity), a French,
+      // actionable detail for errors.
+      const detail =
+        "La réponse du serveur s'est interrompue" +
+        (res.status ? " (" + res.status + ")" : '') +
+        '. Réessayez — ou tapez « continue » si la génération avait commencé.';
+      return new Response(res.ok ? 'null' : JSON.stringify({ detail }), {
+        status: res.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    } catch (e) {
+      return res;
+    }
+  };
+
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const isChatPost =
@@ -1065,7 +1110,7 @@ html.nsrc-lock{overflow:hidden}
       Date.now() - (nativeSidActivity.get(bodyObj.session_id) || 0) < 90000;
     const nativeSocketAlive = !engaged && sidAlive;
     if (nativeSocketAlive) {
-      return nativeFetch(input, init);
+      return nativeFetch(input, init).then(sanitizeChatJson);
     }
 
     // Serverless mode — one of:
@@ -1088,7 +1133,7 @@ html.nsrc-lock{overflow:hidden}
 
     return nativeFetch(input, patchedInit).then(async (res) => {
       const ct = (res.headers.get('content-type') || '').toLowerCase();
-      if (!ct.includes('text/event-stream')) return res; // JSON error path
+      if (!ct.includes('text/event-stream')) return sanitizeChatJson(res); // JSON error path
 
       const chatId = bodyObj.chat_id || null;
       const messageId = bodyObj.id || null;
@@ -1108,11 +1153,19 @@ html.nsrc-lock{overflow:hidden}
       // The compiled app just sees one long generation — the code lands in a
       // single message, no error banner, no user action. Without the bridge
       // marker the behavior is exactly the previous one.
-      const MAX_CONT_ROUNDS = 3;
+      // Each continuation round is a FRESH serverless invocation carrying
+      // its own full time budget (52s each on the Hobby plan) — allow enough
+      // rounds for genuinely long generations (code files, long prose).
+      const MAX_CONT_ROUNDS = 6;
       const contCtl = new AbortController();
       let contRounds = 0;
       let truncated = false; // marker seen in the CURRENT response
       let everTruncated = false;
+      // True once an event that FINALIZES the message on the app side has
+      // been pushed (chat:completion done, or a message error). A stream cut
+      // without any (serverless hard kill, network drop) would otherwise
+      // leave the message spinning forever.
+      let finalizeSeen = false;
       const abortChain = () => {
         try {
           contCtl.abort();
@@ -1169,6 +1222,14 @@ html.nsrc-lock{overflow:hidden}
               if (truncated && (t === 'chat:message:error' || t === 'chat:list')) {
                 continue;
               }
+              // Track what finalizes the message on the app side — used by
+              // the cut-without-marker recovery after the stream ends.
+              if (
+                (t === 'chat:completion' && env.data.data && env.data.data.done) ||
+                t === 'chat:message:error'
+              ) {
+                finalizeSeen = true;
+              }
               pushEvent(env); // full socket-event envelope from the backend
             }
           }
@@ -1209,32 +1270,35 @@ html.nsrc-lock{overflow:hidden}
         }
       }
 
-      // Fallback finalize: a truncated round whose continuation chain could
-      // not complete (round cap reached / continuation request failed).
-      // A BARE done event (no content) makes the compiled app finalize with
-      // the message's CURRENT accumulated content — the full chain output or
-      // the partial, either way graceful — and a hint tells the user how to
-      // finish manually when the cap was the limit.
-      if (everTruncated && envMessageId) {
+      // Cut-without-marker recovery — finalize when the stream ended WITHOUT
+      // any completion/error event: either a truncated round whose
+      // continuation chain could not complete (round cap reached /
+      // continuation request failed), or a stream cut hard (serverless
+      // invocation killed at the platform limit, network drop) before the
+      // backend's graceful nelth:continue marker. A BARE done event (no
+      // content) makes the compiled app finalize with the message's CURRENT
+      // accumulated content — the full chain output or the partial, either
+      // way graceful — and the hint tells the user how to finish manually.
+      if (!finalizeSeen && envMessageId) {
         pushEvent({
           chat_id: envChatId,
           message_id: envMessageId,
           data: { type: 'chat:completion', data: { done: true } },
         });
-        if (truncated) {
-          pushEvent({
-            chat_id: envChatId,
-            message_id: envMessageId,
+        pushEvent({
+          chat_id: envChatId,
+          message_id: envMessageId,
+          data: {
+            type: 'status',
             data: {
-              type: 'status',
-              data: {
-                action: 'chat',
-                description: 'Limite de temps atteinte — tapez « continue » pour poursuivre la génération',
-                done: true,
-              },
+              action: 'chat',
+              description: truncated
+                ? 'Limite de temps atteinte — tapez « continue » pour poursuivre la génération'
+                : 'Génération interrompue — tapez « continue » pour poursuivre',
+              done: true,
             },
-          });
-        }
+          },
+        });
       }
 
       // The socket-mode HTTP response is `null` JSON — mirror it exactly so
