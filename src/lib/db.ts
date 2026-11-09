@@ -55,6 +55,25 @@ function resolveDatabaseUrl(): string {
 
 const databaseUrl = resolveDatabaseUrl()
 
+/**
+ * Cap the Prisma connection pool (Supabase session pooler hard limit).
+ *
+ * The session pooler (port 5432, pgbouncer session mode) allows a TOTAL of
+ * ~15 server-side client slots for the whole database — shared by EVERY app
+ * instance pointing at it (local dev server + each serverless function
+ * instance). Prisma's default pool (num_cpus×2+1, up to 17+ on a big host)
+ * can single-handedly exhaust the pooler: intermittent
+ * `FATAL: (EMAXCONNSESSION) max clients reached in session mode - pool_size:
+ * 15` on the first query of a request (auth lookup → empty 500). A small
+ * per-client cap keeps every instance well under the shared budget; bursts
+ * beyond the cap queue briefly (pool_timeout) instead of erroring.
+ */
+function capConnectionPool(url: string): string {
+  if (!url) return url
+  if (/[?&]connection_limit=/.test(url)) return url // explicit override wins
+  return `${url}${url.includes('?') ? '&' : '?'}connection_limit=3&pool_timeout=10`
+}
+
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
@@ -62,7 +81,7 @@ const globalForPrisma = globalThis as unknown as {
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    ...(databaseUrl ? { datasources: { db: { url: databaseUrl } } } : {}),
+    ...(databaseUrl ? { datasources: { db: { url: capConnectionPool(databaseUrl) } } } : {}),
     log: process.env.PRISMA_LOG === 'query' ? ['query'] : ['error'],
   })
 
