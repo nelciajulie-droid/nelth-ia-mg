@@ -171,11 +171,6 @@ export interface StreamChatOptions {
   background_tasks?: Record<string, unknown>;
   /** Feature toggles for this turn (image_generation, web_search, …). */
   features?: Record<string, boolean>;
-  /** @ app mention picker selection — registry connector ids routed by
-   * the chat flow (v12-flow 3.3ter-bis: web_search forces the search
-   * pipeline, Google apps bridge onto the connector tools, the rest get a
-   * true status row + an honest context note). */
-  connector_ids?: string[];
 }
 
 /**
@@ -224,7 +219,6 @@ export async function streamChatCompletion(
       ...(options.user_message ? { user_message: options.user_message } : {}),
       ...(options.background_tasks ? { background_tasks: options.background_tasks } : {}),
       ...(options.features ? { features: options.features } : {}),
-      ...(options.connector_ids?.length ? { connector_ids: options.connector_ids } : {}),
       // UI event transport: the whole socket event flow (status, files,
       // deltas, titles) is serialized into this SSE response.
       session_id: crypto.randomUUID(),

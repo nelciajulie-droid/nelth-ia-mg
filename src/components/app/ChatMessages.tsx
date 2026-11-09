@@ -72,45 +72,6 @@ const PHASE_LABELS: Record<string, string> = {
   image: "Finalizing",
 };
 
-/** @ app mention chips pinned on a user message (connector_ids metadata). */
-function AppChips({ apps }: { apps: NonNullable<UiMessage["apps"]> }) {
-  if (apps.length === 0) return null;
-  return (
-    <div className="mb-1.5 flex flex-wrap gap-1.5">
-      {apps.map((app) => (
-        <span
-          key={app.id}
-          className="inline-flex max-w-full items-center gap-1 rounded-full bg-white/25 px-2 py-0.5 text-[11px] font-medium text-white"
-          title={`${app.name} — mentionné via le sélecteur @`}
-        >
-          <span
-            className="flex size-3.5 shrink-0 items-center justify-center rounded-full bg-white/30 [&>svg]:size-2.5"
-            aria-hidden
-            dangerouslySetInnerHTML={{ __html: app.icon }}
-          />
-          <span className="max-w-[140px] truncate">{app.name}</span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-/** Visible status rows emitted by the flow for a turn — connector states
- * (@ picker), loaded skills, web-search funnel (same protocol as the SPA). */
-function StatusNotes({ notes }: { notes: NonNullable<UiMessage["statusNotes"]> }) {
-  if (notes.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-1">
-      {notes.map((note) => (
-        <div key={note} className="flex items-center gap-1.5 pl-1 text-[11px] text-zinc-500">
-          <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />
-          <span className="truncate">{note}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /** One assistant message's image-generation visuals. */
 function ImageGenerationBlock({ message, isLast, streaming }: { message: UiMessage; isLast: boolean; streaming: boolean }) {
   const imageFiles = (message.files ?? []).filter(
@@ -285,7 +246,6 @@ export function ChatMessages({
               <div key={message.id} className="flex justify-end gap-2.5">
                 <div className="group/message flex max-w-[85%] flex-col items-end gap-1 sm:max-w-[75%]">
                   <div className="rounded-2xl rounded-br-md bg-emerald-600 px-4 py-2.5 text-white shadow-sm">
-                    <AppChips apps={message.apps ?? []} />
                     <FileChips files={message.files ?? []} light />
                     <div className="whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed">
                       {message.content}
@@ -308,7 +268,6 @@ export function ChatMessages({
                 <Sparkles className="size-4 text-emerald-600" aria-hidden />
               </div>
               <div className="group/message flex max-w-[85%] flex-col items-start gap-1 sm:max-w-[75%]">
-                <StatusNotes notes={message.statusNotes ?? []} />
                 {message.content.length > 0 || (showCursor && !message.imageGeneration) ? (
                   <div className="rounded-2xl rounded-bl-md border border-zinc-200 bg-white px-4 py-2.5 shadow-sm">
                     {/* The animated N logo is rendered INSIDE the markdown

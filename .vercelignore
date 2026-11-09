@@ -1,9 +1,8 @@
-# Vercel upload excludes — the retired compiled SPA (public/_app, pyodide,
-# sql.js: 121 MB of dead weight now that "/" is the React app) and local-only
-# artifacts (SQLite database, secrets, mini-services, tests).
-public/_app
-public/pyodide
-public/sql.js
+# Vercel upload excludes — local-only artifacts (secrets, database, dev
+# tooling). public/ is uploaded IN FULL: the compiled Open WebUI SPA under
+# public/ (index.html + _app + static/loader.js overlay) IS the production
+# frontend served at "/" (next.config rewrites) — excluding any of it would
+# break the app.
 db
 data
 mini-services

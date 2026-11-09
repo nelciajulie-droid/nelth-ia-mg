@@ -46,7 +46,6 @@ import type {
   SessionUser,
   UiMessage,
 } from "@/lib/types";
-import type { ConnectorListItem } from "@/lib/apps/app-types";
 
 // ---------------------------------------------------------------------------
 // Bootstrap: restore session from the stored bearer token
@@ -188,44 +187,6 @@ export default function Home() {
   const { toast } = useToast();
   const boot = useBootstrap();
 
-  // ---- @ app picker OAuth round-trips landing on "/" ---------------------
-  // The Google connector client authorizes ONLY the production root as its
-  // redirect URI: the provider lands ?code&state on "/" and this app
-  // forwards them to /api/v1/connectors/{id}/callback (the state cookie,
-  // Path=/, rides along the same-origin navigation). The callback then
-  // redirects to /?connected={id}.
-  React.useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-    const state = params.get("state");
-    const error = params.get("error");
-    const connected = params.get("connected");
-
-    if (code && state) {
-      const connectorId = state.split(".").pop() ?? "";
-      if (/^[a-z0-9_]{1,32}$/.test(connectorId)) {
-        window.location.replace(
-          `/api/v1/connectors/${connectorId}/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`
-        );
-        return;
-      }
-    }
-    if (error) {
-      toast({ title: "Connexion refusée", description: error });
-      window.history.replaceState({}, "", "/");
-      return;
-    }
-    if (connected) {
-      // Connector callback success — the picker re-fetches the registry on
-      // mount, so a toast + clean URL is all that is needed.
-      toast({
-        title: "Application connectée",
-        description: "Le sélecteur @ affiche l’état à jour de vos applications.",
-      });
-      window.history.replaceState({}, "", "/");
-    }
-  }, []);
-
   // ---- auth ----
   const [user, setUser] = React.useState<SessionUser | null>(null);
   React.useEffect(() => {
@@ -358,7 +319,7 @@ export default function Home() {
   // Send message → (create chat if needed) → stream → title
   // -------------------------------------------------------------------------
 
-  async function sendMessage(text: string, files: AttachedFile[], apps: ConnectorListItem[]) {
+  async function sendMessage(text: string, files: AttachedFile[]) {
     if (!model || streamingRef.current) return;
     streamingRef.current = true;
     setStreaming(true);
@@ -372,9 +333,6 @@ export default function Home() {
         type: "file" as const,
         name: file.name,
       })),
-      // @ app mentions for this turn — chips above the bubble (the wire
-      // metadata rides connector_ids, the text itself stays clean).
-      apps: apps.map((app) => ({ id: app.id, name: app.name, icon: app.icon })),
     };
     const assistantId = `assistant-${Date.now()}`;
     setMessages((prev) => [...prev, userMessage, { id: assistantId, role: "assistant", content: "" }]);
@@ -446,10 +404,6 @@ export default function Home() {
           // Imagine tool toggle — routes this turn through the Nelthai image
           // engine (text→image, or image→image with image attachments).
           ...(imageTool ? { features: { image_generation: true } } : {}),
-          // @ app mention picker selection — routed by the flow (web_search
-          // forces the search pipeline, Google apps bridge onto the connector
-          // tools, the rest get a true status row + an honest context note).
-          connector_ids: apps.map((app) => app.id),
         },
         {
           onDelta: (delta) => {
@@ -468,32 +422,18 @@ export default function Home() {
           },
           // Live image-generation phases: "Generating image · sending|generating|image".
           onStatus: (status) => {
-            if (status.action === "image_generation") {
-              const phase = status.description?.includes("·")
-                ? status.description.split("·").pop()?.trim() ?? null
-                : status.description ?? null;
-              patchAssistant((message) => ({
-                imageGeneration: {
-                  active: !status.done && (message.files?.length ?? 0) === 0,
-                  phase,
-                  error: message.imageGeneration?.error,
-                  completedAt: message.imageGeneration?.completedAt,
-                },
-              }));
-              return;
-            }
-            // Visible status rows — the same protocol the SPA renders:
-            // connector states (@ picker), loaded skills, web-search funnel.
-            if (
-              (status.action === "connector" || status.action === "skill" || status.action === "web_search") &&
-              status.description
-            ) {
-              patchAssistant((message) => {
-                const notes = message.statusNotes ?? [];
-                if (notes.includes(status.description!)) return {};
-                return { statusNotes: [...notes, status.description!] };
-              });
-            }
+            if (status.action !== "image_generation") return;
+            const phase = status.description?.includes("·")
+              ? status.description.split("·").pop()?.trim() ?? null
+              : status.description ?? null;
+            patchAssistant((message) => ({
+              imageGeneration: {
+                active: !status.done && (message.files?.length ?? 0) === 0,
+                phase,
+                error: message.imageGeneration?.error,
+                completedAt: message.imageGeneration?.completedAt,
+              },
+            }));
           },
           // Generated images landing — flips the generation card to its reveal.
           onFiles: (files) => {
@@ -640,7 +580,7 @@ export default function Home() {
               userName={user.name}
               userAvatar={user.profile_image_url}
               chatTitle={chatTitle}
-              onSuggest={(prompt) => void sendMessage(prompt, [], [])}
+              onSuggest={(prompt) => void sendMessage(prompt, [])}
             />
           </div>
 
@@ -654,7 +594,7 @@ export default function Home() {
                 streaming={streaming}
                 imageTool={imageTool}
                 onImageToolChange={setImageTool}
-                onSend={(text, files, apps) => void sendMessage(text, files, apps)}
+                onSend={(text, files) => void sendMessage(text, files)}
               />
             </div>
           </div>

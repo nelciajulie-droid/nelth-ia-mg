@@ -99,12 +99,6 @@ export interface UiMessage {
   files?: MessageFile[];
   /** Assistant-only: live image-generation card state (Nelthai job). */
   imageGeneration?: ImageGenerationState;
-  /** User-only: apps pinned through the @ mention picker for this turn
-   * (chips + connector_ids metadata — id/name/icon from the registry). */
-  apps?: Array<{ id: string; name: string; icon: string }>;
-  /** Assistant-only: visible status rows emitted by the flow — skills
-   * loaded, connector states, web-search funnel (same protocol). */
-  statusNotes?: string[];
 }
 
 export interface ChatDetail {

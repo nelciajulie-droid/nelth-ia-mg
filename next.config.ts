@@ -1,17 +1,16 @@
 import type { NextConfig } from "next";
 
 /**
- * Open WebUI (backend TypeScript port) — Next.js hosts the API surface
- * (/api/*, /ollama/*, /openai/*, /oauth/*) — the Python → TypeScript port of
- * open_webui (FastAPI parity) — plus the React single-page chat client
- * (src/app/page.tsx): the @ app mention picker, RAG attachments, knowledge
- * bases and settings all live in the source tree (the legacy compiled SPA
- * under public/ is retired — kept on disk for reference, excluded from
- * Vercel via .vercelignore).
+ * Open WebUI (backend TypeScript port) — Next.js hosts two things:
  *
- * Old SPA bookmarks and OAuth login returns point at /auth (and /chat):
- * they are aliased to "/" — the React app renders the auth view when
- * signed out and the chat when signed in.
+ *   1. The API surface (/api/*, /ollama/*, /openai/*, /oauth/*) — the
+ *      Python → TypeScript port of open_webui (FastAPI parity).
+ *   2. The ORIGINAL, UNMODIFIED Open WebUI frontend build (public/) —
+ *      produced by `npm run build` in the official open-webui repository
+ *      (@sveltejs/adapter-static, fallback index.html).
+ *
+ * SPA fallback: non-API paths are rewritten to /index.html so SvelteKit
+ * client-side routing works for /chat, /auth, /workspace, ... (deep links).
  */
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -30,12 +29,20 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return {
       beforeFiles: [
-        // Legacy SPA routes (OAuth login return "/auth", bookmarks "/chat")
-        // land on the React single-page client.
-        { source: "/auth", destination: "/" },
-        { source: "/chat", destination: "/" },
+        // "/" → original SPA (public/index.html)
+        { source: "/", destination: "/index.html" },
       ],
-      afterFiles: [],
+      afterFiles: [
+        {
+          // SPA fallback for client-side routes (/chat, /auth, /admin/...).
+          // API namespaces are excluded so the catch-all route handlers win;
+          // real static files (/_app/*, /favicon.png, /manifest.json, ...) are
+          // served from public/ by the filesystem step BEFORE these rewrites.
+          source:
+            "/:path((?!api(?:/|$)|ollama(?:/|$)|openai(?:/|$)|oauth(?:/|$)|openapi(?:/|$)|docs(?:/|$)|_next(?:/|$)|_vercel(?:/|$)|ws(?:/|$)|health(?:/|$)|litellm(?:/|$)|index\\.html).*)",
+          destination: "/index.html",
+        },
+      ],
       fallback: [],
     };
   },
