@@ -248,6 +248,50 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   const assistantMessageId: string | null = messageIds[0]?.message_id ?? null;
   const userMessageId: string | null = userMessage?.id ?? null;
 
+  // ------------------------------------------ 1bis. Vision attachment capture
+  // (Nelth-4.0_Flash — TokenHarbor flash model). The compiled SPA inlines
+  // attached images as content blocks ({type:"image_url", image_url:{url}})
+  // on the user message and/or lists them in its `files` array. Text-only
+  // models flatten all of that away; vision-capable models get the images
+  // re-injected as `image_url` blocks right before the upstream call (after
+  // every text augmentation — see the vision injection below section 4).
+  const visionImageRefs: Array<{ id?: string; url?: string; type?: string; name?: string } | string> = [];
+  try {
+    // Dedupe key: the compiled SPA references the SAME attachment both as an
+    // inline content block and in the message's `files` array — without this
+    // the model would see every image twice.
+    const seenVisionKeys = new Set<string>();
+    const pushRef = (ref: { id?: string; url?: string; type?: string; name?: string } | string): void => {
+      const key = typeof ref === 'string' ? ref : String(ref.url || ref.id || '');
+      if (!key || seenVisionKeys.has(key)) return;
+      seenVisionKeys.add(key);
+      visionImageRefs.push(ref);
+    };
+    const collectImageBlocks = (content: unknown): void => {
+      if (!Array.isArray(content)) return;
+      for (const part of content) {
+        const url =
+          part && typeof part === 'object' && (part as any).type === 'image_url'
+            ? (part as any).image_url?.url
+            : null;
+        if (typeof url === 'string' && url) pushRef(url);
+      }
+    };
+    collectImageBlocks(userMessage?.content);
+    const lastFormMsg = Array.isArray(form.messages) ? form.messages[form.messages.length - 1] : null;
+    if (lastFormMsg && typeof lastFormMsg === 'object') collectImageBlocks((lastFormMsg as any).content);
+    for (const file of [
+      ...(Array.isArray(userMessage?.files) ? userMessage.files : []),
+      ...(Array.isArray((lastFormMsg as any)?.files) ? (lastFormMsg as any).files : []),
+    ]) {
+      if (file && typeof file === 'object' && ((file as any).url || (file as any).id)) {
+        pushRef(file as any);
+      }
+    }
+  } catch {
+    /* unreadable attachments → text-only turn */
+  }
+
   // Serverless realtime transport — requested by the loader.js bridge when
   // the browser cannot reach a socket.io service (Vercel & co). The whole
   // socket-event flow (status, streaming deltas, sources, titles, done) is
@@ -1589,9 +1633,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     KILO_GATEWAY_API_KEY,
     KILO_REASONING_MODEL_ID,
   } = await import('@/lib/kilo-llm');
+  const {
+    isTokenharborModel,
+    tokenharborAvailable,
+    TOKENHARBOR_BASE_URL,
+    TOKENHARBOR_API_KEY,
+  } = await import('@/lib/tokenharbor-llm');
   const isKilo = isKiloModel(modelId);
   if (isKilo && !kiloAvailable()) {
     return json({ detail: `Model ${modelId} not found (Kilo gateway not configured)` }, 404);
+  }
+  // Third built-in — "Nelth-4.0_Flash" (TokenHarbor deepseek-v4.1-flash):
+  // multimodal fast model, no keyless fallback (a missing key 404s).
+  const isTH = isTokenharborModel(modelId);
+  if (isTH && !tokenharborAvailable()) {
+    return json({ detail: `Model ${modelId} not found (TokenHarbor gateway not configured)` }, 404);
   }
   // Keyless fallback: no gateway key → the built-in z-ai engine answers in
   // place of the gateway (callUpstream synthesizes the OpenAI-shaped upstream
@@ -1599,12 +1655,55 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   const kiloFallback = isKilo && kiloFallbackActive();
   const route: ModelRoute | null = isKilo
     ? { type: 'openai', model: modelId, baseUrl: KILO_GATEWAY_BASE_URL, apiKey: KILO_GATEWAY_API_KEY }
-    : await resolveModelRoute(modelId);
+    : isTH
+      ? { type: 'openai', model: modelId, baseUrl: TOKENHARBOR_BASE_URL, apiKey: TOKENHARBOR_API_KEY }
+      : await resolveModelRoute(modelId);
   if (!route) {
     return json(
       { detail: `Model ${modelId} not found` },
       404
     );
+  }
+
+  // Vision injection (Nelth-4.0_Flash): this turn's captured attachments
+  // (section 1bis) become `image_url` content blocks on the LAST user
+  // message. Runs HERE — after every text augmentation (web-search context,
+  // skills, misspell hint) so the pipeline above stays plain-string and
+  // only the final wire shape carries the images.
+  if (isTH && visionImageRefs.length) {
+    try {
+      const { resolveImageSources } = await import('@/lib/image-generation');
+      const sources = await resolveImageSources(visionImageRefs as any[]);
+      const parts: Array<{ type: 'image_url'; image_url: { url: string } }> = [];
+      for (const s of sources) {
+        if (s.kind === 'bytes' && s.bytes?.length) {
+          parts.push({
+            type: 'image_url',
+            image_url: {
+              url: `data:${s.contentType ?? 'image/png'};base64,${s.bytes.toString('base64')}`,
+            },
+          });
+        } else if (s.kind === 'url' && /^https?:\/\//i.test(s.url)) {
+          parts.push({ type: 'image_url', image_url: { url: s.url } });
+        }
+      }
+      if (parts.length) {
+        for (let i = llmMessages.length - 1; i >= 0; i--) {
+          if (llmMessages[i]?.role === 'user') {
+            (llmMessages[i] as any).content = [
+              { type: 'text', text: String(llmMessages[i].content ?? '') },
+              ...parts,
+            ];
+            console.log(
+              `[v12-flow] vision turn — ${parts.length} image block(s) injected for ${modelId}`
+            );
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[v12-flow] vision injection failed', e);
+    }
   }
 
   const params = form.params ?? {};
@@ -1627,12 +1726,20 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   if (reqBody.max_tokens === undefined && isKilo) {
     reqBody.max_tokens = modelId === KILO_REASONING_MODEL_ID ? 65_536 : 131_072;
   }
+  // Flash tier ceiling: generous enough that long code answers never die
+  // mid-stream with finish_reason "length" (the user's own params.max_tokens
+  // always wins).
+  if (reqBody.max_tokens === undefined && isTH) {
+    reqBody.max_tokens = 8_192;
+  }
   console.log(
     `[v12-flow] upstream request: model=${modelId} max_tokens=${
       reqBody.max_tokens ?? 'gateway-default'
     } stream=${form.stream ?? false}`
   );
-  if (form.stream === true) {
+  if (form.stream === true && !isTH) {
+    // TokenHarbor (flash) is omitted stream_options: strict OpenAI-compatible
+    // gateways may reject the field, and usage telemetry is cosmetic here.
     reqBody.stream_options = { ...(reqBody.stream_options ?? {}), include_usage: true };
   }
   if (isKilo) {
@@ -1641,6 +1748,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const thinking = kiloModelWantsThinking(modelId);
     reqBody.reasoning = { enabled: thinking };
     reqBody.include_reasoning = thinking;
+  }
+  if (isTH) {
+    // TokenHarbor native thinking switch — the flash tier answers DIRECT:
+    // chain-of-thought disabled at the model level (no reasoning deltas).
+    reqBody.thinking = { type: 'disabled' };
   }
 
   let url: string;
@@ -1847,7 +1959,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // short backoff between attempts: the model the user picked is never
     // substituted (explicit user rule — a persisting upstream error
     // surfaces as-is instead of silently answering with a different model).
-    if (isKilo && upstream.status === 400) {
+    if ((isKilo || isTH) && upstream.status === 400) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         if (upstream.status !== 400) break;
         const probe = await upstream.clone().text().catch(() => '');
@@ -2717,7 +2829,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
             ...reqBody,
             messages: await buildSkillInjectionMessages(llmMessages, skill),
           });
-          if (isKilo && res2.status === 400) {
+          if ((isKilo || isTH) && res2.status === 400) {
             const probe = await res2.clone().text().catch(() => '');
             if (/bad request|Provider returned error/i.test(probe)) {
               console.warn('[v12-flow] skill pass-2 gateway 400 flake — retrying');
@@ -3049,7 +3161,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
                 ? llmMessages
                 : await buildSkillInjectionMessages(llmMessages, skill);
               res2 = await callUpstream({ ...reqBody, messages: messages2 });
-              if (isKilo && res2.status === 400) {
+              if ((isKilo || isTH) && res2.status === 400) {
                 const probe = await res2.clone().text().catch(() => '');
                 if (/bad request|Provider returned error/i.test(probe)) {
                   console.warn('[v12-flow] 5c skill pass-2 gateway 400 flake — retrying');
@@ -3211,6 +3323,11 @@ async function generateChatTitle(route: ModelRoute, messages: { role: string; co
     if (isKiloModel(route.model)) {
       body.reasoning = { enabled: false };
       body.include_reasoning = false;
+    }
+    // TokenHarbor flash model → thinking disabled for titles (direct answer).
+    const { isTokenharborModel } = await import('@/lib/tokenharbor-llm');
+    if (isTokenharborModel(route.model)) {
+      body.thinking = { type: 'disabled' };
     }
 
     const res = await fetch(url, {

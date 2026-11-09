@@ -139,11 +139,13 @@ export async function getModelsForUser(user: ApiUser): Promise<ModelItem[]> {
   const defaultModels = await configGet<string>('ui.default_models', env.DEFAULT_MODELS);
   void defaultModels;
 
-  // Built-in Kilo AI Gateway models (TS-port extension): exposed in the model
+  // Built-in engine models (TS-port extension): exposed in the model
   // selector with zero external connections configured so chat completions
   // are testable out of the box.
-  //   1. dots-studio/dots-3-note-preview:free  — standard chat model
-  //   2. nvidia/nemotron-3-ultra-550b-a55b:free — reasoning (thinking) model
+  //   1. dots-studio/dots-3-note-preview:free  — standard chat model (Kilo)
+  //   2. nvidia/nemotron-3-ultra-550b-a55b:free — reasoning (thinking) model (Kilo)
+  //   3. deepseek-v4.1-flash:free              — fast multimodal (vision) model
+  //      (TokenHarbor), shown as "Nelth-4.0_Flash"
   const kiloLlmEnabled = await configGet<boolean>('kilo_llm.enable', true);
   if (kiloLlmEnabled) {
     const {
@@ -176,6 +178,39 @@ export async function getModelsForUser(user: ApiUser): Promise<ModelItem[]> {
     }
   }
 
+  // Built-in TokenHarbor flash model — "Nelth-4.0_Flash" (deepseek-v4.1-
+  // flash:free): fast multimodal chat, vision-capable. Listed only when the
+  // gateway key is configured (no keyless fallback for this engine).
+  const tokenharborEnabled = await configGet<boolean>('tokenharbor_llm.enable', true);
+  if (tokenharborEnabled) {
+    const { TH_MODEL_ID, TH_MODEL_NAME, TH_MODEL_DESCRIPTION, tokenharborAvailable } =
+      await import('@/lib/tokenharbor-llm');
+    if (tokenharborAvailable()) {
+      const created = Math.floor(Date.now() / 1000);
+      const id = TH_MODEL_ID;
+      const name = TH_MODEL_NAME;
+      const description = TH_MODEL_DESCRIPTION;
+      // capabilities.vision → the compiled SPA enables image attachments
+      // for this model and the backend injects image_url content blocks.
+      const meta = {
+        id,
+        name,
+        description,
+        capabilities: { vision: true },
+        tags: [{ name: 'llm' }, { name: 'tokenharbor' }, { name: 'vision' }],
+      };
+      models.push({
+        id,
+        name,
+        object: 'model',
+        created,
+        owned_by: 'tokenharbor',
+        info: { id, name, meta, is_active: true, description },
+        meta,
+      });
+    }
+  }
+
   // NOTE — image generation is deliberately NOT exposed here: it is a TOOL
   // (the image toggle in the chat input → features.image_generation), not a
   // chat model. The picker must list the two Kilo LLM models only. The
@@ -197,6 +232,14 @@ export async function resolveModelRoute(
   if (isKiloModel(normalized)) {
     if (!kiloAvailable()) return null;
     return { type: 'openai', baseUrl: KILO_GATEWAY_BASE_URL, apiKey: KILO_GATEWAY_API_KEY, model: normalized };
+  }
+
+  // Built-in TokenHarbor flash model routes directly to its gateway.
+  const { isTokenharborModel, tokenharborAvailable, TOKENHARBOR_BASE_URL, TOKENHARBOR_API_KEY } =
+    await import('@/lib/tokenharbor-llm');
+  if (isTokenharborModel(modelId)) {
+    if (!tokenharborAvailable()) return null;
+    return { type: 'openai', baseUrl: TOKENHARBOR_BASE_URL, apiKey: TOKENHARBOR_API_KEY, model: modelId };
   }
 
   // workspace model overrides route to their base model
