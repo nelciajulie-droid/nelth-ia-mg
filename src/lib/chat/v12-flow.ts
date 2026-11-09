@@ -636,12 +636,19 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // generate real downloadable documents (```document filename="..." blocks)
   // — converted to PDF/DOCX/… files by the completion pipeline below. Without
   // this the LLM defaults to "I can't create files, copy/paste this template".
+  // Prompt diet: ~930 tokens — injected only when the turn plausibly involves
+  // document/file work (generous lexical gate; when in doubt it rides). Trivial
+  // turns keep a bare context and prefill proportionally faster.
   {
-    const { CAPABILITY_SYSTEM_PROMPT } = await import('@/lib/document-generation');
+    const { CAPABILITY_SYSTEM_PROMPT, FILE_REQUEST_RE } = await import('@/lib/document-generation');
+    const CAPABILITY_RELEVANCE_RE =
+      /\b(fichier|file|pdf|docx?|word|excel|xlsx|csv|pptx?|powerpoint|slides?|pr[eé]sentation|t[eé]l[eé]charg\w*|download|export\w*|cv|lett?re|rapport|report|m[eé]moire|contrat|facture|invoice|cr[eé][ea]|g[eé]n[eè]r\w*|fais|produis|r[eé]dige|write|make|build)\b/i;
+    const capabilityRelevant =
+      FILE_REQUEST_RE.test(rawLastUserText || '') || CAPABILITY_RELEVANCE_RE.test(rawLastUserText || '');
     const hasCapabilityPrompt = llmMessages.some(
       (m) => m.role === 'system' && m.content.includes('DOCUMENT CREATION CAPABILITY')
     );
-    if (!hasCapabilityPrompt) {
+    if (capabilityRelevant && !hasCapabilityPrompt) {
       if (llmMessages.length && llmMessages[0].role === 'system') {
         llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}\n\n---\n\n${CAPABILITY_SYSTEM_PROMPT}` };
       } else {
