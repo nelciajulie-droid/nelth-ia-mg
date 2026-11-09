@@ -1,7 +1,7 @@
 import { db } from '@/lib/db';
 
 /**
- * Port of open_webui/models/users.py (UsersTable + ApiKey table) on Prisma/SQLite.
+ * Port of open_webui/models/users.py (UsersTable + ApiKey table) on Prisma/Postgres.
  *
  * Row → API-shape mappers mirror the Pydantic UserModel / UserResponse models:
  *   • JSON columns (info/variables/settings/oauth/scim) are TEXT → JSON.parse.
@@ -428,7 +428,7 @@ export const Users = {
       const providerData = oauth[provider];
       if (!providerData || typeof providerData !== 'object') continue;
       const storedSub = providerData.sub;
-      // JSON numbers compare loosely with their string form (SQLite numeric JSON)
+      // JSON numbers compare loosely with their string form (numeric JSON)
       if (storedSub === subStr || String(storedSub) === subStr) return toUserModel(row);
     }
     return null;
@@ -465,7 +465,7 @@ export const Users = {
 
     if (filter) {
       if (filter.query) {
-        // Python ilike() → case-insensitive contains (SQLite LIKE semantics)
+        // Python ilike() → case-insensitive contains (LIKE semantics)
         const q = filter.query.toLowerCase();
         rows = rows.filter(
           (r) => (r.name ?? '').toLowerCase().includes(q) || (r.email ?? '').toLowerCase().includes(q)

@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { hasAccessGrant } from '@/lib/access-control';
 
 /**
- * Port of open_webui/models/folders.py (FolderTable) — SQLite via Prisma.
+ * Port of open_webui/models/folders.py (FolderTable) — Supabase Postgres via Prisma.
  *
  * FolderModel mirrors the Python pydantic model field-for-field:
  *   {id, parent_id, user_id, name, items, meta, data, is_expanded,

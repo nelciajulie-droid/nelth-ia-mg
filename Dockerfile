@@ -13,10 +13,9 @@ FROM oven/bun:1 AS base
 WORKDIR /app
 
 # ── Dépendances (couche cachable) ────────────────────────────────────────
-# Schémas + scripts prisma AVANT l'install : le postinstall (scripts/prisma.mjs)
-# lit prisma/ pour générer le client (sqlite par défaut — pas de DATABASE_URL
-# au build ; les déploiements Postgres sont corrigés au démarrage par
-# scripts/serve.mjs → prisma.mjs `ensure`).
+# Schéma + scripts prisma AVANT l'install : le postinstall (scripts/prisma.mjs)
+# génère le client Postgres (generate n'a pas besoin de DATABASE_URL) ;
+# l'URL Supabase est fournie au run via --env-file.
 COPY package.json bun.lock ./
 COPY prisma ./prisma
 COPY scripts ./scripts

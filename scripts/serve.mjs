@@ -100,11 +100,10 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 /**
- * Prisma client self-heal — the generated client must match the runtime
- * DATABASE_URL provider (sqlite ↔ postgresql). On Docker/VPS the URL is
- * only known at container start (env_file), so scripts/prisma.mjs `ensure`
- * regenerates the client when the baked-in provider mismatches. Best-effort:
- * a failure logs a warning and the stack still boots.
+ * Prisma client self-heal — the generated client must be the Postgres one.
+ * On Docker/VPS the client is generated at image build; if a stale or
+ * missing client is found at boot, scripts/prisma.mjs `ensure` regenerates
+ * it. Best-effort: a failure logs a warning and the stack still boots.
  */
 function ensurePrismaClient() {
   try {

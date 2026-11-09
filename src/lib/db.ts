@@ -13,6 +13,9 @@ import path from 'node:path'
  * layout (45 tables, exact Python column names). Each account keeps its own
  * ID (Firebase UID for Firebase-bridged accounts) and its rows — chats,
  * messages, files, memories… — are keyed by that ID in Supabase.
+ *
+ * There is NO SQLite fallback anymore: local development and production both
+ * use this same Supabase instance.
  */
 
 /**
@@ -21,10 +24,10 @@ import path from 'node:path'
  * Resolution order:
  *   1. process.env.DATABASE_URL when it is already a Postgres URL — the
  *      standard configuration path (Vercel/Docker/CI all set it directly).
- *   2. otherwise, the DATABASE_URL from the .env file — deployments migrated
- *      from the earlier local SQLite build may still carry a stale `file:`
- *      URL in their ambient environment (process env always wins over .env
- *      in Next.js), and the Postgres URL in .env is the source of truth.
+ *   2. otherwise, the DATABASE_URL from the .env file — the dev sandbox
+ *      exports a stale SQLite `file:`… value into the ambient environment
+ *      (process env always wins over .env in Next.js), and the Supabase
+ *      URL in .env is the single source of truth.
  */
 function resolveDatabaseUrl(): string {
   const ambient = process.env.DATABASE_URL ?? ''
@@ -38,7 +41,7 @@ function resolveDatabaseUrl(): string {
     if (/^postgres(ql)?:\/\//.test(url)) {
       if (ambient) {
         console.warn(
-          `[db] ambient DATABASE_URL (${ambient.slice(0, 12)}…) is not Postgres — using the Postgres URL from .env`
+          `[db] ambient DATABASE_URL (${ambient.slice(0, 12)}…) is not Postgres — using the Supabase URL from .env`
         )
       }
       process.env.DATABASE_URL = url
@@ -51,14 +54,6 @@ function resolveDatabaseUrl(): string {
 }
 
 const databaseUrl = resolveDatabaseUrl()
-
-/**
- * Dialect flag for the raw-SQL fragments scattered across the models layer
- * (JSON access differs: Postgres `->>`/jsonb functions vs SQLite json1).
- * The Supabase Postgres build sets a postgres:// DATABASE_URL; the local
- * sandbox runs SQLite (file:…).
- */
-export const isPostgres = /^postgres(ql)?:\/\//.test(databaseUrl)
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined

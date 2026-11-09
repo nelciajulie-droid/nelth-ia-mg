@@ -6,7 +6,7 @@
  * FIREBASE_API_KEY is configured. Every Firebase-backed account is linked to
  * its Firebase UID (stored in user.oauth.firebase.uid) so each account keeps
  * its own stable identity, and its data (chats, files, memories…) is keyed by
- * that ID in the database (SQLite locally / Supabase Postgres in production).
+ * that ID in the shared Supabase Postgres database (local and production).
  *
  * Endpoints used (Identity Toolkit REST API, Email/Password provider):
  *   POST /v1/accounts:signInWithPassword  — verify credentials, returns uid

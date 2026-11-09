@@ -1,8 +1,6 @@
 import type { Route, Ctx } from '../http';
 import { HttpError } from '../http';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 import { configGet } from '@/lib/config';
 import { ERROR_MESSAGES } from '@/lib/constants';
 
@@ -414,42 +412,17 @@ export const routes: Route[] = [
     method: 'GET',
     path: 'db/download',
     auth: 'admin',
-    handler: async (ctx) => {
+    handler: async () => {
       if (!ENABLE_ADMIN_EXPORT) {
         throw new HttpError(401, ERROR_MESSAGES.ACCESS_PROHIBITED);
       }
 
-      // SQLite-only export (Python parity): production (Vercel + Supabase
-      // Postgres) answers the clean 400 below without ever touching the
-      // filesystem; local/dev SQLite builds stream the .db file.
-      const url = process.env.DATABASE_URL || 'file:./data/webui.db';
-      if (!url.startsWith('file:')) {
-        throw new HttpError(400, DB_NOT_SQLITE);
-      }
-
-      // Resolve the absolute path at REQUEST time through an opaque
-      // indirection. A literal `path.resolve(process.cwd(), <dynamic>)` is
-      // statically traced by Turbopack at BUILD time as a dynamic file
-      // pattern that globs the entire project root (10k+ files) and logs an
-      // "overly broad pattern" warning on every Vercel build — with zero
-      // runtime effect. Reflect.get keeps the tracer out of the way.
-      const resolveAbsolute: typeof path.resolve = Reflect.get(path, 'resolve');
-      const filePath = resolveAbsolute(process.cwd(), url.slice('file:'.length));
-
-      let bytes: Buffer;
-      try {
-        bytes = fs.readFileSync(filePath);
-      } catch {
-        throw new HttpError(400, DB_NOT_SQLITE);
-      }
-
-      return new Response(new Uint8Array(bytes), {
-        status: 200,
-        headers: {
-          'content-type': 'application/octet-stream',
-          'content-disposition': 'attachment; filename="webui.db"',
-        },
-      });
+      // SQLite-only export (Python parity). Nelth-AI runs exclusively on the
+      // hosted Supabase Postgres — there is no local .db file to stream, so
+      // the endpoint answers the same clean 400 the Python app returns on
+      // Postgres deployments. (Supabase users export via the dashboard:
+      // Database → Backups / pg_dump.)
+      throw new HttpError(400, DB_NOT_SQLITE);
     },
   },
 ];

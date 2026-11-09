@@ -762,7 +762,7 @@ async function searchFiles(ctx: Ctx, filename: string, adminBypass: boolean): Pr
       : user.id
     : user.id;
 
-  // glob pattern match (files.py _glob_to_like_pattern): SQLite LIKE
+  // glob pattern match (files.py _glob_to_like_pattern): SQL LIKE
   // wildcards are applied in JS (Prisma `contains` has no glob support).
   let regex: RegExp | null = null;
   if (filename !== '*' && filename !== '') {

@@ -1,6 +1,6 @@
 import type { Route, Ctx } from '../http';
 import { HttpError } from '../http';
-import { db, isPostgres } from '@/lib/db';
+import { db } from '@/lib/db';
 import { configGet } from '@/lib/config';
 import { ERROR_MESSAGES, env } from '@/lib/constants';
 import { hasPermission, getUserGroupIds } from '@/lib/access-control';
@@ -150,17 +150,10 @@ function chatRowToResponse(row: ChatRow) {
 
 async function getInternalChatsByNoteId(noteId: string, userId: string): Promise<ChatRow[]> {
   // JSON-path filter mirroring the Python semantics (internal is truthy when
-  // stored as 1/true/True; type and note_id match the note) — dialect-aware
-  // (Postgres jsonb operators / SQLite json1 functions).
-  const internalTrue = isPostgres
-    ? `(NULLIF(meta, '')::jsonb ->> 'internal') IN ('1', 'true', 'True')`
-    : `(CASE WHEN json_valid(meta) THEN json_extract(meta, '$.internal') END) IN ('1', 'true', 'True')`;
-  const typeIsNote = isPostgres
-    ? `NULLIF(meta, '')::jsonb ->> 'type' = 'note'`
-    : `CASE WHEN json_valid(meta) THEN json_extract(meta, '$.type') END = 'note'`;
-  const noteIdMatch = isPostgres
-    ? `NULLIF(meta, '')::jsonb ->> 'note_id' = $2`
-    : `CASE WHEN json_valid(meta) THEN json_extract(meta, '$.note_id') END = $2`;
+  // stored as 1/true/True; type and note_id match the note) — Postgres jsonb.
+  const internalTrue = `(NULLIF(meta, '')::jsonb ->> 'internal') IN ('1', 'true', 'True')`;
+  const typeIsNote = `NULLIF(meta, '')::jsonb ->> 'type' = 'note'`;
+  const noteIdMatch = `NULLIF(meta, '')::jsonb ->> 'note_id' = $2`;
   const rows = (await db.$queryRawUnsafe(
     `SELECT id, user_id, title, chat, created_at, updated_at, share_id, archived, pinned, meta, variables, folder_id
      FROM chat

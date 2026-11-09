@@ -538,7 +538,7 @@ async function signupHandler(
  *     (user.oauth.firebase.uid) without touching its stable local ID;
  *   • no local account → provisioned with the Firebase UID as its ID, so every
  *     account keeps its own identity and its data (chats, files, memories…)
- *     is keyed by that UID in SQLite (dev) / Supabase Postgres (production).
+ *     is keyed by that UID in the shared Supabase Postgres database.
  *
  * Returns null when Firebase rejects the credentials or is unreachable — the
  * caller then keeps the regular invalid-credentials path.

@@ -12,7 +12,7 @@ import { safeParse, normalizePages, matchingPage } from '@/lib/models/workspace'
  *
  * Deviation (documented): Python builds recursive CTEs + UNION ALL in SQL.
  * This port performs the same permission-scoped search in JS over rows
- * fetched from the shared SQLite DB (equivalent results, in-memory ranking).
+ * fetched from the shared Supabase Postgres DB (equivalent results, in-memory ranking).
  */
 
 const PAGE_SIZE = 24;

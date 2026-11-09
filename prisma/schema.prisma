@@ -1,17 +1,17 @@
-// Open WebUI v0.12.5 — Prisma schema (Supabase Postgres) ported from the Python SQLModel/SQLAlchemy
-// table definitions in backend/open_webui/models/*.py (SQLite).
+// Open WebUI v0.12.5 — Prisma schema (Supabase Postgres) ported from the Python
+// SQLModel/SQLAlchemy table definitions in backend/open_webui/models/*.py.
 //
-// Porting conventions (see task notes for rationale):
+// Single database: the hosted Supabase Postgres (session pooler) — used by
+// BOTH production (Vercel) and local development. There is no SQLite variant
+// anymore; the earlier dual-schema setup (schema.prisma sqlite +
+// schema.postgres.prisma) was removed. Porting conventions:
 //   • Table names (@@map) are EXACT — the DB is shared with the original Python app.
 //   • Column names are EXACT Python column names.
 //   • JSON columns (SQLAlchemy JSON/JSONField) → String (TEXT). App code owns
 //     JSON.stringify / JSON.parse.
-//   • Columns whose Python writers use time.time_ns() (nanoseconds, ~1.7e18) are
-//     typed Float: Prisma 6.x SQLite cannot read i64-range values through Int or
-//     BigInt ("does not fit in an INT column"), while Float reads them fine.
-//     Seconds-based epoch columns stay Int. Marked with "// time_ns".
-//   • user.date_of_birth is an SQLAlchemy Date column stored as 'YYYY-MM-DD' TEXT —
-//     Prisma DateTime cannot parse that format, so it is String.
+//   • time_ns columns (nanoseconds, ~1.7e18) stay Float (double precision).
+//   • user.date_of_birth is stored as 'YYYY-MM-DD' TEXT — Prisma DateTime
+//     cannot parse that format, so it is String.
 //   • No Prisma relations / FK constraints: the app does its own joins.
 //   • String ids have NO default — routers generate uuids.
 //   • Nullable-ness mirrors SQLAlchemy DDL exactly (nullable=False → required).
@@ -21,7 +21,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -649,10 +649,7 @@ model OAuthSession {
   @@map("oauth_session")
 }
 
-// ─── connectors (@ app mention picker) ────────────────────────────────────────
-// One row per (user, connector) that went through the connect flow. The
-// connection status surfaced everywhere (picker rows, chat-flow routing) is
-// read from THIS table — never invented.
+// ─── connectors (@ app mention picker) ───────────────────────────────────────
 
 model ConnectorConnection {
   id           String  @id
