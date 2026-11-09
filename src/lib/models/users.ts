@@ -1,4 +1,4 @@
-import { db } from '@/lib/db';
+import { db, queryUnsafe } from '@/lib/db';
 
 /**
  * Port of open_webui/models/users.py (UsersTable + ApiKey table) on Prisma/Postgres.
@@ -411,8 +411,9 @@ export const Users = {
   },
 
   async getUserByEmail(email: string): Promise<UserModel | null> {
-    // Python uses func.lower(User.email) == email.lower(); Postgres via raw SQL
-    const rows = await db.$queryRawUnsafe<UserRow[]>(
+    // Python uses func.lower(User.email) == email.lower(). Postgres raw SQL
+    // binds $1; the queryUnsafe helper rewrites it to `?` on SQLite.
+    const rows = await queryUnsafe<UserRow[]>(
       'SELECT * FROM "user" WHERE lower("email") = lower($1) LIMIT 1',
       email
     );

@@ -1,4 +1,4 @@
-import { db } from '@/lib/db';
+import { db, IS_SQLITE } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { configGet } from '@/lib/config';
 import { DEFAULT_USER_PERMISSIONS } from '@/lib/constants';
@@ -1288,24 +1288,33 @@ export function upsertMessageToHistory(history: Json, messageId: string, message
 }
 
 // ---------------------------------------------------------------------------
-// Tag filters (Postgres jsonb_array_elements_text)
+// Tag filters (Postgres jsonb_array_elements_text / SQLite json_each)
 // ---------------------------------------------------------------------------
 
-const META_TAGS: Prisma.Sql = Prisma.sql`COALESCE(NULLIF(chat.meta, '')::jsonb -> 'tags', '[]'::jsonb)`;
+const META_TAGS: Prisma.Sql = IS_SQLITE
+  ? Prisma.sql`CASE WHEN chat.meta IS NOT NULL AND json_valid(chat.meta) AND json_type(chat.meta, '$.tags') = 'array' THEN json_extract(chat.meta, '$.tags') ELSE '[]' END`
+  : Prisma.sql`COALESCE(NULLIF(chat.meta, '')::jsonb -> 'tags', '[]'::jsonb)`;
 
 function tagExistsSql(tagValue: string): Prisma.Sql {
-  return Prisma.sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${META_TAGS}) AS tag WHERE tag = ${tagValue})`;
+  return IS_SQLITE
+    ? Prisma.sql`EXISTS (SELECT 1 FROM json_each(${META_TAGS}) AS tag WHERE tag.value = ${tagValue})`
+    : Prisma.sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${META_TAGS}) AS tag WHERE tag = ${tagValue})`;
 }
 
-const TAGS_EMPTY: Prisma.Sql = Prisma.sql`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(${META_TAGS}) AS tag)`;
+const TAGS_EMPTY: Prisma.Sql = IS_SQLITE
+  ? Prisma.sql`NOT EXISTS (SELECT 1 FROM json_each(${META_TAGS}) AS tag)`
+  : Prisma.sql`NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(${META_TAGS}) AS tag)`;
 
 // ---------------------------------------------------------------------------
 // Raw SQL fragments (SQLAlchemy semantics parity)
 // ---------------------------------------------------------------------------
 
-// meta.internal access (Postgres jsonb operators).
+// meta.internal access (Postgres jsonb / SQLite json_extract).
 // Python parity: internal is truthy when stored as 1/true/True.
-const META_INTERNAL: Prisma.Sql = Prisma.sql`COALESCE(NULLIF(chat.meta, '')::jsonb ->> 'internal', '')`;
+// SQLite: CAST(... AS TEXT) so JSON true (→1) matches '1' like Postgres ->>.
+const META_INTERNAL: Prisma.Sql = IS_SQLITE
+  ? Prisma.sql`CAST(COALESCE(CASE WHEN chat.meta IS NOT NULL AND json_valid(chat.meta) THEN json_extract(chat.meta, '$.internal') END, '') AS TEXT)`
+  : Prisma.sql`COALESCE(NULLIF(chat.meta, '')::jsonb ->> 'internal', '')`;
 const INTERNAL_NOT_TRUE = Prisma.sql`(${META_INTERNAL} NOT IN ('1', 'true', 'True'))`;
 const CHAT_COLUMNS = Prisma.sql`chat.id, chat.user_id, chat.title, chat.chat, chat.created_at, chat.updated_at, chat.share_id, chat.archived, chat.pinned, chat.meta, chat.variables, chat.folder_id, chat.tasks, chat.summary, chat.current_message_id, chat.last_read_at, chat.timer_at`;
 
@@ -1955,8 +1964,12 @@ export async function getChatFolderId(id: string, userId: string): Promise<strin
 }
 
 export async function getInternalChatIdsByParentId(parentChatId: string, userId: string): Promise<string[]> {
-  const internalTrue = Prisma.sql`(NULLIF(chat.meta, '')::jsonb ->> 'internal') IN ('1', 'true', 'True')`;
-  const parentMatch = Prisma.sql`(NULLIF(chat.meta, '')::jsonb ->> 'parent_chat_id') = ${parentChatId}`;
+  const internalTrue: Prisma.Sql = IS_SQLITE
+    ? Prisma.sql`CAST(COALESCE(CASE WHEN chat.meta IS NOT NULL AND json_valid(chat.meta) THEN json_extract(chat.meta, '$.internal') END, '') AS TEXT) IN ('1', 'true', 'True')`
+    : Prisma.sql`(NULLIF(chat.meta, '')::jsonb ->> 'internal') IN ('1', 'true', 'True')`;
+  const parentMatch: Prisma.Sql = IS_SQLITE
+    ? Prisma.sql`COALESCE(CASE WHEN chat.meta IS NOT NULL AND json_valid(chat.meta) THEN json_extract(chat.meta, '$.parent_chat_id') END, '') = ${parentChatId}`
+    : Prisma.sql`(NULLIF(chat.meta, '')::jsonb ->> 'parent_chat_id') = ${parentChatId}`;
   const rows = await db.$queryRaw<Array<{ id: string }>>(
     Prisma.sql`SELECT chat.id FROM chat WHERE chat.user_id = ${userId} AND ${internalTrue} AND ${parentMatch}`
   );
@@ -2173,8 +2186,20 @@ export async function getChats(): Promise<ChatModel[]> {
 }
 
 function messageContentMatchSql(param: Prisma.Sql): Prisma.Sql {
-  // Iterate the history/legacy message collections (jsonb_each) and
-  // substring-match the text content of object entries.
+  // Iterate the history/legacy message collections (Postgres jsonb_each /
+  // SQLite json_each) and substring-match the text content of object entries.
+  if (IS_SQLITE) {
+    return Prisma.sql`(
+    EXISTS (
+      SELECT 1 FROM json_each(CASE WHEN chat.chat IS NOT NULL AND json_valid(chat.chat) AND json_type(chat.chat, '$.history.messages') = 'object' THEN json_extract(chat.chat, '$.history.messages') ELSE '{}' END) AS history_message
+      WHERE LOWER(CASE WHEN json_type(history_message.value) = 'object' THEN json_extract(history_message.value, '$.content') END) LIKE '%' || ${param} || '%'
+    )
+    OR EXISTS (
+      SELECT 1 FROM json_each(CASE WHEN chat.chat IS NOT NULL AND json_valid(chat.chat) AND json_type(chat.chat, '$.messages') = 'array' THEN json_extract(chat.chat, '$.messages') ELSE '[]' END) AS legacy_message
+      WHERE LOWER(CASE WHEN json_type(legacy_message.value) = 'object' THEN json_extract(legacy_message.value, '$.content') END) LIKE '%' || ${param} || '%'
+    )
+  )`;
+  }
   return Prisma.sql`(
     EXISTS (
       SELECT 1 FROM jsonb_each(COALESCE(chat.chat::jsonb -> 'history' -> 'messages', '{}'::jsonb)) AS history_message
@@ -2384,7 +2409,28 @@ export async function getParticipantIdsByChatIds(chatIds: string[]): Promise<Rec
   if (!chatIds.length) return participants;
 
   const rows = await db.$queryRaw<Array<{ chat_id: string; author_id: string }>>(
-    Prisma.sql`WITH messages AS (
+    IS_SQLITE
+      ? Prisma.sql`WITH messages AS (
+          SELECT c.id AS chat_id, c.user_id AS owner_id,
+                 CASE WHEN json_type(m.value) = 'object' THEN m.value ELSE '{}' END AS message
+          FROM chat AS c, json_each(
+              CASE
+                  WHEN c.chat IS NOT NULL AND json_valid(c.chat) AND json_type(c.chat, '$.history.messages') = 'object' THEN json_extract(c.chat, '$.history.messages')
+                  WHEN c.chat IS NOT NULL AND json_valid(c.chat) AND json_type(c.chat, '$.messages') = 'array' THEN json_extract(c.chat, '$.messages')
+                  ELSE '[]'
+              END
+          ) AS m
+          WHERE c.id IN (${Prisma.join(chatIds)})
+        ), authors AS (
+          SELECT chat_id, COALESCE(
+              CASE WHEN json_type(message, '$.user_id') = 'string' AND trim(json_extract(message, '$.user_id')) <> '' THEN json_extract(message, '$.user_id') END,
+              CASE WHEN json_type(message, '$.user.id') = 'string' AND trim(json_extract(message, '$.user.id')) <> '' THEN json_extract(message, '$.user.id') END,
+              NULLIF(trim(owner_id), '')
+          ) AS author_id
+          FROM messages WHERE json_extract(message, '$.role') = 'user'
+        )
+        SELECT DISTINCT chat_id, author_id FROM authors WHERE author_id IS NOT NULL ORDER BY chat_id, author_id`
+      : Prisma.sql`WITH messages AS (
           SELECT c.id AS chat_id, c.user_id AS owner_id,
                  CASE WHEN jsonb_typeof(m.value) = 'object' THEN m.value ELSE '{}'::jsonb END AS message
           FROM chat AS c, jsonb_each(

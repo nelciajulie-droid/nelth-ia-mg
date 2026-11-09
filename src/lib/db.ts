@@ -3,9 +3,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * Database client — Supabase Postgres via Prisma.
+ * Database client — Supabase Postgres via Prisma (default) or local SQLite
+ * (experiment mode).
  *
- * Nelth-AI runs on the hosted Supabase Postgres database (session pooler):
+ * Default: Nelth-AI runs on the hosted Supabase Postgres database (session
+ * pooler):
  *
  *   DATABASE_URL=postgres://…pooler.supabase.com:5432/postgres?sslmode=require
  *
@@ -14,14 +16,59 @@ import path from 'node:path'
  * ID (Firebase UID for Firebase-bridged accounts) and its rows — chats,
  * messages, files, memories… — are keyed by that ID in Supabase.
  *
- * There is NO SQLite fallback anymore: local development and production both
- * use this same Supabase instance.
+ * EXPERIMENT — "without Supabase": set NELTH_DB_SQLITE=1 in .env to run the
+ * whole app on the LOCAL SQLite file db/custom.db (schema variant
+ * prisma/schema.sqlite.prisma). Purpose: measure how much of the local
+ * latency comes from the remote Supabase round-trips. Remove the flag (and
+ * run `bun scripts/prisma.mjs generate`) to go back to Supabase — the
+ * Supabase data is never touched by this mode.
  */
 
+/** Read a boolean flag from the ambient env, then from the .env file. */
+function readEnvFlag(name: string): boolean {
+  const ambient = process.env[name]
+  if (typeof ambient === 'string' && ambient.trim() !== '') {
+    const v = ambient.trim().toLowerCase()
+    return v !== '0' && v !== 'false'
+  }
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8')
+    const match = raw.match(new RegExp(`^${name}=(.*)$`, 'm'))
+    if (match) {
+      const v = match[1].trim().toLowerCase()
+      return v !== '' && v !== '0' && v !== 'false'
+    }
+  } catch {
+    /* .env unreadable */
+  }
+  return false
+}
+
+/** Experiment mode: run on the local SQLite file instead of Supabase. */
+export const IS_SQLITE = readEnvFlag('NELTH_DB_SQLITE')
+
+/** SQLite target file — ambient `file:`… URL, then .env, then the default. */
+function resolveSqliteUrl(): string {
+  const ambient = process.env.DATABASE_URL ?? ''
+  if (ambient.startsWith('file:')) return ambient
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf8')
+    const match = raw.match(/^DATABASE_URL=(.+)$/m)
+    const url = match ? match[1].trim() : ''
+    if (url.startsWith('file:')) return url
+  } catch {
+    /* .env unreadable */
+  }
+  return `file:${path.join(process.cwd(), 'db', 'custom.db')}`
+}
+
 /**
- * Resolve the Postgres datasource URL.
+ * Resolve the datasource URL.
  *
- * Resolution order:
+ * SQLite mode (NELTH_DB_SQLITE=1): the local file:… URL — Supabase is fully
+ * bypassed.
+ *
+ * Postgres mode, resolution order:
  *   1. process.env.DATABASE_URL when it is already a Postgres URL — the
  *      standard configuration path (Vercel/Docker/CI all set it directly).
  *   2. otherwise, the DATABASE_URL from the .env file — the dev sandbox
@@ -30,6 +77,11 @@ import path from 'node:path'
  *      URL in .env is the single source of truth.
  */
 function resolveDatabaseUrl(): string {
+  if (IS_SQLITE) {
+    const sqliteUrl = resolveSqliteUrl()
+    process.env.DATABASE_URL = sqliteUrl
+    return sqliteUrl
+  }
   const ambient = process.env.DATABASE_URL ?? ''
   if (/^postgres(ql)?:\/\//.test(ambient)) return ambient
 
@@ -56,7 +108,7 @@ function resolveDatabaseUrl(): string {
 const databaseUrl = resolveDatabaseUrl()
 
 /**
- * RUNTIME datasource URL — pooler per environment.
+ * RUNTIME datasource URL — pooler per environment (Postgres mode only).
  *
  * Two constraints pull in opposite directions:
  *
@@ -80,7 +132,7 @@ const databaseUrl = resolveDatabaseUrl()
  * transform lives ONLY in this runtime client.
  */
 function runtimeDatasourceUrl(url: string): string {
-  if (!url) return url
+  if (!url || IS_SQLITE) return url
   const isSupabasePooler = () => {
     try {
       const u = new URL(/^postgres:\/\//.test(url) ? url.replace(/^postgres:/, 'postgresql:') : url)
@@ -132,3 +184,26 @@ export const db =
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+
+// ---------------------------------------------------------------------------
+// Dialect helpers for the raw-SQL call sites (experiment: SQLite vs Postgres)
+// ---------------------------------------------------------------------------
+
+/**
+ * Postgres raw queries bind parameters as $1, $2, …; SQLite wants the
+ * positional `?` marker. Every $N appears exactly once, in ascending order,
+ * matching the argument order at the call sites — a plain rewrite is safe.
+ */
+function toDialectPlaceholders(sql: string): string {
+  return IS_SQLITE ? sql.replace(/\$(\d+)/g, '?') : sql
+}
+
+/** Dialect-safe replacement for db.$queryRawUnsafe. */
+export async function queryUnsafe<T = unknown>(sql: string, ...args: unknown[]): Promise<T> {
+  return db.$queryRawUnsafe<T>(toDialectPlaceholders(sql), ...args)
+}
+
+/** Dialect-safe replacement for db.$executeRawUnsafe. */
+export async function execUnsafe(sql: string, ...args: unknown[]): Promise<number> {
+  return db.$executeRawUnsafe(toDialectPlaceholders(sql), ...args)
+}

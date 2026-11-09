@@ -2,7 +2,7 @@ import type { Route, Ctx } from '../http';
 import { HttpError } from '../http';
 import crypto from 'crypto';
 import fs from 'fs';
-import { db } from '@/lib/db';
+import { db, queryUnsafe, IS_SQLITE } from '@/lib/db';
 import { configGet, configSet } from '@/lib/config';
 import { env, ERROR_MESSAGES } from '@/lib/constants';
 import { createApiKey, getPasswordHash } from '@/lib/auth';
@@ -369,12 +369,18 @@ function dateKey(timestamp: number, tz: string | null): string {
   }
 }
 
-// usage JSON token access — Postgres jsonb.
-const TOKEN_INPUT_SQL = `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'input_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'prompt_tokens' AS INTEGER))`;
-const TOKEN_OUTPUT_SQL = `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'output_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'completion_tokens' AS INTEGER))`;
+// usage JSON token access — Postgres jsonb / SQLite json_extract.
+const TOKEN_INPUT_SQL = IS_SQLITE
+  ? `COALESCE(CAST(CASE WHEN chat_message.usage IS NOT NULL AND json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.input_tokens') END AS INTEGER), CAST(CASE WHEN chat_message.usage IS NOT NULL AND json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.prompt_tokens') END AS INTEGER))`
+  : `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'input_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'prompt_tokens' AS INTEGER))`;
+const TOKEN_OUTPUT_SQL = IS_SQLITE
+  ? `COALESCE(CAST(CASE WHEN chat_message.usage IS NOT NULL AND json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.output_tokens') END AS INTEGER), CAST(CASE WHEN chat_message.usage IS NOT NULL AND json_valid(chat_message.usage) THEN json_extract(chat_message.usage, '$.completion_tokens') END AS INTEGER))`
+  : `COALESCE(CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'output_tokens' AS INTEGER), CAST(NULLIF(chat_message.usage, '')::jsonb ->> 'completion_tokens' AS INTEGER))`;
 
 // chat.meta internal filter for usage stats.
-const INTERNAL_CHAT_FILTER = `chat.user_id = $1 AND COALESCE(NULLIF(chat.meta, '')::jsonb ->> 'internal', '') NOT IN ('1', 'true', 'True')`;
+const INTERNAL_CHAT_FILTER = IS_SQLITE
+  ? `chat.user_id = $1 AND CAST(COALESCE(CASE WHEN chat.meta IS NOT NULL AND json_valid(chat.meta) THEN json_extract(chat.meta, '$.internal') END, '') AS TEXT) NOT IN ('1', 'true', 'True')`
+  : `chat.user_id = $1 AND COALESCE(NULLIF(chat.meta, '')::jsonb ->> 'internal', '') NOT IN ('1', 'true', 'True')`;
 
 async function getUserUsageSummary(
   userId: string,
@@ -395,7 +401,7 @@ async function getUserUsageSummary(
   }
   const dateSql = dateConds.length ? ` AND ${dateConds.join(' AND ')}` : '';
 
-  const messageRows = await db.$queryRawUnsafe<Array<{ role: string; count: number | bigint }>>(
+  const messageRows = await queryUnsafe<Array<{ role: string; count: number | bigint }>>(
     `SELECT chat_message.role, COUNT(chat_message.id) AS count FROM chat_message WHERE chat_message.user_id = $1${dateSql} GROUP BY chat_message.role`,
     userId,
     ...dateArgs
@@ -403,7 +409,7 @@ async function getUserUsageSummary(
   const messageCounts: Record<string, number> = {};
   for (const row of messageRows) messageCounts[row.role] = Number(row.count);
 
-  const tokenRows = await db.$queryRawUnsafe<Array<{ input_tokens: number | bigint; output_tokens: number | bigint }>>(
+  const tokenRows = await queryUnsafe<Array<{ input_tokens: number | bigint; output_tokens: number | bigint }>>(
     `SELECT COALESCE(SUM(${TOKEN_INPUT_SQL}), 0) AS input_tokens, COALESCE(SUM(${TOKEN_OUTPUT_SQL}), 0) AS output_tokens FROM chat_message WHERE chat_message.user_id = $1 AND chat_message.role = 'assistant' AND chat_message.usage IS NOT NULL${dateSql}`,
     userId,
     ...dateArgs
@@ -411,7 +417,7 @@ async function getUserUsageSummary(
   const inputTotal = Number(tokenRows[0]?.input_tokens ?? 0);
   const outputTotal = Number(tokenRows[0]?.output_tokens ?? 0);
 
-  const modelRows = await db.$queryRawUnsafe<Array<{ models_used: number | bigint }>>(
+  const modelRows = await queryUnsafe<Array<{ models_used: number | bigint }>>(
     `SELECT COUNT(DISTINCT chat_message.model_id) AS models_used FROM chat_message WHERE chat_message.user_id = $1 AND chat_message.role = 'assistant' AND chat_message.model_id IS NOT NULL${dateSql}`,
     userId,
     ...dateArgs
@@ -419,7 +425,7 @@ async function getUserUsageSummary(
 
   let activeDays = 0;
   if (includeActiveDays) {
-    const dayRows = await db.$queryRawUnsafe<Array<{ created_at: number }>>(
+    const dayRows = await queryUnsafe<Array<{ created_at: number }>>(
       `SELECT chat_message.created_at FROM chat_message WHERE chat_message.user_id = $1${dateSql} AND chat_message.created_at > 0`,
       userId,
       ...dateArgs
@@ -445,7 +451,7 @@ async function getUserDailyUsage(
   endDate: number,
   timezone: string | null
 ): Promise<Record<string, any>[]> {
-  const rows = await db.$queryRawUnsafe<
+  const rows = await queryUnsafe<
     Array<{
       created_at: number;
       chat_id: string;
@@ -515,7 +521,7 @@ function isValidTimeZone(tz: string): boolean {
 }
 
 async function getUserTopModels(userId: string, startDate: number, endDate: number, limit = 5) {
-  const rows = await db.$queryRawUnsafe<
+  const rows = await queryUnsafe<
     Array<{ model_id: string; messages: number | bigint; input_tokens: number | bigint; output_tokens: number | bigint }>
   >(
     `SELECT chat_message.model_id, COUNT(chat_message.id) AS messages, COALESCE(SUM(${TOKEN_INPUT_SQL}), 0) AS input_tokens, COALESCE(SUM(${TOKEN_OUTPUT_SQL}), 0) AS output_tokens FROM chat_message WHERE chat_message.user_id = $1 AND chat_message.role = 'assistant' AND chat_message.model_id IS NOT NULL AND chat_message.created_at >= $2 AND chat_message.created_at <= $3 GROUP BY chat_message.model_id ORDER BY COUNT(chat_message.id) DESC LIMIT ${Math.max(0, Math.floor(limit))}`,
@@ -533,7 +539,7 @@ async function getUserTopModels(userId: string, startDate: number, endDate: numb
 }
 
 async function getUserTopTools(userId: string, startDate: number, endDate: number, limit = 5) {
-  const rows = await db.$queryRawUnsafe<Array<{ output: string | null; meta: string | null }>>(
+  const rows = await queryUnsafe<Array<{ output: string | null; meta: string | null }>>(
     `SELECT chat_message.output, chat_message.meta FROM chat_message WHERE chat_message.user_id = $1 AND chat_message.created_at >= $2 AND chat_message.created_at <= $3`,
     userId,
     startDate,
@@ -583,11 +589,11 @@ const ACTIVE_CHAT_GAP_SECONDS = 30 * 60;
 
 async function getUserUsageChatStats(userId: string): Promise<Record<string, number>> {
   const chatFilter = INTERNAL_CHAT_FILTER;
-  const totalRows = await db.$queryRawUnsafe<Array<{ total_chats: number | bigint }>>(
+  const totalRows = await queryUnsafe<Array<{ total_chats: number | bigint }>>(
     `SELECT COUNT(chat.id) AS total_chats FROM chat WHERE ${chatFilter}`,
     userId
   );
-  const messageRows = await db.$queryRawUnsafe<Array<{ chat_id: string; created_at: number }>>(
+  const messageRows = await queryUnsafe<Array<{ chat_id: string; created_at: number }>>(
     `SELECT chat_message.chat_id, chat_message.created_at FROM chat_message JOIN chat ON chat.id = chat_message.chat_id WHERE ${chatFilter} AND chat_message.created_at IS NOT NULL ORDER BY chat_message.chat_id, chat_message.created_at ASC`,
     userId
   );
