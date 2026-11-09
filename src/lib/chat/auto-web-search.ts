@@ -141,11 +141,21 @@ export async function decideAutoWebSearch(
   // Model decision (null on total failure, {search:false} on a "no").
   let decision: AutoSearchDecision | null = null;
   try {
-    // Up to three attempts — the gateway occasionally drops a request or the
-    // model returns an unparsable answer; retrying both failures markedly
-    // improves reliability (a null decision means NO search for that turn).
+    // TOTAL time budget: this call gates the user-visible first token (the
+    // "Réflexion" shimmer before the answer starts streaming) — a free
+    // non-streaming gateway call can queue for tens of seconds, which used
+    // to hang EVERY plain-chat turn. The budget fails open (no search).
+    const deadline = Date.now() + 6_000;
+    // Up to three attempts while the budget allows — the gateway
+    // occasionally drops a request or the model returns an unparsable
+    // answer; retrying both failures markedly improves reliability (a null
+    // decision means NO search for that turn).
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 700 * attempt));
+      const remaining = deadline - Date.now();
+      if (remaining < 1_200) break; // not enough budget left for a real call
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, Math.min(700 * attempt, Math.max(0, remaining - 1_000))));
+      }
       try {
         const data = await kiloChatCompletion({
           messages: [
@@ -156,6 +166,7 @@ export async function decideAutoWebSearch(
           temperature: 0,
           max_tokens: 200,
           thinking: false,
+          timeoutMs: Math.min(remaining, 5_000),
         });
         const content: string = data?.choices?.[0]?.message?.content ?? '';
         if (!content.trim()) continue; // empty answer → retry

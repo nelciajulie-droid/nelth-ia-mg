@@ -56,38 +56,53 @@ function resolveDatabaseUrl(): string {
 const databaseUrl = resolveDatabaseUrl()
 
 /**
- * RUNTIME datasource URL — Supabase transaction pooler.
+ * RUNTIME datasource URL — pooler per environment.
  *
- * The session pooler (port 5432, session mode) allows a TOTAL of ~15
- * server-side client slots for the whole database, shared by EVERY app
- * instance pointing at it (local dev server + each serverless function
- * instance). Serverless horizontal scaling saturates that budget no matter
- * how small the per-client pool: reproduced as intermittent
- * `FATAL: (EMAXCONNSESSION) max clients reached in session mode - pool_size:
- * 15` on the first query of a request (auth lookup → empty 500).
+ * Two constraints pull in opposite directions:
  *
- * The transaction pooler (port 6543, transaction mode) multiplexes every
- * client over a shared backend pool — thousands of concurrent clients — the
- * mode designed for serverless. Prisma needs `pgbouncer=true` there (no
- * prepared statements); this app only issues simple CRUD (no $transaction /
- * LISTEN / advisory locks), verified compatible.
+ * • SERVERLESS (Vercel): horizontal instances × a pool exhaust the SESSION
+ *   pooler's shared 15-client budget (reproduced:
+ *   EMAXCONNSESSION → empty 500s). The TRANSACTION pooler (6543) multiplexes
+ *   every client over a shared backend pool — the serverless mode. In-region
+ *   (Vercel us-east-1 → Supabase us-east-1) its per-query overhead is a few ms.
  *
+ * • LOCAL/SELF-HOSTED far from the DB: the transaction pooler costs
+ *   ~1s PER QUERY over a long network path (measured from the dev sandbox:
+ *   989 ms/query on 6543 vs 213 ms on 5432 — a single warm findUnique), while
+ *   the session pooler's per-query cost is one network roundtrip. A dev
+ *   server is ONE process with its own small pool — the shared-budget
+ *   exhaustion does not apply — so session mode is both safe AND 4-5× faster
+ *   per query.
+ *
+ * Selection: VERCEL (or NELTH_DB_TRANSACTION_POOLER=1) → 6543 transaction;
+ * otherwise (or NELTH_DB_SESSION_POOLER=1) → 5432 session + pool cap.
  * `prisma db push` (CLI) keeps using the session-mode .env URL — the
- * transform lives ONLY in this runtime client. Kill-switch:
- * NELTH_DB_SESSION_POOLER=1 forces the previous session-pooler behavior.
+ * transform lives ONLY in this runtime client.
  */
 function runtimeDatasourceUrl(url: string): string {
   if (!url) return url
-  if (process.env.NELTH_DB_SESSION_POOLER === '1') return capConnectionPool(url)
+  const isSupabasePooler = () => {
+    try {
+      const u = new URL(/^postgres:\/\//.test(url) ? url.replace(/^postgres:/, 'postgresql:') : url)
+      return /\.pooler\.supabase\.com$/i.test(u.hostname)
+    } catch {
+      return false
+    }
+  }
+  if (!isSupabasePooler()) return capConnectionPool(url)
+  const wantTransaction =
+    process.env.NELTH_DB_TRANSACTION_POOLER === '1' ||
+    (process.env.VERCEL && process.env.NELTH_DB_SESSION_POOLER !== '1')
   try {
     const u = new URL(/^postgres:\/\//.test(url) ? url.replace(/^postgres:/, 'postgresql:') : url)
-    if (/\.pooler\.supabase\.com$/i.test(u.hostname) && (u.port === '' || u.port === '5432')) {
-      u.port = '6543'
+    if (wantTransaction) {
+      if (u.port === '' || u.port === '5432') u.port = '6543'
       u.searchParams.set('pgbouncer', 'true')
       u.searchParams.set('connection_limit', '5')
       u.searchParams.delete('pool_timeout') // multiplexed — no hard slot budget
       return u.toString()
     }
+    return capConnectionPool(url) // session mode stays on 5432
   } catch {
     /* unparsable — fall through to the plain cap */
   }
@@ -95,7 +110,7 @@ function runtimeDatasourceUrl(url: string): string {
 }
 
 /**
- * Cap the Prisma connection pool (used for non-Supabase URLs / kill-switch).
+ * Cap the Prisma connection pool (session mode / non-Supabase URLs).
  * A small per-client cap keeps every instance under the server budget;
  * bursts beyond the cap queue briefly (pool_timeout) instead of erroring.
  */

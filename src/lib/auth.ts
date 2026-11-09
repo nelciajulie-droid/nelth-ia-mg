@@ -197,17 +197,11 @@ async function isValidToken(decoded: Record<string, unknown>): Promise<boolean> 
   const typ = decoded.typ ?? 'session';
   if (!['session', 'automation', 'subagent'].includes(String(typ))) return false;
   if (typ === 'session') {
-    const mfaEnabled = await db.config
-      .findUnique({ where: { key: 'auth.mfa.enable' } })
-      .then((r) => {
-        if (!r) return false; // get_mfa_config() default: ENABLE_MFA = False
-        try {
-          return JSON.parse(r.value) === true;
-        } catch {
-          return false;
-        }
-      })
-      .catch(() => false);
+    // Routed through the cached configGet — the raw findUnique made every
+    // authenticated request pay one extra DB roundtrip for a value that
+    // changes at admin-config pace.
+    const { configGet } = await import('@/lib/config');
+    const mfaEnabled = await configGet<boolean>('auth.mfa.enable', false);
     if (mfaEnabled) {
       const mfaRequired = ['password', 'ldap'].includes(String(decoded.auth_method ?? ''));
       if (mfaRequired) {
@@ -223,7 +217,16 @@ async function isValidToken(decoded: Record<string, unknown>): Promise<boolean> 
 /**
  * Resolve the current user from a request. Returns null when unauthenticated.
  * Mirrors get_current_user / get_current_user_by_api_key.
+ *
+ * Session resolution costs THREE DB roundtrips when uncached (auth row,
+ * MFA config, user row) — on a far-from-DB deployment that is seconds on
+ * EVERY API call. Successful resolutions are memoized per token for 15s:
+ * tokens are long-lived random strings (a fresh login = a fresh key), and
+ * role/permission edits converge within the TTL.
  */
+const SESSION_CACHE_TTL_MS = 60_000;
+const sessionCache = new Map<string, { user: ApiUser; at: number }>();
+
 export async function getCurrentUser(req: Request): Promise<ApiUser | null> {
   const token = tokenFromRequest(req);
   if (!token) return null;
@@ -232,13 +235,30 @@ export async function getCurrentUser(req: Request): Promise<ApiUser | null> {
     return userByApiKey(token);
   }
 
+  const cached = sessionCache.get(token);
+  if (cached && Date.now() - cached.at < SESSION_CACHE_TTL_MS) return cached.user;
+
   const decoded = decodeToken(token);
   if (!decoded || !decoded.id) return null;
   if (!(await isValidToken(decoded))) return null;
 
   const user = await db.user.findFirst({ where: { id: String(decoded.id) } });
   if (!user) return null;
-  return rowToApiUser(user);
+  const apiUser = rowToApiUser(user);
+  sessionCache.set(token, { user: apiUser, at: Date.now() });
+  // Opportunistic pruning — the map only ever holds one entry per live tab.
+  if (sessionCache.size > 256) {
+    const now = Date.now();
+    for (const [k, v] of sessionCache) {
+      if (now - v.at >= SESSION_CACHE_TTL_MS) sessionCache.delete(k);
+    }
+  }
+  return apiUser;
+}
+
+/** Busts a token's cached resolution (logout / session rotation paths). */
+export function invalidateSessionCache(token: string | null | undefined): void {
+  if (token) sessionCache.delete(token);
 }
 
 export async function getUserById(id: string): Promise<ApiUser | null> {

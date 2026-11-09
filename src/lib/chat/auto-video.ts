@@ -210,11 +210,20 @@ export async function decideAutoVideoGeneration(
   const userPrompt = `${transcript}\n\n---\nDecide now. JSON only.`;
 
   try {
-    // Up to three attempts — the gateway occasionally drops a request or the
-    // model returns an unparsable answer; a null decision means NO video for
-    // that turn (fail open, the chat proceeds normally).
+    // TOTAL time budget: this call gates the user-visible first token (the
+    // "Réflexion" shimmer) — a free non-streaming gateway call can queue for
+    // tens of seconds. The budget fails open (no video) instead of hanging.
+    const deadline = Date.now() + 6_000;
+    // Up to three attempts while the budget allows — the gateway
+    // occasionally drops a request or the model returns an unparsable
+    // answer; a null decision means NO video for that turn (fail open, the
+    // chat proceeds normally).
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 700 * attempt));
+      const remaining = deadline - Date.now();
+      if (remaining < 1_200) break; // not enough budget left for a real call
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, Math.min(700 * attempt, Math.max(0, remaining - 1_000))));
+      }
       try {
         const data = await kiloChatCompletion({
           messages: [
@@ -225,6 +234,7 @@ export async function decideAutoVideoGeneration(
           temperature: 0,
           max_tokens: 120,
           thinking: false,
+          timeoutMs: Math.min(remaining, 5_000),
         });
         const content: string = data?.choices?.[0]?.message?.content ?? '';
         if (!content.trim()) continue; // empty answer → retry

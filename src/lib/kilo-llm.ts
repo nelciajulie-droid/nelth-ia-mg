@@ -94,6 +94,14 @@ export type KiloChatParams = {
   max_tokens?: number;
   /** native reasoning (thinking) — defaults to model-dependent */
   thinking?: boolean;
+  /**
+   * Per-call time budget (ms). Default 285s (full answers). Routing/class
+   * calls (auto decisions, titles…) pass a SHORT budget: a non-streaming
+   * call on a free gateway can queue for tens of seconds, and those calls
+   * gate the user-visible first token (the "Réflexion" shimmer) — a
+   * timeout fails open instead of hanging the whole turn.
+   */
+  timeoutMs?: number;
 };
 
 /** Chat completions endpoint (OpenAI-compatible). */
@@ -134,12 +142,16 @@ function buildBody(params: KiloChatParams): Record<string, any> {
 
 /** Non-streaming chat completion → OpenAI-compatible JSON object. */
 export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
+  const timeoutMs = Math.max(1_000, Math.min(params.timeoutMs ?? 285_000, 285_000));
   // Keyless fallback: the built-in z-ai engine answers in place of the
   // gateway (same wire format — decisions, titles, autocompletions…).
+  // Same time budget: the SDK has NO timeout of its own and rate-limits
+  // (429) under parallel load — without the race a stuck SDK call hangs
+  // the caller for minutes.
   if (kiloFallbackActive()) {
     const { zaiChatCompletion } = await import('@/lib/zai-llm');
     const thinking = params.thinking ?? kiloModelWantsThinking(params.model ?? KILO_MODEL_ID);
-    return zaiChatCompletion({
+    const work = zaiChatCompletion({
       messages: params.messages,
       stream: false,
       temperature: params.temperature,
@@ -147,6 +159,19 @@ export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
       max_tokens: params.max_tokens,
       thinking: thinking ? 'enabled' : 'disabled',
     });
+    work.catch(() => {}); // the loser of the race must not surface as unhandled
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const budget = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`z-ai completion exceeded its ${timeoutMs}ms budget`)),
+        timeoutMs
+      );
+    });
+    try {
+      return await Promise.race([work, budget]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
   const res = await fetch(kiloChatUrl(), {
     method: 'POST',
@@ -154,7 +179,8 @@ export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
     body: JSON.stringify(buildBody({ ...params, stream: false })),
     // 285s: just under the 300s platform maxDuration so a hung gateway
     // surfaces as a JSON error instead of Vercel's hard function kill.
-    signal: AbortSignal.timeout(285_000),
+    // Short budgets (decisions/titles) abort proportionally earlier.
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');

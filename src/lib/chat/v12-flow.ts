@@ -443,6 +443,12 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // in real time while the phases run, instead of being buffered and
   // bundled with the first content chunk after a 10-30s silent wait.
   const runCompletionFlow = async (): Promise<Response> => {
+  // Phase stopwatch — the pre-first-token latency (the user-visible
+  // "Réflexion" span) is the product of: DB bookkeeping → skills → auto
+  // decisions → upstream first token. Every milestone logs its elapsed ms so
+  // a slow phase is identifiable in one glance at the logs.
+  const flowT0 = Date.now();
+  const phaseMs = (label: string): string => `(+${Date.now() - flowT0}ms)`;
   // ---------------------------------------- 3. Build LLM messages (middleware)
   // Instant typing feedback (streaming UX): the user's message lands, then
   // NOTHING is visible for seconds on the free upstream — the auto-engagement
@@ -587,7 +593,8 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   }
   console.log(
     '[v12-flow] llm context:',
-    llmMessages.map((m) => `${m.role}:${m.content.length}`).join(' | ')
+    llmMessages.map((m) => `${m.role}:${m.content.length}`).join(' | '),
+    phaseMs('context')
   );
 
   // File-generation intent gate — captured HERE, before the web-search
@@ -1241,7 +1248,50 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const imageToggleOn = form.features?.image_generation === true;
 
     if (query && (imageAuto || searchAuto || videoAuto)) {
-      const [imageDecision, searchDecision, videoDecision] = await Promise.all([
+      // Cheap pre-gate: the three LLM decision calls add seconds of fixed
+      // latency to EVERY turn while they mostly answer "no engagement" for
+      // plain chat/coding/creative messages. A generous lexical gate skips
+      // them entirely for messages with NO plausible image/video/search
+      // signal — when in doubt the full machinery still runs (any question
+      // mark, any interrogative/factual/generation keyword, longer texts).
+      const AUTO_GATE_RE = new RegExp(
+        [
+          '\\?', // any question
+          // interrogatives / factual intent (fr + en)
+          '\\b(qui|quoi|quel(?:le|s)?|quand|o[uù]|comment|pourquoi|combien|who|what|when|where|why|how|which)\\b',
+          // volatile-fact vocabulary → potential web search
+          'actu(?:alit[eé]|s)?\\b|\\bnews?\\b|\\bactu\\b|aujourd|now|current|latest|derni[eè]re|recent|prix|price|m[eé]t[eé]o|weather|score|r[eé]sultat|cours|rate|pr[eé]sident|ministre|champion|pdg|ceo|sorti(?:e|s)?|released?',
+          // generation vocabulary → potential image/video engagement
+          'image|photo|dessin|draw|paint|illustration|logo|affiche|poster|vid[eé]o|anime|animation|movie|clip|render|3d|mockup|banni[eè]re|avatar',
+        ].join('|'),
+        'i'
+      );
+      const needsAutoDecision =
+        AUTO_GATE_RE.test(query) || query.trim().length > 140 || /\b(dessine|g[eé]n[eè]re|cr[eé]e|fais(?:-en)?|montre)\b/i.test(query);
+      if (!needsAutoDecision) {
+        console.log('[v12-flow] auto decisions SKIPPED (trivial turn pre-gate) — streaming immediately');
+      } else {
+      // HARD budget on the whole decision phase: these non-streaming calls
+      // gate the user-visible first token (the "Réflexion" shimmer). The
+      // decision functions already carry their own 6s deadline; this outer
+      // race is the belt-and-suspenders guarantee that NO hang (engine bug,
+      // stuck socket…) ever delays the answer beyond 8s — decisions simply
+      // default off and the turn streams.
+      const decisionsT0 = Date.now();
+      // Arm the budget timer lazily and CLEAR it once the race settles — a
+      // lingering armed timer would hold the serverless invocation open for
+      // the full 8s even after a fast decision round.
+      let decisionsTimer: ReturnType<typeof setTimeout> | undefined;
+      const decisionsTimeout = () =>
+        new Promise<[null, null, null]>((resolve) => {
+          decisionsTimer = setTimeout(() => {
+            console.warn(
+              `[v12-flow] auto decisions exceeded the 8s budget ${phaseMs('decisions-budget')} — defaulting all off`
+            );
+            resolve([null, null, null]);
+          }, 8_000);
+        });
+      const decisionsWork = Promise.all([
         imageAuto && imageEnabled && !imageToggleOn
           ? import('@/lib/chat/auto-image').then((m) => m.decideAutoImageGeneration(llmMessages))
           : Promise.resolve(null),
@@ -1251,9 +1301,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         videoAuto && videoEnabled
           ? import('@/lib/chat/auto-video').then((m) => m.decideAutoVideoGeneration(llmMessages))
           : Promise.resolve(null),
-      ]);
+      ]).catch(() => [null, null, null] as [null, null, null]);
+      let imageDecision: any = null;
+      let searchDecision: any = null;
+      let videoDecision: any = null;
+      try {
+        [imageDecision, searchDecision, videoDecision] = await Promise.race([
+          decisionsWork,
+          decisionsTimeout(),
+        ]);
+      } finally {
+        if (decisionsTimer) clearTimeout(decisionsTimer);
+      }
       console.log(
-        '[v12-flow] auto decisions — video:',
+        `[v12-flow] auto decisions took ${Date.now() - decisionsT0}ms`,
+        '— video:',
         videoDecision ? JSON.stringify(videoDecision) : 'null',
         '| image:',
         imageDecision ? JSON.stringify(imageDecision) : 'null',
@@ -1269,6 +1331,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         // Same status label as the explicit toggle — the user shouldn't be
         // able to tell an auto engagement apart from a manual one.
         await performWebSearch(searchDecision.query, 'Recherche web en cours');
+      }
       }
     }
   }
@@ -1754,7 +1817,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   console.log(
     `[v12-flow] upstream request: model=${modelId} max_tokens=${
       reqBody.max_tokens ?? 'gateway-default'
-    } stream=${form.stream ?? false}`
+    } stream=${form.stream ?? false}`,
+    phaseMs('upstream-connect')
   );
   if (form.stream === true && !isTH) {
     // TokenHarbor (flash) is omitted stream_options: strict OpenAI-compatible
@@ -2549,7 +2613,14 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     let lastContentEmitAt = 0;
     const CONTENT_PACE_MS = 24;
     const CONTENT_PACE_CHUNK = 24;
+    // One-shot first-token marker — closes the Réflexion-span measurement
+    // (flowT0 → … → upstream connect → FIRST TOKEN on the wire).
+    let firstTokenLogged = false;
     const emitContentDelta = async (text: string): Promise<void> => {
+      if (!firstTokenLogged) {
+        firstTokenLogged = true;
+        console.log(`[v12-flow] first token emitted ${phaseMs('first-token')}`);
+      }
       let buf = text;
       while (buf.length) {
         const wait = lastContentEmitAt + CONTENT_PACE_MS - Date.now();
