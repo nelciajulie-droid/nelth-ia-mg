@@ -128,10 +128,20 @@ function loadOAuthProviders(): Record<string, OAuthProvider> {
  *
  * Google is ALWAYS advertised: the auth page renders the official Google
  * button (multi-colour G logo shipped in the Open WebUI build) even before
- * credentials are set. When classic OAuth credentials are absent but the
- * Firebase bridge is available, the google entry carries mode='firebase-popup'
- * plus the public Firebase web config so /static/google-bridge.js can open the
- * Google popup DIRECTLY on the auth page (one click, no intermediate page).
+ * credentials are set. The google entry carries mode='firebase-popup' plus
+ * the public Firebase web config whenever the Firebase bridge is available —
+ * INCLUDING when classic OAuth credentials are configured — so
+ * /static/google-bridge.js opens the Google popup DIRECTLY on the auth page
+ * (one click, no intermediate page).
+ *
+ * Why the bridge wins over the classic code flow even with credentials:
+ * GOOGLE_CLIENT_ID/SECRET power the « @ » connectors (their OAuth round-trip
+ * lands on the authorized site ROOT). That same Google Cloud client has NO
+ * /oauth/google/callback redirect URI whitelisted, so the classic login flow
+ * would die at accounts.google.com with « redirect_uri_mismatch ». The
+ * Firebase bridge works on every domain authorized in the Firebase console
+ * (localhost, preview, the Vercel domain) and keeps accounts keyed by the
+ * Firebase UID — the identity both existing accounts already use.
  */
 export function publicOAuthProviders(): Record<
   string,
@@ -149,19 +159,18 @@ export function publicOAuthProviders(): Record<
   for (const [key, value] of Object.entries(configured)) {
     providers[key] = { name: value.displayName ?? key };
   }
-  if (!providers.google) {
-    providers.google = FIREBASE_AUTH_ENABLED
-      ? {
-          name: 'Google',
-          mode: 'firebase-popup',
-          firebase: {
-            apiKey: process.env.FIREBASE_API_KEY ?? '',
-            authDomain: `${process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah'}.firebaseapp.com`,
-            projectId: process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah',
-          },
-        }
-      : { name: 'Google' };
-  }
+  // Google sign-in always prefers the Firebase popup bridge when available.
+  providers.google = FIREBASE_AUTH_ENABLED
+    ? {
+        name: 'Google',
+        mode: 'firebase-popup',
+        firebase: {
+          apiKey: process.env.FIREBASE_API_KEY ?? '',
+          authDomain: `${process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah'}.firebaseapp.com`,
+          projectId: process.env.FIREBASE_PROJECT_ID ?? 'ethan-nairah',
+        },
+      }
+    : (providers.google ?? { name: 'Google' });
   return providers;
 }
 
@@ -793,17 +802,26 @@ export const routes: Route[] = [
       const authConfig = await getOAuthRuntimeConfig();
       const provider = loadOAuthProviders()[ctx.params.provider];
 
-      // Google is always rendered on the auth page. When credentials are
-      // missing, the Firebase popup bridge (FIREBASE_API_KEY) serves a
-      // zero-configuration sign-in page; only when neither is available do we
-      // redirect back with an actionable error — including the deploy target
-      // (.env locally vs Vercel env vars in production) and the exact redirect
-      // URI that must be whitelisted in Google Cloud Console.
+      // Google sign-in runs through the Firebase popup bridge whenever it is
+      // available — even when classic OAuth credentials ARE configured: those
+      // credentials power the « @ » connectors (root round-trip), and the
+      // classic login code flow would send redirect_uri = <origin>/oauth/
+      // google/callback, which the Google Cloud client does not authorize →
+      // « Erreur 400 : redirect_uri_mismatch ». The bridge page covers direct
+      // navigations (popup blocked, mobile, /auth fallback); the click on
+      // /auth itself is intercepted by /static/google-bridge.js (mode
+      // 'firebase-popup' advertised by /api/config).
+      if (ctx.params.provider === 'google' && authConfig.ENABLE_OAUTH && FIREBASE_AUTH_ENABLED) {
+        return firebaseBridgePage();
+      }
+
+      // Google is always rendered on the auth page. When neither classic
+      // credentials nor the Firebase bridge are available, redirect back with
+      // an actionable error — including the deploy target (.env locally vs
+      // Vercel env vars in production) and the exact redirect URI that must
+      // be whitelisted in Google Cloud Console.
       if (!authConfig.ENABLE_OAUTH || !provider) {
         if (ctx.params.provider === 'google') {
-          if (authConfig.ENABLE_OAUTH && !provider && FIREBASE_AUTH_ENABLED) {
-            return firebaseBridgePage();
-          }
           const base = ((await configGet<string>('webui.url', '')) || requestOrigin(ctx.req)).replace(/\/$/, '');
           const detail = !authConfig.ENABLE_OAUTH
             ? 'La connexion Google est désactivée (ENABLE_OAUTH=false)'
