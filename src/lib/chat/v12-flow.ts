@@ -227,11 +227,12 @@ function localStripNarration(content: string): string {
  * Continuation instruction for auto-continue rounds (see finalizeTruncated
  * and the __nelth_continue mode): the serverless platform caps a single
  * completion request (Vercel maxDuration 300s), and a thinking-model
- * generation of a very long code file can outrun it. The interrupted
- * round's partial answer rides in the context as the model's own last
- * message — this instruction makes the continuation seamless.
+ * generation of a very long code file can outrun it. A gateway output-token
+ * cap (finish_reason "length") ends the same way. The interrupted round's
+ * partial answer rides in the context as the model's own last message —
+ * this instruction makes the continuation seamless.
  */
-const CONTINUE_INSTRUCTION = `Your previous answer was interrupted mid-output by a platform time limit — the conversation shows exactly where it stopped. Continue EXACTLY from that point: do not repeat anything already written, do not re-introduce or summarize the answer, do not apologize or mention the interruption. If the output stopped inside a code block, continue inside that same code block and close it properly when the code ends. Emit ONLY the continuation, starting with the very next character.`;
+const CONTINUE_INSTRUCTION = `Your previous answer was interrupted mid-output by a platform limit (time budget or output-token cap) — the conversation shows exactly where it stopped. Continue EXACTLY from that point: do not repeat anything already written, do not re-introduce or summarize the answer, do not apologize or mention the interruption. If the output stopped inside a code block, continue inside that same code block and close it properly when the code ends. Emit ONLY the continuation, starting with the very next character.`;
 
 export async function handleChatCompletionV12(user: ApiUser, form: any): Promise<Response> {
   const json = (data: unknown, status = 200) =>
@@ -1818,22 +1819,28 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const v = (params as any)[key] ?? (form as any)[key];
     if (v !== undefined && v !== null) reqBody[key] = v;
   }
-  // No output ceiling on the built-in models: without an explicit max_tokens
-  // the OpenAI-compatible gateways apply their own low default (~4k) and long
-  // code answers die mid-stream with finish_reason "length" (observed on
-  // Nelth-3.5_Thinking: code truncated mid-file). The gateway catalog limits
-  // are far higher (nemotron-3-ultra free: 65 536 completion tokens, dots-3
-  // free: 460 800) — a generous per-model ceiling is pinned so no generation
-  // is ever cut by a default. The user's own params.max_tokens still wins.
+  // « Max tokens infinie » on every built-in model: the pinned ceilings are
+  // each model's CATALOG MAXIMUM (verified live on the Kilo gateway
+  // /api/v1/models, 2026-11-10) — dots-3-note-preview:free 460 800 completion
+  // tokens, nemotron-3-ultra-550b-a55b:free 65 536. Nothing lower is ever
+  // applied: without an explicit max_tokens the OpenAI-compatible gateways
+  // enforce their own low default (~4k) and long code answers die mid-stream
+  // with finish_reason "length". The flash tier (TokenHarbor
+  // deepseek-v4.1-flash:free — catalog not queryable from this region) gets
+  // 131 072: the same model family on the Kilo gateway allows 943 718, and a
+  // gateway that finds the value too large is handled by the self-healing
+  // ladder below (step-down retry), never a dead turn. The user's own
+  // params.max_tokens still wins.
   if (reqBody.max_tokens === undefined && isKilo) {
-    reqBody.max_tokens = modelId === KILO_REASONING_MODEL_ID ? 65_536 : 131_072;
+    reqBody.max_tokens = modelId === KILO_REASONING_MODEL_ID ? 65_536 : 460_800;
   }
-  // Flash tier ceiling: generous enough that long code answers never die
-  // mid-stream with finish_reason "length" (the user's own params.max_tokens
-  // always wins).
   if (reqBody.max_tokens === undefined && isTH) {
-    reqBody.max_tokens = 8_192;
+    reqBody.max_tokens = 131_072;
   }
+  // True when the OUTPUT CAP came from the user's own params — an explicit
+  // cap is a deliberate choice and is respected (no token-limit
+  // auto-continue); every other model runs to its catalog maximum.
+  const userCappedOutput = reqBody.max_tokens !== undefined;
   console.log(
     `[v12-flow] upstream request: model=${modelId} max_tokens=${
       reqBody.max_tokens ?? 'gateway-default'
@@ -2055,6 +2062,46 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         })();
 
   /**
+   * Self-healing output ceiling (« max tokens infinie »). The pinned
+   * max_tokens values are each model's catalog maximum — but a gateway we
+   * cannot query (TokenHarbor is region-blocked from the build region) may
+   * enforce a LOWER completion cap and answer 400 instead of clamping.
+   * Instead of a dead turn, step down the ladder and retry: 32 768 (generous
+   * proven-working tier) then the gateway default (no max_tokens). The
+   * surviving value is mirrored into reqBody so the skill pass-2 and the
+   * narration repair inherit the accepted ceiling. Only token-limit 400s
+   * match — generic provider flakes keep their own retry path.
+   */
+  const TOKEN_LIMIT_LADDER: Array<number | undefined> = [32_768, undefined];
+  const TOKEN_LIMIT_400 =
+    /max_tokens|max.?completion|token.{0,20}limit|limit.{0,30}token|too large|exceed|maximum.{0,40}tokens|tokens.{0,40}maximum|longer than the maximum/i;
+  const callUpstreamTokenSafe = async (
+    body: Record<string, any>,
+    signalOverride?: AbortSignal
+  ): Promise<Response> => {
+    let res = await callUpstream(body, signalOverride);
+    for (const step of TOKEN_LIMIT_LADDER) {
+      if (!(isKilo || isTH) || res.status !== 400 || body.max_tokens === undefined) return res;
+      const probe = await res.clone().text().catch(() => '');
+      if (!TOKEN_LIMIT_400.test(probe)) return res;
+      console.warn(
+        `[v12-flow] gateway rejected max_tokens=${body.max_tokens} (token limit) — stepping down to ${
+          step ?? 'gateway default'
+        }`
+      );
+      if (step === undefined) {
+        delete body.max_tokens;
+        delete reqBody.max_tokens;
+      } else {
+        body.max_tokens = step;
+        reqBody.max_tokens = step;
+      }
+      res = await callUpstream(body, signalOverride);
+    }
+    return res;
+  };
+
+  /**
    * Narration repair (flow scope): one corrective call converting the model's
    * held-back internal analysis into the direct final answer. The full
    * llmMessages context rides along (web sources included) so [N] citation
@@ -2111,7 +2158,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
    *  anchor the measured span is ~0s → "Thought for less than a second"). */
   const upstreamStartedAt = Date.now();
   try {
-    upstream = await callUpstream(reqBody);
+    upstream = await callUpstreamTokenSafe(reqBody);
 
     // Provider flakiness guard (observed on the free dots-studio model with
     // web-search context): the gateway SOMETIMES answers 400 "bad request"
@@ -2128,7 +2175,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         if (!/bad request|Provider returned error/i.test(probe)) break;
         console.warn(`[v12-flow] gateway 400 provider flake — retry ${attempt}/2 (same model)`);
         await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
-        upstream = await callUpstream(reqBody);
+        upstream = await callUpstreamTokenSafe(reqBody);
       }
     }
   } catch (e) {
@@ -2327,15 +2374,70 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     } else {
       // ollama non-stream JSON
       data = await upstream.json();
+      const ollamaDoneReason =
+        typeof data?.done_reason === 'string' && data.done_reason ? data.done_reason : 'stop';
       data = {
         id: crypto.randomUUID(),
         object: 'chat.completion',
         created: nowSec(),
         model: modelId,
-        choices: [{ index: 0, message: { role: 'assistant', content: data?.message?.content ?? '' }, finish_reason: 'stop' }],
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: data?.message?.content ?? '' },
+            finish_reason: ollamaDoneReason,
+          },
+        ],
       };
     }
     let content = data?.choices?.[0]?.message?.content ?? '';
+
+    // « Max tokens infinie » (non-streaming API clients): finish_reason
+    // "length" means an output cap cut the answer mid-word. Server-side
+    // continuation — up to 3 extra rounds, each one appending seamlessly to
+    // the partial (same instruction as the streaming auto-continue chain;
+    // no SSE bridge here, so the loop lives in-request). An EXPLICIT user
+    // cap (params.max_tokens) is a deliberate choice and is respected.
+    let nonStreamContRounds = 0;
+    while (
+      !userCappedOutput &&
+      data?.choices?.[0]?.finish_reason === 'length' &&
+      String(content).trim() &&
+      nonStreamContRounds < 3
+    ) {
+      nonStreamContRounds++;
+      console.warn(
+        `[v12-flow] non-streaming output-token cap — continuation round ${nonStreamContRounds}/3`
+      );
+      try {
+        const res2 = await callUpstreamTokenSafe({
+          ...reqBody,
+          messages: [
+            ...llmMessages,
+            { role: 'assistant', content: String(content).slice(0, 60_000) },
+            { role: 'user', content: CONTINUE_INSTRUCTION },
+          ],
+        });
+        if (!res2.ok) break;
+        const data2: any = await res2.json().catch(() => null);
+        if (!data2) break;
+        const more: string =
+          (route.type === 'openai' ? data2?.choices?.[0]?.message?.content : data2?.message?.content) ??
+          '';
+        if (!more.trim()) break; // nothing new — model had nothing left
+        content = content + more;
+        if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
+        const fr2 =
+          route.type === 'openai' ? data2?.choices?.[0]?.finish_reason : data2?.done_reason;
+        if (data?.choices?.[0]) {
+          data.choices[0].finish_reason = typeof fr2 === 'string' && fr2 ? fr2 : 'stop';
+        }
+        if (data2?.usage) data.usage = data2.usage;
+      } catch (e) {
+        console.error('[v12-flow] non-streaming continuation failed', e);
+        break;
+      }
+    }
 
     // Agent skills lazy-loading (non-streaming): a leading USE_SKILL(name)
     // marker restarts the completion with that pack's instructions injected —
@@ -2769,6 +2871,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
 
     // One-shot leak log for the flash tier (reasoning deltas dropped below).
     let thReasoningLeakLogged = false;
+    /** Upstream finish_reason of the CURRENT stream ("length" = output-token
+     *  cap hit — feeds the token-limit auto-continue below). */
+    let upstreamFinishReason: string | null = null;
+    /** Why the flow took the graceful truncation path — surfaced in the
+     *  nelth:continue marker and the logs. */
+    let truncationReason: 'time-budget' | 'token-limit' = 'time-budget';
     const handleUpstreamLine = async (line: string) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
@@ -2782,6 +2890,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       }
       if (route.type === 'openai') {
         if (obj?.usage) usage = obj.usage;
+        // finish_reason ride-along: "length" means the model STILL had more
+        // to say but an output cap cut it — consumed at stream end
+        // (consumeUpstream) for the auto-continue chain.
+        const finishReason = obj?.choices?.[0]?.finish_reason;
+        if (typeof finishReason === 'string' && finishReason) upstreamFinishReason = finishReason;
         const delta: string = obj?.choices?.[0]?.delta?.content ?? '';
         const reasoningDelta: string =
           (typeof obj?.choices?.[0]?.delta?.reasoning === 'string'
@@ -2835,6 +2948,10 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         // ollama NDJSON line (no gate — local models)
         const content: string = obj?.message?.content ?? '';
         if (obj?.done) usage = obj;
+        // done_reason parity with finish_reason ("length" = output cap).
+        if (obj?.done && typeof obj?.done_reason === 'string' && obj.done_reason) {
+          upstreamFinishReason = obj.done_reason;
+        }
         if (content) {
           aggregate += content;
           const r = reasoning.push(content);
@@ -2878,7 +2995,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
      * A thinking-model generation of a very long code file can outrun the
      * platform's maxDuration (Vercel caps a function at 300s on this plan —
      * measured repro: 53.9KB of landing-page code streamed, then the raw
-     * "Chat completion stream failed" banner). Instead of that banner:
+     * "Chat completion stream failed" banner). The SAME graceful path now
+     * covers the output-token cap: finish_reason "length" (gateway cap or
+     * user params.max_tokens on an external model) triggers the identical
+     * auto-continue chain — « max tokens infinie »: the answer keeps flowing
+     * in fresh rounds until the model stops naturally. Instead of a banner:
      *
      *   1. emit `nelth:continue` — a bridge-private marker (an unknown event
      *      type for the compiled frontend: harmless without the bridge);
@@ -2907,14 +3028,27 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         truncatedContent = fr.usedStructured || reasoning.dropped ? fr.content : aggregate;
       }
       console.warn(
-        `[v12-flow] time budget exhausted mid-generation (${FLOW_WALL_MS}ms) — ` +
-          `truncated at ${truncatedContent.length} chars for auto-continue`
+        truncationReason === 'token-limit'
+          ? `[v12-flow] output-token cap hit mid-generation (finish_reason "length") — ` +
+              `truncated at ${truncatedContent.length} chars for auto-continue`
+          : `[v12-flow] time budget exhausted mid-generation (${FLOW_WALL_MS}ms) — ` +
+              `truncated at ${truncatedContent.length} chars for auto-continue`
       );
       await clearThinkingStatus();
-      await emit({ type: 'nelth:continue', data: { reason: 'time-budget', contentLength: truncatedContent.length } });
+      await emit({
+        type: 'nelth:continue',
+        data: { reason: truncationReason, contentLength: truncatedContent.length },
+      });
       await emit({
         type: 'status',
-        data: { action: 'chat', description: 'Génération longue — poursuite automatique…', done: true },
+        data: {
+          action: 'chat',
+          description:
+            truncationReason === 'token-limit'
+              ? 'Limite de tokens atteinte — poursuite automatique…'
+              : 'Génération longue — poursuite automatique…',
+          done: true,
+        },
       });
       await persistAssistant(truncatedContent, usage, false, truncatedOutput, null, truncatedContent, {
         truncated: true,
@@ -2939,6 +3073,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      upstreamFinishReason = null; // per-stream: pass 2 overwrites pass 1
       try {
         for (;;) {
           const { done, value } = await reader.read();
@@ -2991,6 +3126,29 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         }
         return 'completed';
       }
+      // Output-token cap hit cleanly (stream ended, finish_reason "length"):
+      // the model still had more to say. « Max tokens infinie » — chain a
+      // fresh auto-continue round instead of ending the answer mid-word.
+      // An EXPLICIT user cap (params.max_tokens) is a deliberate choice and
+      // is respected — no forced continuation.
+      // Short streams can still be wholly held by the undecided skill gate
+      // (< 160 chars) — flush it through the normal machinery FIRST so the
+      // round text (and the persisted partial) carry the held prefix. The
+      // post-pass flush below is idempotent (buffer already drained).
+      if (skillGate && !skillGate.decided) {
+        const flush = skillGate.flushPlain();
+        if (flush) await processContentDelta(flush);
+      }
+      if (
+        upstreamFinishReason === 'length' &&
+        !userCappedOutput &&
+        currentRoundText().trim() &&
+        sessionId &&
+        chatId
+      ) {
+        truncationReason = 'token-limit';
+        return 'truncated';
+      }
       return 'completed';
     };
 
@@ -3028,7 +3186,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           data: { action: 'skill', description: `Skill « ${skillLabel} » chargé`, done: false },
         });
         try {
-          let res2 = await callUpstream({
+          let res2 = await callUpstreamTokenSafe({
             ...reqBody,
             messages: await buildSkillInjectionMessages(llmMessages, skill),
           });
@@ -3036,7 +3194,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
             const probe = await res2.clone().text().catch(() => '');
             if (/bad request|Provider returned error/i.test(probe)) {
               console.warn('[v12-flow] skill pass-2 gateway 400 flake — retrying');
-              res2 = await callUpstream({
+              res2 = await callUpstreamTokenSafe({
                 ...reqBody,
                 messages: await buildSkillInjectionMessages(llmMessages, skill),
               });
