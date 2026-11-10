@@ -8,8 +8,9 @@
  * in next.config.ts so Next.js serves it directly.
  *
  * Auth reuses the SPA's session (localStorage token / cookie). The visual
- * theme mirrors the SPA's stored theme (light / dark / system) so the studio
- * feels like the same product.
+ * system mirrors the original SPA: gray-50/gray-950 canvas, the 42px icon
+ * rail, Workspace-style tab navigation — the studio is a page of the SAME
+ * product, not a separate app.
  */
 
 import * as React from 'react';
@@ -83,6 +84,15 @@ export default function ImagesPage() {
   const session = useSession();
   const theme = useSvelteTheme();
 
+  // Apply the SPA theme on <html> — the SPA itself toggles the class on the
+  // document root, and every overlay (dialogs, dropdowns, select menus are
+  // portaled to <body>) must inherit it, exactly like in the host app.
+  React.useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    return () => root.classList.remove('dark');
+  }, [theme]);
+
   React.useEffect(() => {
     if (session.kind === 'unauthenticated') {
       // Hand back to the SPA's auth flow.
@@ -92,21 +102,19 @@ export default function ImagesPage() {
 
   if (session.kind !== 'ready') {
     return (
-      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-zinc-50 dark:bg-zinc-950">
-        <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-600/20">
-          <Sparkles className="size-7 text-white" aria-hidden />
-        </div>
-        <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
-          <Loader2 className="size-4 animate-spin" aria-hidden />
-          {session.kind === 'unauthenticated' ? 'Connexion requise…' : 'Ouverture du studio…'}
+      <div className={theme === 'dark' ? 'dark' : undefined}>
+        <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-gray-50 text-gray-700 dark:bg-gray-950 dark:text-gray-100">
+          <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-gray-800 to-black shadow-lg dark:from-gray-100 dark:to-white">
+            <Sparkles className="size-7 text-white dark:text-black" aria-hidden />
+          </div>
+          <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+            <Loader2 className="size-4 animate-spin" aria-hidden />
+            {session.kind === 'unauthenticated' ? 'Authentication required…' : 'Opening Imagine Studio…'}
+          </div>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className={theme === 'dark' ? 'dark' : undefined}>
-      <ImagineStudio user={session.user} />
-    </div>
-  );
+  return <ImagineStudio user={session.user} />;
 }

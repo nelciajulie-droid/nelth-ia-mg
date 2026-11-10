@@ -59,7 +59,7 @@ export async function imagineApi<T>(
   }
   const res = await fetch(`/api/v1/imagine${path}`, { ...init, headers });
   if (!res.ok) {
-    throw new ImagineApiError(res.status, await readError(res, `Erreur ${res.status}`));
+    throw new ImagineApiError(res.status, await readError(res, `Error ${res.status}`));
   }
   return (await res.json()) as T;
 }
@@ -73,7 +73,7 @@ export async function imagineUpload(file: File): Promise<ImagineItem> {
   if (token) headers.set('authorization', `Bearer ${token}`);
   const res = await fetch('/api/v1/imagine/upload', { method: 'POST', headers, body: form });
   if (!res.ok) {
-    throw new ImagineApiError(res.status, await readError(res, `Erreur ${res.status}`));
+    throw new ImagineApiError(res.status, await readError(res, `Error ${res.status}`));
   }
   return (await res.json()) as ImagineItem;
 }

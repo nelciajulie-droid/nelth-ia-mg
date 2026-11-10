@@ -6,6 +6,9 @@
  * StudioImg: plain <img> wrapper (blob URLs + static gallery assets are not
  * served through the Next.js image optimizer) — keeps the no-img-element
  * lint exception in a single place.
+ *
+ * All visual tokens follow the original Open WebUI palette (gray surfaces on
+ * the gray-50/gray-950 canvas — never zinc, never custom accents).
  */
 
 import * as React from 'react';
@@ -53,34 +56,34 @@ export function useAuthImage(path: string | null | undefined): string | null {
 export function phaseLabel(phase: ImaginePhase | null): string {
   switch (phase) {
     case 'sending':
-      return 'Envoi au moteur';
+      return 'Sending to engine';
     case 'generating':
-      return 'Génération en cours';
+      return 'Generating';
     case 'image':
-      return 'Finalisation';
+      return 'Finalizing';
     default:
-      return 'Préparation';
+      return 'Preparing';
   }
 }
 
 /** Status label for completed/failed badges. */
 export function statusLabel(item: ImagineItem): string | null {
-  if (item.status === 'failed') return 'Échec';
+  if (item.status === 'failed') return 'Failed';
   if (item.status === 'completed') return null;
-  if (item.status === 'processing') return 'Traitement';
-  return 'Génération';
+  if (item.status === 'processing') return 'Processing';
+  return 'Generating';
 }
 
 export function sourceLabel(source: ImagineItem['source']): string {
   switch (source) {
     case 'generate':
-      return 'Générée';
+      return 'Generated';
     case 'edit':
-      return 'Modifiée';
+      return 'Edited';
     case 'variation':
       return 'Variation';
     case 'upload':
-      return 'Importée';
+      return 'Uploaded';
     default:
       return source;
   }
@@ -88,7 +91,7 @@ export function sourceLabel(source: ImagineItem['source']): string {
 
 export function formatDate(seconds: number): string {
   const date = new Date(seconds * 1000);
-  return date.toLocaleString('fr-FR', {
+  return date.toLocaleString('en-US', {
     day: '2-digit',
     month: 'short',
     hour: '2-digit',
@@ -116,12 +119,12 @@ export function ItemThumb({
       {url ? (
         <StudioImg
           src={url}
-          alt={item.prompt ?? item.name ?? 'Image générée'}
+          alt={item.prompt ?? item.name ?? 'Generated image'}
           loading="lazy"
           className={'size-full object-cover ' + (imgClassName ?? '')}
         />
       ) : (
-        <span className="block size-full animate-pulse bg-zinc-200 dark:bg-zinc-800" aria-hidden />
+        <span className="block size-full animate-pulse bg-gray-100 dark:bg-gray-800" aria-hidden />
       )}
     </span>
   );
@@ -139,14 +142,14 @@ export function GenerationSkeleton({
   return (
     <figure
       className={
-        'group relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 ' +
+        'group relative overflow-hidden rounded-xl border border-gray-100 bg-gray-100 dark:border-gray-850 dark:bg-gray-900 ' +
         (className ?? '')
       }
-      aria-label={`Génération : ${item.prompt ?? 'sans prompt'} — ${label}`}
+      aria-label={`Generating: ${item.prompt ?? 'no prompt'} — ${label}`}
     >
       <div className="animate-pulse flex h-full w-full items-center justify-center">
-        <div className="flex flex-col items-center gap-2 p-6 text-zinc-500 dark:text-zinc-400">
-          <Loader2 className="size-6 animate-spin text-emerald-600 dark:text-emerald-500" aria-hidden />
+        <div className="flex flex-col items-center gap-2 p-6 text-gray-500 dark:text-gray-400">
+          <Loader2 className="size-6 animate-spin" aria-hidden />
           <span className="text-xs font-medium">{label}</span>
         </div>
       </div>

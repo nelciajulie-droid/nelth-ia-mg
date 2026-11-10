@@ -3,6 +3,12 @@
 /**
  * Nelth-IA Images — creation workspace (prompt composer).
  *
+ * Visual system: the ORIGINAL Open WebUI chat composer — a rounded-3xl
+ * card (border-gray-100/50 / dark:border-gray-850/50, bg-white/5,
+ * backdrop-blur, shadow-lg), round 30px icon buttons, Workspace-style
+ * segmented chips for the selectors and the black/white primary accent
+ * (bg-black dark:bg-white) for Generate.
+ *
  * Large centered composer: auto-growing multiline prompt, reference image
  * attachments (downscaled to data URLs client-side), aspect-ratio / style /
  * count selectors and the Generate button with its loading state.
@@ -55,7 +61,7 @@ async function fileToAttachment(file: File): Promise<ComposerAttachment> {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error('Image illisible'));
+      el.onerror = () => reject(new Error('Unreadable image'));
       el.src = objectUrl;
     });
     const maxSide = 1280;
@@ -73,6 +79,25 @@ async function fileToAttachment(file: File): Promise<ComposerAttachment> {
   }
 }
 
+/** Workspace-style segmented chip (the SPA "Create" control classes). */
+function ComposerChip({
+  children,
+  label,
+  ...props
+}: React.ComponentProps<typeof Button> & { label: string }) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      aria-label={label}
+      className="flex h-7 items-center gap-1.5 overflow-hidden rounded-lg bg-gray-50 px-2.5 text-xs text-gray-900 ring-1 ring-gray-200 transition hover:bg-gray-100 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-850 dark:hover:bg-gray-800"
+      {...props}
+    >
+      {children}
+    </Button>
+  );
+}
+
 export function WorkspaceComposer({
   capabilities,
   settings,
@@ -86,7 +111,7 @@ export function WorkspaceComposer({
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  // "Utiliser ce prompt" from the inspiration gallery fills the composer.
+  // "Use this prompt" from the inspiration gallery fills the composer.
   React.useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<string>).detail;
@@ -138,25 +163,25 @@ export function WorkspaceComposer({
 
   return (
     <section
-      aria-label="Espace de création"
-      className="mx-auto w-full max-w-3xl rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+      aria-label="Creation workspace"
+      className="relative mx-auto w-full max-w-3xl rounded-3xl border border-gray-100/50 bg-white/5 shadow-lg backdrop-blur-sm transition hover:border-gray-200 focus-within:border-gray-200 dark:border-gray-850/50 dark:bg-gray-500/5 dark:hover:border-gray-800 dark:focus-within:border-gray-800"
     >
       {/* Attachments */}
       {hasRefs ? (
-        <div className="flex flex-wrap gap-2 border-b border-zinc-200 p-3 dark:border-zinc-800">
+        <div className="flex flex-wrap gap-2 border-b border-gray-100/60 p-3 dark:border-gray-850/60">
           {attachments.map((attachment, index) => (
             <div
               key={`${attachment.name}-${index}`}
-              className="group relative size-16 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-700"
+              className="group relative size-16 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <StudioImg
                 src={attachment.dataUrl}
-                alt={`Image de référence ${index + 1} : ${attachment.name}`}
+                alt={`Reference image ${index + 1}: ${attachment.name}`}
                 className="size-full object-cover"
               />
               <button
                 type="button"
-                aria-label={`Retirer ${attachment.name}`}
+                aria-label={`Remove ${attachment.name}`}
                 onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== index))}
                 className="absolute right-1 top-1 rounded-full bg-black/70 p-0.5 text-white opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100"
               >
@@ -164,10 +189,10 @@ export function WorkspaceComposer({
               </button>
             </div>
           ))}
-          <div className="flex items-center px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <div className="flex items-center px-1 text-[11px] text-gray-500 dark:text-gray-400">
             {capabilities?.features.imageToImage
-              ? 'Références envoyées au moteur (image → image)'
-              : 'Références ignorées (édition non prise en charge par le moteur)'}
+              ? 'References sent to the engine (image → image)'
+              : 'References ignored (editing not supported by the engine)'}
           </div>
         </div>
       ) : null}
@@ -185,14 +210,15 @@ export function WorkspaceComposer({
             }
           }}
           rows={3}
-          placeholder="Décrivez l’image à créer…"
-          aria-label="Description de l’image à créer"
-          className="min-h-[120px] resize-none border-0 bg-transparent p-0 text-[15px] leading-relaxed shadow-none focus-visible:ring-0 dark:bg-transparent"
+          placeholder="Describe the image to create…"
+          aria-label="Image prompt"
+          className="min-h-[120px] resize-none border-0 bg-transparent p-0 text-[0.9375rem] leading-relaxed shadow-none focus-visible:ring-0 dark:bg-transparent"
         />
       </div>
 
-      {/* Settings row */}
-      <div className="flex flex-wrap items-center gap-2 border-t border-zinc-200 px-3 py-2.5 dark:border-zinc-800">
+      {/* Settings row — the SPA composer bottom bar: round icon buttons +
+          segmented chips + primary pill */}
+      <div className="flex flex-wrap items-center gap-2 border-t border-gray-100/60 px-3 py-2 dark:border-gray-850/60">
         <input
           ref={fileInputRef}
           type="file"
@@ -204,29 +230,21 @@ export function WorkspaceComposer({
             event.target.value = '';
           }}
         />
-        <Button
+        <button
           type="button"
-          variant="outline"
-          size="sm"
           onClick={() => fileInputRef.current?.click()}
           disabled={disabled || attachments.length >= MAX_ATTACHMENTS}
-          aria-label="Joindre une image de référence"
-          className="h-8 gap-1.5 rounded-lg text-zinc-600 dark:text-zinc-300"
+          aria-label="Attach a reference image"
+          title="Attach a reference image"
+          className="flex size-[1.875rem] shrink-0 items-center justify-center rounded-full bg-transparent text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-white dark:hover:bg-gray-800"
         >
-          <Paperclip className="size-3.5" aria-hidden />
-          <span className="hidden sm:inline">Référence</span>
-        </Button>
+          <Paperclip className="size-4" aria-hidden />
+        </button>
 
         {/* Aspect ratio */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 gap-1.5 rounded-lg text-zinc-600 dark:text-zinc-300"
-              aria-label="Format de l’image"
-            >
+            <ComposerChip label="Aspect ratio">
               <span
                 aria-hidden
                 className="inline-block rounded-[2px] border border-current opacity-70"
@@ -236,10 +254,10 @@ export function WorkspaceComposer({
                 }}
               />
               <span className="tabular-nums">{settings.aspectRatio}</span>
-            </Button>
+            </ComposerChip>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-44">
-            <DropdownMenuLabel>Format</DropdownMenuLabel>
+            <DropdownMenuLabel>Aspect ratio</DropdownMenuLabel>
             {IMAGINE_RATIOS.map((ratio) => (
               <DropdownMenuCheckboxItem
                 key={ratio}
@@ -253,9 +271,9 @@ export function WorkspaceComposer({
             {ratioMode === 'creative-hint' ? (
               <>
                 <DropdownMenuSeparator />
-                <p className="px-2 py-1.5 text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
-                  Le moteur intégré ajuste la composition via le prompt (taille finale choisie par le
-                  fournisseur).
+                <p className="px-2 py-1.5 text-[11px] leading-snug text-gray-500 dark:text-gray-400">
+                  The built-in engine adjusts composition through the prompt (final size chosen by the
+                  provider).
                 </p>
               </>
             ) : null}
@@ -265,19 +283,13 @@ export function WorkspaceComposer({
         {/* Style */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 max-w-[190px] gap-1.5 rounded-lg text-zinc-600 dark:text-zinc-300"
-              aria-label="Style artistique"
-            >
-              <Sparkles className="size-3.5 shrink-0" aria-hidden />
+            <ComposerChip label="Artistic style" className="max-w-[190px]">
+              <Sparkles className="size-3.5 shrink-0 opacity-60" aria-hidden />
               <span className="truncate">{style ? style.label : 'Style'}</span>
-            </Button>
+            </ComposerChip>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
-            <DropdownMenuLabel>Style artistique</DropdownMenuLabel>
+            <DropdownMenuLabel>Artistic style</DropdownMenuLabel>
             {['none', 'photorealistic', 'anime', '3d', 'illustration', 'architecture', 'nature', 'fashion', 'product', 'wallpaper', 'art'].map(
               (id) => {
                 const entry = imagineStyleById(id);
@@ -300,19 +312,13 @@ export function WorkspaceComposer({
         {/* Count */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 gap-1.5 rounded-lg text-zinc-600 dark:text-zinc-300"
-              aria-label="Nombre d’images"
-            >
-              <ImagePlus className="size-3.5" aria-hidden />
+            <ComposerChip label="Image count">
+              <ImagePlus className="size-3.5 shrink-0 opacity-60" aria-hidden />
               <span className="tabular-nums">×{activeCount}</span>
-            </Button>
+            </ComposerChip>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-40">
-            <DropdownMenuLabel>Nombre d’images</DropdownMenuLabel>
+            <DropdownMenuLabel>Image count</DropdownMenuLabel>
             {Array.from({ length: capabilities?.maxCount ?? 4 }, (_, i) => i + 1).map((count) => (
               <DropdownMenuCheckboxItem
                 key={count}
@@ -327,30 +333,31 @@ export function WorkspaceComposer({
         </DropdownMenu>
 
         <div className="ml-auto flex items-center gap-2">
-          <span className="hidden text-[11px] text-zinc-400 sm:inline" aria-hidden>
+          <span className="hidden text-[11px] text-gray-400 dark:text-gray-500 sm:inline" aria-hidden>
             Ctrl + ⏎
           </span>
-          <Button
+          <button
             type="button"
-            size="sm"
             onClick={submit}
             disabled={disabled || busy || !prompt.trim()}
             className={cn(
-              'h-9 gap-1.5 rounded-lg bg-emerald-600 font-medium text-white shadow-sm transition-colors hover:bg-emerald-500 focus-visible:ring-emerald-600 disabled:opacity-50 dark:bg-emerald-600 dark:hover:bg-emerald-500'
+              'flex h-7 items-center gap-1.5 rounded-full px-3.5 text-xs font-medium text-white transition',
+              'bg-black hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100',
+              'disabled:cursor-not-allowed disabled:opacity-40'
             )}
           >
             {busy ? (
               <>
-                <Loader2 className="size-4 animate-spin" aria-hidden />
-                File d’attente…
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                <span className="hidden sm:inline">Queueing…</span>
               </>
             ) : (
               <>
-                <Sparkles className="size-4" aria-hidden />
-                Générer
+                <Sparkles className="size-3.5" aria-hidden />
+                Generate
               </>
             )}
-          </Button>
+          </button>
         </div>
       </div>
     </section>

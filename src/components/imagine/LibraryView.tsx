@@ -6,6 +6,8 @@
  * The user's persisted items: filters (type, favorites, search, date), the
  * upload button (real files pipeline), and a responsive grid where active
  * items keep their live generation skeleton until the poller sees them land.
+ * Visual system: the original SPA palette (gray surfaces, black/white
+ * accent, workspace-style chips and inputs).
  */
 
 import * as React from 'react';
@@ -19,15 +21,7 @@ import {
   Upload,
 } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ratioValue } from '@/lib/images/styles';
 import type { ImagineItem } from '@/lib/images/types';
@@ -47,13 +41,13 @@ interface LibraryViewProps {
 }
 
 const FILTERS: Array<{ id: LibraryFilter; label: string }> = [
-  { id: 'all', label: 'Toutes' },
-  { id: 'recent', label: 'Récentes (7 j)' },
-  { id: 'favorite', label: 'Favoris' },
-  { id: 'generate', label: 'Générées' },
-  { id: 'edit', label: 'Modifiées' },
+  { id: 'all', label: 'All' },
+  { id: 'recent', label: 'Recent (7d)' },
+  { id: 'favorite', label: 'Favorites' },
+  { id: 'generate', label: 'Generated' },
+  { id: 'edit', label: 'Edited' },
   { id: 'variation', label: 'Variations' },
-  { id: 'upload', label: 'Importées' },
+  { id: 'upload', label: 'Uploaded' },
 ];
 
 export function LibraryView({
@@ -91,24 +85,24 @@ export function LibraryView({
   }, [items, filter, query]);
 
   return (
-    <section aria-label="Ma bibliothèque d’images" className="space-y-4">
+    <section aria-label="My image library" className="space-y-4">
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-[180px] flex-1 sm:max-w-xs">
           <Search
-            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400"
+            className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-gray-400"
             aria-hidden
           />
-          <Input
+          <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Rechercher un prompt, un nom…"
-            aria-label="Rechercher dans ma bibliothèque"
-            className="h-9 rounded-lg pl-8 text-sm"
+            placeholder="Search prompts, names…"
+            aria-label="Search my library"
+            className="h-9 w-full rounded-lg bg-white pl-8 pr-3 text-sm text-gray-900 outline-none ring-1 ring-gray-200 transition placeholder:text-gray-400 focus:ring-gray-400 dark:bg-gray-900 dark:text-gray-100 dark:ring-gray-850 dark:focus:ring-gray-600"
           />
         </div>
         <Select value={filter} onValueChange={(value) => setFilter(value as LibraryFilter)}>
-          <SelectTrigger className="h-9 w-[150px] rounded-lg text-sm" aria-label="Filtrer la bibliothèque">
+          <SelectTrigger className="h-9 w-[150px] rounded-lg text-sm" aria-label="Filter library">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -130,17 +124,15 @@ export function LibraryView({
             event.target.value = '';
           }}
         />
-        <Button
+        <button
           type="button"
-          variant="outline"
-          size="sm"
-          className="ml-auto h-9 gap-1.5 rounded-lg"
           disabled={busy}
           onClick={() => fileInputRef.current?.click()}
+          className="ml-auto flex h-7 items-center gap-1.5 overflow-hidden rounded-lg bg-gray-50 px-2.5 text-xs text-gray-900 ring-1 ring-gray-200 transition hover:bg-gray-100 disabled:opacity-50 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-850 dark:hover:bg-gray-800"
         >
           <Upload className="size-3.5" aria-hidden />
-          Importer
-        </Button>
+          Upload
+        </button>
       </div>
 
       {/* Grid */}
@@ -149,16 +141,16 @@ export function LibraryView({
           {Array.from({ length: 8 }, (_, i) => (
             <div
               key={i}
-              className="aspect-square animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900"
+              className="aspect-square animate-pulse rounded-xl bg-gray-100 dark:bg-gray-900"
               aria-hidden
             />
           ))}
         </div>
       ) : visible.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-zinc-200 p-10 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <div className="rounded-xl border border-dashed border-gray-200 p-10 text-center text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
           {items.length === 0
-            ? 'Aucune image pour l’instant — décrivez votre première idée dans l’espace de création.'
-            : 'Aucun résultat pour ce filtre.'}
+            ? 'No images yet — describe your first idea in the creation workspace.'
+            : 'No results for this filter.'}
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
@@ -204,41 +196,39 @@ function LibraryCard({
       <figure className="flex aspect-square flex-col items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50/60 p-3 text-center dark:border-red-900/60 dark:bg-red-950/30">
         <AlertTriangle className="size-5 text-red-500" aria-hidden />
         <p className="line-clamp-3 text-[11px] leading-snug text-red-700 dark:text-red-300">
-          {item.error ?? 'La génération a échoué.'}
+          {item.error ?? 'Generation failed.'}
         </p>
-        <Button
+        <button
           type="button"
-          size="sm"
-          variant="outline"
-          className="h-7 gap-1 rounded-lg text-[11px]"
+          className="flex h-7 items-center gap-1 rounded-lg bg-gray-50 px-2.5 text-[11px] text-gray-900 ring-1 ring-gray-200 transition hover:bg-gray-100 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-850 dark:hover:bg-gray-800"
           onClick={onRetry}
         >
           <RotateCcw className="size-3" aria-hidden />
-          Réessayer
-        </Button>
+          Retry
+        </button>
       </figure>
     );
   }
 
   return (
-    <figure className="group relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900">
+    <figure className="group relative overflow-hidden rounded-xl border border-gray-100 bg-white dark:border-gray-850 dark:bg-gray-900">
       <button
         type="button"
         onClick={onOpen}
         className="block w-full"
-        aria-label={`Ouvrir l’image : ${item.name ?? item.prompt ?? 'sans titre'}`}
+        aria-label={`Open image: ${item.name ?? item.prompt ?? 'untitled'}`}
       >
         {url ? (
           <StudioImg
             src={url}
-            alt={item.prompt ?? item.name ?? 'Image générée'}
+            alt={item.prompt ?? item.name ?? 'Generated image'}
             loading="lazy"
             style={{ aspectRatio: aspect }}
             className="w-full object-cover transition duration-300 group-hover:scale-[1.03]"
           />
         ) : (
           <div
-            className="w-full animate-pulse bg-zinc-200 dark:bg-zinc-800"
+            className="w-full animate-pulse bg-gray-100 dark:bg-gray-800"
             style={{ aspectRatio: aspect }}
             aria-hidden
           />
@@ -247,7 +237,7 @@ function LibraryCard({
       {item.favorite ? (
         <Heart
           className="absolute left-2 top-2 size-4 fill-red-500 text-red-500 drop-shadow"
-          aria-label="Favori"
+          aria-label="Favorite"
         />
       ) : null}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 transition group-hover:opacity-100" />
@@ -257,12 +247,12 @@ function LibraryCard({
         </p>
         <div className="flex gap-1">
           <IconOverlayButton
-            label={item.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+            label={item.favorite ? 'Remove from favorites' : 'Add to favorites'}
             onClick={onToggleFavorite}
           >
             <Heart className={cn('size-3.5', item.favorite && 'fill-red-500 text-red-500')} aria-hidden />
           </IconOverlayButton>
-          <IconOverlayButton label="Supprimer l’image" danger onClick={onDelete}>
+          <IconOverlayButton label="Delete image" danger onClick={onDelete}>
             <Trash2 className="size-3.5" aria-hidden />
           </IconOverlayButton>
         </div>

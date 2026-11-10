@@ -15,7 +15,7 @@ export interface ImagineStyle {
 }
 
 export const IMAGINE_STYLES: ImagineStyle[] = [
-  { id: 'none', label: 'Aucun style', suffix: '' },
+  { id: 'none', label: 'No style', suffix: '' },
   {
     id: 'photorealistic',
     label: 'Photorealistic',
@@ -48,17 +48,17 @@ export const IMAGINE_STYLES: ImagineStyle[] = [
   },
   {
     id: 'fashion',
-    label: 'Mode',
+    label: 'Fashion',
     suffix: ' — photographie de mode éditoriale, éclairage studio dramatique, composition magazine',
   },
   {
     id: 'product',
-    label: 'Design produit',
+    label: 'Product',
     suffix: ' — photographie produit publicitaire, fond neutre, reflets maîtrisés, qualité studio',
   },
   {
     id: 'wallpaper',
-    label: 'Fond d’écran',
+    label: 'Wallpaper',
     suffix: ' — composition minimale et aérée pour fond d’écran, aplats pastel, grain subtil',
   },
   {

@@ -9,6 +9,9 @@
  * EDIT composer — every operation sends the ORIGINAL image + instructions to
  * the real image→image engine (remove background, change background, extend,
  * style change… are honest quick-fill prompts, never CSS fakes).
+ *
+ * Visual system: neutral lightbox (black/90 backdrop, white-on-black primary
+ * accent — same accent as the SPA's inverted primary buttons).
  */
 
 import * as React from 'react';
@@ -26,7 +29,6 @@ import {
   Maximize2,
   Minus,
   Pencil,
-  Plus,
   RefreshCw,
   Trash2,
   Wand2,
@@ -34,7 +36,6 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import type { ImagineItem } from '@/lib/images/types';
@@ -55,11 +56,11 @@ interface ImageDetailOverlayProps {
 }
 
 const EDIT_CHIPS = [
-  'Supprimer l’arrière-plan',
-  'Changer l’arrière-plan en ville futuriste de nuit',
-  'Étendre la scène autour du sujet',
-  'Réinterpréter en style anime',
-  'Rendre la scène nocturne et plus dramatique',
+  'Remove the background',
+  'Change the background to a futuristic night city',
+  'Extend the scene around the subject',
+  'Reinterpret in anime style',
+  'Make the scene nocturnal and more dramatic',
 ];
 
 export function ImageDetailOverlay({
@@ -156,37 +157,35 @@ export function ImageDetailOverlay({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`Détail de l’image : ${item.name ?? item.prompt ?? 'sans titre'}`}
-      className="fixed inset-0 z-50 flex flex-col bg-zinc-950/90 backdrop-blur-sm"
+      aria-label={`Image detail: ${item.name ?? item.prompt ?? 'untitled'}`}
+      className="fixed inset-0 z-50 flex flex-col bg-black/90 backdrop-blur-sm"
     >
       {/* Top bar */}
       <header className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-white">
-        <Button
+        <button
           type="button"
-          size="sm"
-          variant="ghost"
           onClick={onClose}
-          className="h-9 gap-1.5 rounded-lg text-white hover:bg-white/10"
+          className="flex h-7 items-center gap-1.5 rounded-full px-2.5 text-xs text-white/80 transition hover:bg-white/10 hover:text-white"
         >
           <ChevronLeft className="size-4" aria-hidden />
-          <span className="hidden sm:inline">Retour</span>
-        </Button>
+          <span className="hidden sm:inline">Back</span>
+        </button>
         <p className="min-w-0 flex-1 truncate text-xs text-white/70">
           {item.name ?? item.prompt ?? 'Image'}
-          {active ? ' — génération en cours…' : ''}
+          {active ? ' — generating…' : ''}
         </p>
         <div className="flex items-center gap-1">
-          <DetailIconButton label="Zoom avant" disabled={!url} onClick={() => setScale((s) => Math.min(4, s + 0.25))}>
+          <DetailIconButton label="Zoom in" disabled={!url} onClick={() => setScale((s) => Math.min(4, s + 0.25))}>
             <ZoomIn className="size-4" aria-hidden />
           </DetailIconButton>
-          <DetailIconButton label="Zoom arrière" disabled={!url} onClick={() => setScale((s) => Math.max(0.5, s - 0.25))}>
+          <DetailIconButton label="Zoom out" disabled={!url} onClick={() => setScale((s) => Math.max(0.5, s - 0.25))}>
             <ZoomOut className="size-4" aria-hidden />
           </DetailIconButton>
-          <DetailIconButton label="Taille réelle" disabled={!url} onClick={() => setScale(1)}>
+          <DetailIconButton label="Actual size" disabled={!url} onClick={() => setScale(1)}>
             <Minus className="size-4" aria-hidden />
           </DetailIconButton>
           <DetailIconButton
-            label="Plein écran"
+            label="Fullscreen"
             disabled={!url}
             onClick={() => {
               const node = viewRef.current;
@@ -198,16 +197,14 @@ export function ImageDetailOverlay({
             <Maximize2 className="size-4" aria-hidden />
           </DetailIconButton>
         </div>
-        <Button
+        <button
           type="button"
-          size="sm"
-          variant="ghost"
           onClick={onClose}
-          aria-label="Fermer la vue détaillée"
-          className="h-9 rounded-lg text-white hover:bg-white/10"
+          aria-label="Close detail view"
+          className="flex size-7 items-center justify-center rounded-full text-white/70 transition hover:bg-white/10 hover:text-white"
         >
           <X className="size-4" aria-hidden />
-        </Button>
+        </button>
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
@@ -217,14 +214,14 @@ export function ImageDetailOverlay({
             <div className="flex h-full w-full max-w-xl items-center justify-center">
               <GenerationSkeleton
                 item={item}
-                className="h-full max-h-[70vh] w-full rounded-2xl border-white/10 bg-zinc-900"
+                className="h-full max-h-[70vh] w-full rounded-2xl border-white/10 bg-gray-900"
               />
             </div>
           ) : (
             <StudioImg
               ref={viewRef}
               src={url}
-              alt={item.prompt ?? item.name ?? 'Image générée'}
+              alt={item.prompt ?? item.name ?? 'Generated image'}
               className="max-h-full max-w-full rounded-lg object-contain shadow-2xl transition-transform duration-200"
               style={{ transform: `scale(${scale})` }}
               draggable={false}
@@ -232,38 +229,34 @@ export function ImageDetailOverlay({
           )}
 
           {/* Prev / next */}
-          {hasPrev ? (
-            <NavArrow side="left" onClick={() => onNavigate(-1)} />
-          ) : null}
-          {hasNext ? (
-            <NavArrow side="right" onClick={() => onNavigate(1)} />
-          ) : null}
+          {hasPrev ? <NavArrow side="left" onClick={() => onNavigate(-1)} /> : null}
+          {hasNext ? <NavArrow side="right" onClick={() => onNavigate(1)} /> : null}
         </div>
 
         {/* Side / bottom panel */}
         <div
           ref={panelRef}
           tabIndex={-1}
-          className="max-h-[55vh] shrink-0 overflow-y-auto border-t border-white/10 bg-zinc-950 p-4 text-zinc-200 outline-none [scrollbar-width:thin] lg:max-h-none lg:w-[340px] lg:border-l lg:border-t-0 lg:overflow-y-auto"
+          className="max-h-[55vh] shrink-0 overflow-y-auto border-t border-white/10 bg-gray-950 p-4 text-gray-200 outline-none [scrollbar-width:thin] lg:max-h-none lg:w-[340px] lg:border-l lg:border-t-0"
         >
           {/* Prompt */}
           {item.prompt ? (
-            <section aria-label="Prompt utilisé" className="mb-4">
+            <section aria-label="Prompt used" className="mb-4">
               <PromptBlock prompt={item.prompt} />
             </section>
           ) : null}
 
           {/* Metadata */}
-          <dl className="mb-4 grid grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-zinc-400">
-            <Meta label="Créée le" value={formatDate(item.created_at ?? 0)} />
-            <Meta label="Origine" value={sourceLabel(item.source)} />
-            {item.provider ? <Meta label="Moteur" value={item.provider} /> : null}
-            {item.model ? <Meta label="Modèle" value={item.model} /> : null}
+          <dl className="mb-4 grid grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-gray-400">
+            <Meta label="Created" value={formatDate(item.created_at ?? 0)} />
+            <Meta label="Source" value={sourceLabel(item.source)} />
+            {item.provider ? <Meta label="Engine" value={item.provider} /> : null}
+            {item.model ? <Meta label="Model" value={item.model} /> : null}
             {item.width && item.height ? (
               <Meta label="Dimensions" value={`${item.width} × ${item.height}`} />
             ) : null}
-            {item.aspect_ratio ? <Meta label="Format" value={item.aspect_ratio} /> : null}
-            {item.parent_id ? <Meta label="Image parente" value={item.parent_id.slice(0, 8)} /> : null}
+            {item.aspect_ratio ? <Meta label="Ratio" value={item.aspect_ratio} /> : null}
+            {item.parent_id ? <Meta label="Parent image" value={item.parent_id.slice(0, 8)} /> : null}
           </dl>
 
           {/* Rename */}
@@ -280,58 +273,56 @@ export function ImageDetailOverlay({
                   if (event.key === 'Escape') setRenaming(false);
                 }}
                 autoFocus
-                aria-label="Nouveau nom de l’image"
-                className="h-8 min-w-0 flex-1 rounded-lg border border-white/15 bg-white/5 px-2 text-xs text-white outline-none focus:border-emerald-500"
+                aria-label="New image name"
+                className="h-8 min-w-0 flex-1 rounded-lg border border-white/15 bg-white/5 px-2 text-xs text-white outline-none focus:border-gray-400"
               />
-              <Button
+              <button
                 type="button"
-                size="sm"
-                className="h-8 gap-1 rounded-lg bg-emerald-600 px-2 text-white hover:bg-emerald-500"
+                aria-label="Save name"
+                className="flex h-8 items-center rounded-lg bg-white px-2 text-black transition hover:bg-gray-200"
                 onClick={() => {
                   if (nameDraft.trim()) onRename(item, nameDraft.trim());
                   setRenaming(false);
                 }}
               >
                 <Check className="size-3.5" aria-hidden />
-              </Button>
+              </button>
             </div>
           ) : null}
 
           {/* Actions */}
           <div className="mb-5 grid grid-cols-2 gap-1.5">
-            <DetailAction label="Télécharger" icon={<Download className="size-3.5" aria-hidden />} onClick={() => void download()} disabled={!url} />
+            <DetailAction label="Download" icon={<Download className="size-3.5" aria-hidden />} onClick={() => void download()} disabled={!url} />
             <DetailAction
-              label={copied ? 'Lien copié !' : 'Copier le lien'}
-              icon={copied ? <Check className="size-3.5 text-emerald-400" aria-hidden /> : <Link2 className="size-3.5" aria-hidden />}
+              label={copied ? 'Link copied!' : 'Copy link'}
+              icon={copied ? <Check className="size-3.5 text-white" aria-hidden /> : <Link2 className="size-3.5" aria-hidden />}
               onClick={() => void copyLink()}
               disabled={!url}
             />
             <DetailAction
-              label={item.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+              label={item.favorite ? 'Remove from favorites' : 'Add to favorites'}
               icon={<Heart className={cn('size-3.5', item.favorite && 'fill-red-500 text-red-500')} aria-hidden />}
               onClick={() => onToggleFavorite(item)}
             />
-            <DetailAction label="Renommer" icon={<Pencil className="size-3.5" aria-hidden />} onClick={() => setRenaming(true)} />
-            <DetailAction label="Créer une variation" icon={<Wand2 className="size-3.5" aria-hidden />} onClick={() => onVariation(item)} disabled={active || busyReason !== null} />
-            <DetailAction label="Régénérer" icon={<RefreshCw className="size-3.5" aria-hidden />} onClick={() => onRegenerate(item)} disabled={!item.prompt || active || busyReason !== null} />
-            <DetailAction label="Supprimer" danger icon={<Trash2 className="size-3.5" aria-hidden />} onClick={() => onDelete(item)} />
+            <DetailAction label="Rename" icon={<Pencil className="size-3.5" aria-hidden />} onClick={() => setRenaming(true)} />
+            <DetailAction label="Create variation" icon={<Wand2 className="size-3.5" aria-hidden />} onClick={() => onVariation(item)} disabled={active || busyReason !== null} />
+            <DetailAction label="Regenerate" icon={<RefreshCw className="size-3.5" aria-hidden />} onClick={() => onRegenerate(item)} disabled={!item.prompt || active || busyReason !== null} />
+            <DetailAction label="Delete" danger icon={<Trash2 className="size-3.5" aria-hidden />} onClick={() => onDelete(item)} />
           </div>
 
           {/* Edit composer (image → image, real engine) */}
-          <section aria-label="Modifier l’image par instructions" className="space-y-2">
+          <section aria-label="Edit image with instructions" className="space-y-2">
             <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Modifier l’image
-              </h3>
+              <h3 className="text-xs font-medium uppercase tracking-wide text-gray-400">Edit image</h3>
               {busyReason ? (
-                <span className="flex items-center gap-1 text-[11px] text-emerald-400">
+                <span className="flex items-center gap-1 text-[11px] text-gray-300">
                   <Loader2 className="size-3 animate-spin" aria-hidden />
                   {busyReason}
                 </span>
               ) : null}
             </div>
-            <p className="text-[11px] leading-snug text-zinc-500">
-              Décrivez la modification en langage naturel — l’image d’origine est envoyée au moteur
+            <p className="text-[11px] leading-snug text-gray-400">
+              Describe the edit in natural language — the original image is sent to the engine
               (image → image).
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -340,7 +331,7 @@ export function ImageDetailOverlay({
                   key={chip}
                   type="button"
                   onClick={() => setEditPrompt(chip)}
-                  className="h-7 rounded-full border border-white/15 px-2.5 text-[11px] text-zinc-300 transition hover:border-emerald-500/60 hover:text-white"
+                  className="h-7 rounded-full border border-white/15 px-2.5 text-[11px] text-gray-300 transition hover:border-white/40 hover:text-white"
                 >
                   {chip}
                 </button>
@@ -349,14 +340,13 @@ export function ImageDetailOverlay({
             <Textarea
               value={editPrompt}
               onChange={(event) => setEditPrompt(event.target.value)}
-              placeholder="Ex. : change l’arrière-plan en ville futuriste de nuit…"
-              aria-label="Instructions de modification de l’image"
-              className="min-h-[72px] resize-none rounded-lg border-white/15 bg-white/5 text-xs text-white placeholder:text-zinc-600 focus-visible:ring-emerald-500"
+              placeholder="e.g. change the background to a futuristic night city…"
+              aria-label="Image edit instructions"
+              className="min-h-[72px] resize-none rounded-lg border-white/15 bg-white/5 text-xs text-white placeholder:text-gray-600 focus-visible:ring-gray-400"
             />
-            <Button
+            <button
               type="button"
-              size="sm"
-              className="h-9 w-full gap-1.5 rounded-lg bg-emerald-600 font-medium text-white hover:bg-emerald-500"
+              className="flex h-9 w-full items-center justify-center gap-1.5 rounded-full bg-white text-xs font-medium text-black transition hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={!editPrompt.trim() || active || busyReason !== null}
               onClick={() => {
                 const trimmed = editPrompt.trim();
@@ -368,8 +358,8 @@ export function ImageDetailOverlay({
               ) : (
                 <ExternalLink className="size-3.5" aria-hidden />
               )}
-              Modifier avec l’IA
-            </Button>
+              Edit with AI
+            </button>
           </section>
         </div>
       </div>
@@ -383,11 +373,11 @@ function PromptBlock({ prompt }: { prompt: string }) {
     <div className="rounded-lg border border-white/10 bg-white/5 p-2.5">
       <p
         className={cn(
-          'cursor-pointer text-xs leading-relaxed text-zinc-300',
+          'cursor-pointer text-xs leading-relaxed text-gray-300',
           !expanded && 'line-clamp-3'
         )}
         onClick={() => setExpanded((value) => !value)}
-        title="Cliquer pour développer"
+        title="Click to expand"
       >
         {prompt}
       </p>
@@ -398,8 +388,8 @@ function PromptBlock({ prompt }: { prompt: string }) {
 function Meta({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <dt className="text-zinc-500">{label}</dt>
-      <dd className="truncate text-zinc-200">{value}</dd>
+      <dt className="text-gray-500">{label}</dt>
+      <dd className="truncate text-gray-200">{value}</dd>
     </div>
   );
 }
@@ -434,7 +424,7 @@ function NavArrow({ side, onClick }: { side: 'left' | 'right'; onClick: () => vo
   return (
     <button
       type="button"
-      aria-label={side === 'left' ? 'Image précédente' : 'Image suivante'}
+      aria-label={side === 'left' ? 'Previous image' : 'Next image'}
       onClick={onClick}
       className={
         'absolute top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/60 p-2.5 text-white backdrop-blur transition hover:bg-black/80 ' +

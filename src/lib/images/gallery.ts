@@ -23,16 +23,16 @@ export interface GalleryCategory {
 }
 
 export const GALLERY_CATEGORIES: GalleryCategory[] = [
-  { id: 'all', label: 'Tout' },
+  { id: 'all', label: 'All' },
   { id: 'photorealistic', label: 'Photorealistic' },
   { id: 'anime', label: 'Anime' },
   { id: '3d', label: '3D' },
-  { id: 'illustration', label: 'Illustrations' },
+  { id: 'illustration', label: 'Illustration' },
   { id: 'architecture', label: 'Architecture' },
   { id: 'nature', label: 'Nature' },
-  { id: 'fashion', label: 'Mode' },
-  { id: 'product', label: 'Design produit' },
-  { id: 'wallpaper', label: 'Fonds d’écran' },
+  { id: 'fashion', label: 'Fashion' },
+  { id: 'product', label: 'Product' },
+  { id: 'wallpaper', label: 'Wallpapers' },
   { id: 'art', label: 'Art' },
 ];
 

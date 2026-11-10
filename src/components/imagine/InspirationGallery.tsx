@@ -4,14 +4,14 @@
  * Nelth-IA Images — inspiration gallery.
  *
  * Discovery grid of curated artworks (static, really AI-generated studio
- * assets) with categories. Card actions run REAL generations through the
- * active engine using the curated French prompt.
+ * assets) with categories. Visual system: the original SPA palette (gray
+ * cards on the gray-50 canvas, black/white accent chips). Card actions run
+ * REAL generations through the active engine using the curated prompt.
  */
 
 import * as React from 'react';
 import { Loader2, Sparkles, Wand2 } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { GALLERY_CATEGORIES, galleryByCategory } from '@/lib/images/gallery';
 import { ratioValue } from '@/lib/images/styles';
 import { StudioImg } from './ImagineShared';
@@ -27,11 +27,11 @@ export function InspirationGallery({ busy, onUsePrompt, onGeneratePrompt }: Insp
   const entries = React.useMemo(() => galleryByCategory(category), [category]);
 
   return (
-    <section aria-label="Galerie d’inspiration" className="space-y-4">
+    <section aria-label="Inspiration gallery" className="space-y-4">
       {/* Category filters — horizontally scrollable on mobile */}
       <div
         role="tablist"
-        aria-label="Catégories d’inspiration"
+        aria-label="Inspiration categories"
         className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:thin]"
       >
         {GALLERY_CATEGORIES.map((entry) => {
@@ -44,10 +44,10 @@ export function InspirationGallery({ busy, onUsePrompt, onGeneratePrompt }: Insp
               aria-selected={active}
               onClick={() => setCategory(entry.id)}
               className={
-                'h-8 shrink-0 rounded-full border px-3 text-xs font-medium transition-colors ' +
+                'flex h-7 shrink-0 items-center rounded-full px-3 text-xs font-medium transition-colors ' +
                 (active
-                  ? 'border-emerald-600 bg-emerald-600 text-white'
-                  : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:border-zinc-600')
+                  ? 'bg-black text-white dark:bg-white dark:text-black'
+                  : 'bg-gray-50 text-gray-900 ring-1 ring-gray-200 hover:bg-gray-100 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-850 dark:hover:bg-gray-800')
               }
             >
               {entry.label}
@@ -61,11 +61,11 @@ export function InspirationGallery({ busy, onUsePrompt, onGeneratePrompt }: Insp
         {entries.map((entry) => (
           <figure
             key={entry.id}
-            className="group relative break-inside-avoid overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900"
+            className="group relative break-inside-avoid overflow-hidden rounded-xl border border-gray-100 bg-white dark:border-gray-850 dark:bg-gray-900"
           >
             <StudioImg
               src={entry.asset}
-              alt={`${GALLERY_CATEGORIES.find((c) => c.id === entry.category)?.label ?? entry.category} — exemple d’inspiration`}
+              alt={`${GALLERY_CATEGORIES.find((c) => c.id === entry.category)?.label ?? entry.category} — inspiration example`}
               loading="lazy"
               width={ratioValue(entry.ratio) >= 1 ? 800 : 600}
               style={{ aspectRatio: ratioValue(entry.ratio) }}
@@ -75,31 +75,29 @@ export function InspirationGallery({ busy, onUsePrompt, onGeneratePrompt }: Insp
             <figcaption className="absolute inset-x-0 bottom-0 flex translate-y-3 flex-col gap-2 p-3 opacity-0 transition duration-300 group-hover:translate-y-0 group-hover:opacity-100">
               <p className="line-clamp-2 text-[11px] leading-snug text-white/85">{entry.prompt}</p>
               <div className="flex gap-1.5">
-                <Button
+                <button
                   type="button"
-                  size="sm"
                   disabled={busy}
                   onClick={() => onGeneratePrompt(entry.prompt)}
-                  className="h-7 gap-1 rounded-lg bg-white px-2.5 text-[11px] font-medium text-zinc-900 hover:bg-zinc-100 disabled:opacity-60"
-                  aria-label={`Générer une image à partir du prompt « ${entry.prompt} »`}
+                  className="flex h-7 items-center gap-1 rounded-full bg-white px-2.5 text-[11px] font-medium text-black transition hover:bg-gray-200 disabled:opacity-60"
+                  aria-label={`Generate an image from the prompt “${entry.prompt}”`}
                 >
                   {busy ? (
                     <Loader2 className="size-3 animate-spin" aria-hidden />
                   ) : (
                     <Sparkles className="size-3" aria-hidden />
                   )}
-                  Générer
-                </Button>
-                <Button
+                  Generate
+                </button>
+                <button
                   type="button"
-                  size="sm"
                   onClick={() => onUsePrompt(entry.prompt)}
-                  className="h-7 gap-1 rounded-lg bg-white/15 px-2.5 text-[11px] font-medium text-white backdrop-blur hover:bg-white/25"
-                  aria-label={`Utiliser le prompt « ${entry.prompt} »`}
+                  className="flex h-7 items-center gap-1 rounded-full bg-white/15 px-2.5 text-[11px] font-medium text-white backdrop-blur transition hover:bg-white/25"
+                  aria-label={`Use the prompt “${entry.prompt}”`}
                 >
                   <Wand2 className="size-3" aria-hidden />
-                  Utiliser le prompt
-                </Button>
+                  Use prompt
+                </button>
               </div>
             </figcaption>
           </figure>

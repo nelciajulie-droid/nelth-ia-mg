@@ -3,22 +3,34 @@
 /**
  * Nelth-IA Images — studio orchestrator.
  *
- * Wires the header, the creation workspace, the active-generations strip,
- * the Inspiration/Library tabs and the immersive detail overlay. Server-side
- * records (ImageItem rows) are the single source of truth — the UI polls
- * while any item is generating/processing, which also gives refresh-recovery
- * for free (items survive navigation in the database).
+ * Follows the ORIGINAL Open WebUI interface system (inspected from the live
+ * SPA DOM — every class below replicates the host app):
+ *
+ *   • the 42px icon rail on the left (same wrappers, size-8 links, 30px
+ *     hover tiles, size-4 Lucide icons — PanelLeft, SquarePen, Search,
+ *     NotebookText, PanelsTopLeft, Image) ;
+ *   • the Workspace-style top navigation: blur-backed tab strip with
+ *     counts (Inspiration / My Library) + right-side actions ;
+ *   • the gray canvas (bg-gray-50 dark:bg-gray-950) and the black/white
+ *     primary accent (bg-black dark:bg-white) used by the SPA buttons.
+ *
+ * Server-side records (ImageItem rows) remain the single source of truth —
+ * the UI polls while any item is generating/processing, which also gives
+ * refresh-recovery for free (items survive navigation in the database).
  */
 
 import * as React from 'react';
 import {
-  ArrowLeft,
-  ChevronRight,
+  ChevronLeft,
   Image as ImageIcon,
   Loader2,
+  NotebookText,
+  PanelLeft,
+  PanelsTopLeft,
   Plus,
+  Search as SearchIcon,
   Settings2,
-  Sparkles,
+  SquarePen,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -78,6 +90,186 @@ function loadSettings(): ComposerSettings {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Icon rail — exact replica of the SPA sidebar rail (#sidebar)
+// ---------------------------------------------------------------------------
+
+const RAIL_TILE =
+  'self-center flex size-[calc(30px*var(--app-text-scale,1))] items-center justify-center rounded-lg transition group-hover:bg-gray-100 dark:group-hover:bg-gray-900';
+
+function RailLink({
+  href,
+  label,
+  icon,
+  current,
+}: {
+  href: string;
+  label: string;
+  icon: React.ReactNode;
+  current?: boolean;
+}) {
+  return (
+    <a
+      href={href}
+      aria-label={label}
+      title={label}
+      aria-current={current ? 'page' : undefined}
+      draggable={false}
+      className="cursor-pointer flex size-8 items-center justify-center transition group"
+    >
+      <div className={RAIL_TILE}>{icon}</div>
+    </a>
+  );
+}
+
+/** The 42px collapsed-icon rail — same structure as the SPA's #sidebar. */
+function StudioRail({ user }: { user: ImagineSessionUser }) {
+  const initials = user.name
+    .split(/\s+/)
+    .map((part) => part.charAt(0))
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+
+  return (
+    <nav
+      aria-label="Chat history"
+      className="hidden w-[calc(42px*var(--app-text-scale,1))] shrink-0 flex-col justify-between py-2 md:flex"
+    >
+      <div className="flex flex-col flex-1">
+        {/* Top slot — the SPA's rail toggle, here: back to the app */}
+        <div className="pb-1">
+          <a
+            href="/"
+            aria-label="Back to Chats"
+            title="Back to Chats"
+            draggable={false}
+            className="flex size-8.5 items-center justify-center transition group"
+          >
+            <div className={cn(RAIL_TILE, 'relative')}>
+              <PanelLeft className="size-4" aria-hidden />
+            </div>
+          </a>
+        </div>
+
+        {/* Nav items — each in its own wrapper, stacked vertically */}
+        <div>
+          <div>
+            <div className="flex">
+              <RailLink href="/" label="New Chat" icon={<SquarePen className="size-4" aria-hidden />} />
+            </div>
+          </div>
+          <div>
+            <div className="flex">
+              <a
+                href="/"
+                aria-label="Search"
+                title="Search"
+                draggable={false}
+                className="cursor-pointer flex size-8 items-center justify-center transition group"
+              >
+                <div className={RAIL_TILE}>
+                  <SearchIcon className="size-4" aria-hidden />
+                </div>
+              </a>
+            </div>
+          </div>
+          <div>
+            <div className="flex">
+              <RailLink href="/notes" label="Notes" icon={<NotebookText className="size-4" aria-hidden />} />
+            </div>
+          </div>
+          <div>
+            <div className="flex">
+              <RailLink
+                href="/workspace"
+                label="Workspace"
+                icon={<PanelsTopLeft className="size-4" aria-hidden />}
+              />
+            </div>
+          </div>
+          <div data-imagine-studio="1">
+            <div className="flex">
+              <RailLink
+                href="/images"
+                label="Imagine Studio"
+                icon={<ImageIcon className="size-4" aria-hidden />}
+                current
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom — user avatar, same tile styling */}
+      <div>
+        <div className="flex items-center justify-center">
+          <a
+            href="/"
+            aria-label="Back to Chats"
+            title="Back to Chats"
+            draggable={false}
+            className="flex size-8.5 items-center justify-center transition group"
+          >
+            <div className={RAIL_TILE}>
+              {user.profile_image_url ? (
+                <img
+                  src={user.profile_image_url}
+                  alt={user.name}
+                  className="size-5.5 rounded-full object-cover"
+                />
+              ) : (
+                <span className="flex size-5.5 items-center justify-center rounded-full bg-gray-200 text-[9px] font-semibold text-gray-600 dark:bg-gray-700 dark:text-gray-200">
+                  {initials || 'U'}
+                </span>
+              )}
+            </div>
+          </a>
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-style tab (same classes as the SPA Models/Knowledge tabs)
+// ---------------------------------------------------------------------------
+
+function StudioTab({
+  active,
+  onClick,
+  label,
+  count,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count?: number;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={cn(
+        'min-w-fit px-1 text-sm inline-flex items-center gap-1 transition select-none',
+        active
+          ? 'text-gray-900 dark:text-gray-100'
+          : 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'
+      )}
+    >
+      <span>{label}</span>
+      {typeof count === 'number' ? <span className="text-sm opacity-60 tabular-nums">{count}</span> : null}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Studio
+// ---------------------------------------------------------------------------
+
 interface ImagineStudioProps {
   user: ImagineSessionUser;
 }
@@ -113,8 +305,8 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
       } catch (err) {
         if (!cancelled) {
           toast({
-            title: 'Studio indisponible',
-            description: err instanceof Error ? err.message : 'Erreur inconnue',
+            title: 'Studio unavailable',
+            description: err instanceof Error ? err.message : 'Unknown error',
             variant: 'destructive',
           });
         }
@@ -180,7 +372,7 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
   function failToast(action: string, err: unknown) {
     toast({
       title: action,
-      description: err instanceof Error ? err.message : 'Erreur inconnue',
+      description: err instanceof Error ? err.message : 'Unknown error',
       variant: 'destructive',
     });
   }
@@ -208,7 +400,7 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
         mergeItems(result.items);
         setTab('library');
       } catch (err) {
-        failToast('Génération refusée', err);
+        failToast('Generation failed', err);
       } finally {
         setSubmitting(false);
       }
@@ -221,9 +413,9 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
       try {
         const item = await imagineUpload(file);
         mergeItems([item]);
-        toast({ title: 'Image importée', description: `${file.name} ajoutée à votre bibliothèque.` });
+        toast({ title: 'Image imported', description: `${file.name} added to your library.` });
       } catch (err) {
-        failToast('Import impossible', err);
+        failToast('Import failed', err);
       }
     },
     [toast]
@@ -239,7 +431,7 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
       try {
         await patchItem(item.id, { favorite: !item.favorite });
       } catch (err) {
-        failToast('Favori non enregistré', err);
+        failToast('Favorite not saved', err);
         setItems((prev) => prev.map((entry) => (entry.id === item.id ? item : entry)));
       }
     },
@@ -252,7 +444,7 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
       try {
         await patchItem(item.id, { name });
       } catch (err) {
-        failToast('Renommage non enregistré', err);
+        failToast('Rename not saved', err);
       }
     },
     [toast]
@@ -265,7 +457,7 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
       try {
         await deleteItem(item.id);
       } catch (err) {
-        failToast('Suppression impossible', err);
+        failToast('Delete failed', err);
         mergeItems([item]);
       }
     },
@@ -274,13 +466,13 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
 
   const handleEdit = React.useCallback(
     async (item: ImagineItem, prompt: string) => {
-      setBusyReason('Édition en cours…');
+      setBusyReason('Editing…');
       try {
         const result = await editImage({ itemId: item.id, prompt });
         mergeItems([result.item]);
         setDetailId(result.item.id);
       } catch (err) {
-        failToast('Édition impossible', err);
+        failToast('Edit failed', err);
       } finally {
         setBusyReason(null);
       }
@@ -290,13 +482,13 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
 
   const handleVariation = React.useCallback(
     async (item: ImagineItem) => {
-      setBusyReason('Variation en cours…');
+      setBusyReason('Creating variation…');
       try {
         const result = await variationImage({ itemId: item.id });
         mergeItems([result.item]);
         setDetailId(result.item.id);
       } catch (err) {
-        failToast('Variation impossible', err);
+        failToast('Variation failed', err);
       } finally {
         setBusyReason(null);
       }
@@ -345,177 +537,168 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
   }
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      {/* Header */}
-      <header className="shrink-0 border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
-        <div className="mx-auto flex w-full max-w-7xl items-center gap-3 px-4 py-3">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-9 gap-1.5 rounded-lg text-zinc-600 dark:text-zinc-300"
-            onClick={() => {
-              window.location.href = '/';
-            }}
-            aria-label="Retour aux conversations"
-          >
-            <ArrowLeft className="size-4" aria-hidden />
-            <span className="hidden sm:inline">Conversations</span>
-          </Button>
-          <div className="min-w-0">
-            <h1 className="flex items-center gap-1.5 text-base font-semibold leading-tight">
-              <ImageIcon className="size-4 text-emerald-600 dark:text-emerald-500" aria-hidden />
-              Images
-            </h1>
-            <p className="hidden text-[11px] text-zinc-500 dark:text-zinc-400 sm:block">
-              Créez, modifiez et explorez des images avec l’IA.
-            </p>
-          </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            {capabilities ? (
-              <span className="hidden max-w-[210px] items-center gap-1 truncate rounded-full border border-zinc-200 px-2.5 py-1 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400 lg:flex">
-                <Sparkles className="size-3 shrink-0 text-emerald-600 dark:text-emerald-500" aria-hidden />
-                {capabilities.engineLabel}
-              </span>
-            ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-9 gap-1.5 rounded-lg"
-              onClick={() => setSettingsOpen(true)}
-              aria-label="Paramètres du studio"
-            >
-              <Settings2 className="size-4" aria-hidden />
-              <span className="hidden sm:inline">Paramètres</span>
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="h-9 gap-1.5 rounded-lg bg-emerald-600 font-medium text-white hover:bg-emerald-500"
-              onClick={focusComposer}
-            >
-              <Plus className="size-4" aria-hidden />
-              <span className="hidden sm:inline">Nouvelle image</span>
-            </Button>
-          </div>
-        </div>
-      </header>
+    <div className="flex h-dvh max-h-[100dvh] w-full overflow-hidden bg-gray-50 text-gray-700 dark:bg-gray-950 dark:text-gray-100">
+      {/* Icon rail — replica of the SPA sidebar */}
+      <StudioRail user={user} />
 
-      {/* Body */}
-      <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]">
-        <div className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6">
-          {/* Creation workspace */}
-          <div ref={composerRef}>
-            <WorkspaceComposer
-              capabilities={capabilities}
-              settings={settings}
-              onSettingsChange={applySettings}
-              busy={submitting}
-              onGenerate={(prompt, attachments) => void handleGenerate(prompt, attachments)}
-            />
-          </div>
+      {/* Main — same shell as the SPA's workspace pages */}
+      <main className="flex h-screen max-h-[100dvh] min-w-0 flex-1 flex-col">
+        {/* Top navigation — Workspace-style tab strip + actions */}
+        <nav
+          className="z-30 shrink-0 select-none border-b border-gray-100/60 bg-gray-50/95 px-2.5 pb-1 pt-2 backdrop-blur-xl dark:border-gray-850/60 dark:bg-gray-950/95"
+          aria-label="Imagine Studio"
+        >
+          <div className="flex items-center gap-0.5 md:gap-1">
+            {/* Mobile back affordance (the rail is desktop-only, like the SPA) */}
+            <a
+              href="/"
+              aria-label="Back to Chats"
+              draggable={false}
+              className="mr-1 flex size-8 items-center justify-center rounded-full text-gray-600 transition hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800 md:hidden"
+            >
+              <ChevronLeft className="size-4" aria-hidden />
+            </a>
 
-          {/* Active generations */}
-          {activeItems.length > 0 ? (
-            <section aria-label="Générations en cours" className="space-y-2">
-              <h2 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                <Loader2 className="size-3.5 animate-spin text-emerald-600 dark:text-emerald-500" aria-hidden />
-                Générations en cours ({activeItems.length})
-              </h2>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
-                {activeItems
-                  .slice()
-                  .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
-                  .map((item) => (
-                    <GenerationSkeleton key={item.id} item={item} className="w-full" />
-                  ))}
+            <h1 className="sr-only">Imagine Studio</h1>
+
+            <div className="flex w-full min-w-0 items-center">
+              <div className="flex min-w-0 w-fit items-center gap-0.5 overflow-x-auto bg-transparent py-1 text-center text-sm font-normal [scrollbar-width:none] md:gap-1">
+                <StudioTab active={tab === 'inspiration'} onClick={() => setTab('inspiration')} label="Inspiration" />
+                <StudioTab
+                  active={tab === 'library'}
+                  onClick={() => setTab('library')}
+                  label="My Library"
+                  count={completedItems.length}
+                />
               </div>
-            </section>
-          ) : null}
 
-          {/* Tabs */}
-          <div className="flex items-center gap-2">
-            <div
-              role="tablist"
-              aria-label="Sections du studio"
-              className="flex gap-1 rounded-xl border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900"
-            >
-              <StudioTab active={tab === 'inspiration'} onClick={() => setTab('inspiration')} label="Inspiration" />
-              <StudioTab active={tab === 'library'} onClick={() => setTab('library')} label="Ma bibliothèque">
-                <span className="ml-1 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] tabular-nums text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                  {completedItems.length}
-                </span>
-              </StudioTab>
+              <div className="ml-auto flex shrink-0 items-center gap-1">
+                {capabilities ? (
+                  <span className="hidden max-w-[210px] items-center gap-1 truncate rounded-lg bg-gray-50 px-2.5 py-1 text-xs text-gray-600 ring-1 ring-gray-200 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-850 lg:flex">
+                    <ImageIcon className="size-3 shrink-0 opacity-60" aria-hidden />
+                    {capabilities.engineLabel}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label="Studio settings"
+                  onClick={() => setSettingsOpen(true)}
+                  className="flex size-[1.875rem] items-center justify-center rounded-full bg-transparent text-gray-700 transition hover:bg-gray-100 dark:text-white dark:hover:bg-gray-800"
+                >
+                  <Settings2 className="size-4" aria-hidden />
+                </button>
+                <button
+                  type="button"
+                  onClick={focusComposer}
+                  className="flex h-7 items-center gap-1.5 rounded-full bg-black px-3 text-xs font-medium text-white transition hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+                >
+                  <Plus className="size-3.5" aria-hidden />
+                  <span className="hidden sm:inline">New image</span>
+                </button>
+              </div>
             </div>
           </div>
+        </nav>
 
-          {tab === 'inspiration' ? (
-            <InspirationGallery
-              busy={submitting}
-              onUsePrompt={(prompt) => {
-                window.dispatchEvent(new CustomEvent('nelth:imagine:use-prompt', { detail: prompt }));
-              }}
-              onGeneratePrompt={(prompt) => void handleGenerate(prompt, [])}
-            />
-          ) : (
-            <LibraryView
-              items={items}
-              loading={itemsLoading}
-              busy={submitting}
-              onOpen={(item) => setDetailId(item.id)}
-              onToggleFavorite={(item) => void handleToggleFavorite(item)}
-              onDelete={(item) => void handleDelete(item)}
-              onRetry={(item) => void handleRetry(item)}
-              onUploadFile={(file) => void handleUploadFile(file)}
-            />
-          )}
+        {/* Scrollable content — workspace container pattern */}
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-8 pt-3 [scrollbar-width:thin] md:px-6">
+          <div className="mx-auto w-full max-w-6xl space-y-6">
+            {/* Creation workspace */}
+            <div ref={composerRef}>
+              <WorkspaceComposer
+                capabilities={capabilities}
+                settings={settings}
+                onSettingsChange={applySettings}
+                busy={submitting}
+                onGenerate={(prompt, attachments) => void handleGenerate(prompt, attachments)}
+              />
+            </div>
 
-          {/* Recently generated teaser under the composer on first visit */}
-          {tab === 'inspiration' && completedItems.length > 0 ? (
-            <section aria-label="Générées récemment" className="space-y-2">
-              <button
-                type="button"
-                onClick={() => setTab('library')}
-                className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
-              >
-                Générées récemment
-                <ChevronRight className="size-3.5" aria-hidden />
-              </button>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
-                {completedItems.slice(0, 4).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setDetailId(item.id)}
-                    className="group relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
-                    aria-label={`Ouvrir l’image ${item.name ?? item.prompt ?? ''}`}
-                  >
-                    <ItemThumb item={item} className="w-full" imgClassName="transition duration-300 group-hover:scale-[1.03]" />
-                    <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/60 to-transparent px-2 pb-1.5 pt-5 text-[11px] text-white/90">
-                      {item.name ?? item.prompt ?? sourceLabel(item.source)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ) : null}
+            {/* Active generations */}
+            {activeItems.length > 0 ? (
+              <section aria-label="Images in progress" className="space-y-2">
+                <h2 className="flex items-center gap-2 text-[0.6875rem] font-normal text-gray-400 dark:text-gray-600">
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  Generating ({activeItems.length})
+                </h2>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
+                  {activeItems
+                    .slice()
+                    .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
+                    .map((item) => (
+                      <GenerationSkeleton key={item.id} item={item} className="w-full" />
+                    ))}
+                </div>
+              </section>
+            ) : null}
+
+            {tab === 'inspiration' ? (
+              <InspirationGallery
+                busy={submitting}
+                onUsePrompt={(prompt) => {
+                  window.dispatchEvent(new CustomEvent('nelth:imagine:use-prompt', { detail: prompt }));
+                }}
+                onGeneratePrompt={(prompt) => void handleGenerate(prompt, [])}
+              />
+            ) : (
+              <LibraryView
+                items={items}
+                loading={itemsLoading}
+                busy={submitting}
+                onOpen={(item) => setDetailId(item.id)}
+                onToggleFavorite={(item) => void handleToggleFavorite(item)}
+                onDelete={(item) => void handleDelete(item)}
+                onRetry={(item) => void handleRetry(item)}
+                onUploadFile={(file) => void handleUploadFile(file)}
+              />
+            )}
+
+            {/* Recently generated teaser under the composer on first visit */}
+            {tab === 'inspiration' && completedItems.length > 0 ? (
+              <section aria-label="Recently generated" className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => setTab('library')}
+                  className="flex items-center gap-1 text-[0.6875rem] font-normal text-gray-400 transition hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-200"
+                >
+                  Recently generated
+                  <span className="opacity-60" aria-hidden>
+                    →
+                  </span>
+                </button>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
+                  {completedItems.slice(0, 4).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setDetailId(item.id)}
+                      className="group relative overflow-hidden rounded-xl border border-gray-100 bg-white dark:border-gray-850 dark:bg-gray-900"
+                      aria-label={`Open image ${item.name ?? item.prompt ?? ''}`}
+                    >
+                      <ItemThumb item={item} className="w-full" imgClassName="transition duration-300 group-hover:scale-[1.03]" />
+                      <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/60 to-transparent px-2 pb-1.5 pt-5 text-[11px] text-white/90">
+                        {item.name ?? item.prompt ?? sourceLabel(item.source)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
         </div>
-      </div>
+      </main>
 
       {/* Settings dialog */}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Paramètres du studio</DialogTitle>
-            <DialogDescription>
-              Vos préférences par défaut pour les nouvelles générations.
-            </DialogDescription>
+            <DialogTitle>Studio settings</DialogTitle>
+            <DialogDescription>Your defaults for new generations.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <label htmlFor="imagine-default-ratio" className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Format par défaut
+              <label htmlFor="imagine-default-ratio" className="text-xs font-medium text-gray-600 dark:text-gray-300">
+                Default ratio
               </label>
               <Select
                 value={settings.aspectRatio}
@@ -532,8 +715,8 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <label htmlFor="imagine-default-style" className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Style par défaut
+              <label htmlFor="imagine-default-style" className="text-xs font-medium text-gray-600 dark:text-gray-300">
+                Default style
               </label>
               <Select
                 value={settings.style}
@@ -548,13 +731,13 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                Style appliqué : {imagineStyleById(settings.style)?.label ?? '—'}
+              <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                Applied style: {imagineStyleById(settings.style)?.label ?? '—'}
               </p>
             </div>
             <div className="space-y-1.5">
-              <label htmlFor="imagine-default-count" className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                Nombre d’images par défaut
+              <label htmlFor="imagine-default-count" className="text-xs font-medium text-gray-600 dark:text-gray-300">
+                Default image count
               </label>
               <Select
                 value={String(settings.n)}
@@ -570,9 +753,9 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
                 </SelectContent>
               </Select>
             </div>
-            <p className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
-              Moteur actif : {capabilities?.engineLabel ?? '…'} — la configuration des moteurs
-              reste gérée par l’administrateur (Espace de travail → Images).
+            <p className="text-[11px] leading-snug text-gray-500 dark:text-gray-400">
+              Active engine: {capabilities?.engineLabel ?? '…'} — engine configuration stays with the
+              administrator (Workspace → Images).
             </p>
           </div>
         </DialogContent>
@@ -593,35 +776,5 @@ export function ImagineStudio({ user }: ImagineStudioProps) {
         onRegenerate={(item) => void handleRegenerate(item)}
       />
     </div>
-  );
-}
-
-function StudioTab({
-  active,
-  onClick,
-  label,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  children?: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={cn(
-        'flex h-8 items-center gap-1 rounded-lg px-3 text-xs font-medium transition-colors',
-        active
-          ? 'bg-zinc-100 text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-white'
-          : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
-      )}
-    >
-      {label}
-      {children}
-    </button>
   );
 }
