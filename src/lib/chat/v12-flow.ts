@@ -22,6 +22,7 @@ import {
   nativeReasoningOutputItems,
   parseCompleteOutput,
   stripReasoningTags,
+  REASONING_TAG_PAIRS,
 } from './reasoning';
 
 /**
@@ -233,6 +234,52 @@ function localStripNarration(content: string): string {
  * this instruction makes the continuation seamless.
  */
 const CONTINUE_INSTRUCTION = `Your previous answer was interrupted mid-output by a platform limit (time budget or output-token cap) — the conversation shows exactly where it stopped. Continue EXACTLY from that point: do not repeat anything already written, do not re-introduce or summarize the answer, do not apologize or mention the interruption. If the output stopped inside a code block, continue inside that same code block and close it properly when the code ends. Emit ONLY the continuation, starting with the very next character.`;
+
+/**
+ * Notes-to-answer instruction for THINKING-ONLY auto-continue rounds: the
+ * interrupted round produced chain-of-thought but no answer text (the
+ * whole output-token/time budget went to reasoning). Blindly re-running
+ * CONTINUE_INSTRUCTION re-thinks from scratch — the notes never ride into
+ * the next round's context — and the loop stacks one « Réflexion » block
+ * per round over a message that never gets an answer (prod repro
+ * 2026-11-10: three stacked thinking blocks, empty message). Instead the
+ * next round receives the model's own notes as its prior turn and THIS
+ * instruction: convert, do not re-analyze.
+ */
+const NOTES_TO_ANSWER_INSTRUCTION = `These were your internal analysis notes from your previous attempt, not an answer. Write NOW the FINAL ANSWER to my original question: direct and concise, in MY language. Use your notes as your working memory — do not redo the analysis, do not restate or mention the notes, never describe your reading process. Just answer me directly.`;
+
+/** Extract the accumulated chain-of-thought text from structured output
+ * items (rounds' reasoning blocks) — the notes fed back into a continuation
+ * round's LLM context and into the notes-to-answer salvage repair. */
+function reasoningTextFromOutput(output: any[] | null | undefined): string {
+  if (!Array.isArray(output)) return '';
+  const texts: string[] = [];
+  for (const item of output) {
+    if (!item || item.type !== 'reasoning') continue;
+    const parts = item.content;
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      if (part && typeof part.text === 'string' && part.text.trim()) texts.push(part.text);
+    }
+  }
+  return texts.join('\n');
+}
+
+/** Build the assistant MESSAGE output item — the item the Open-WebUI frontend
+ * renders as the answer text. A message whose `output` array exists but has
+ * NO message item renders ONLY its reasoning blocks and IGNORES the content
+ * field: every path that finalizes an answer over a structured history MUST
+ * compose this item (thinking-only guards, salvage repairs, continuation
+ * rounds that answer in plain mode). */
+function assistantMessageOutputItem(text: string, idSuffix = ''): any {
+  return {
+    type: 'message',
+    id: 'msg_final' + idSuffix,
+    status: 'completed',
+    role: 'assistant',
+    content: [{ type: 'output_text', text }],
+  };
+}
 
 /**
  * Conservative prompt-size estimate for the « max tokens infinie » clamp —
@@ -520,6 +567,12 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
    *  round's snapshots so the first thinking block survives the frontend's
    *  full-snapshot replacement). Null on normal (non-continuation) turns. */
   let contBase: { content: string; output: any[]; fileIntent: boolean } | null = null;
+  // Auto-continue chain state, persisted by finalizeTruncated in the
+  // message meta and re-read here by every fresh continuation invocation
+  // (each __nelth_continue request is a brand-new serverless function —
+  // counters cannot live in flow memory across rounds).
+  let contRoundCount = 0;
+  let thinkingRoundStreak = 0;
 
   let llmMessages: { role: string; content: string }[];
   if (isContinuation) {
@@ -551,6 +604,12 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       // block spanning the seam must still become a file card at the end.
       fileIntent: existing?.meta?.file_intent === true,
     };
+    contRoundCount =
+      typeof existing?.meta?.nelth_cont_round === 'number' ? existing.meta.nelth_cont_round : 0;
+    thinkingRoundStreak =
+      typeof existing?.meta?.nelth_thinking_rounds === 'number'
+        ? existing.meta.nelth_thinking_rounds
+        : 0;
     // Chain up to (but excluding) the partial assistant message itself.
     const chain = getMessageList(stored as any, assistantMessageId)
       .reverse()
@@ -570,14 +629,30 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       }
       usedSkills.push(...prevSkills);
     }
-    llmMessages = [
-      ...contMessages,
-      { role: 'assistant', content: contBase.content || '[début de réponse — aucun contenu reçu]' },
-      { role: 'user', content: CONTINUE_INSTRUCTION },
-    ];
+    const contNotes = reasoningTextFromOutput(contBase.output);
+    if (!contBase.content.trim() && contNotes.trim()) {
+      // THINKING-ONLY round behind us: the whole budget went to
+      // chain-of-thought and no answer text exists. Feed the model's own
+      // notes back as its prior turn with the convert instruction — a
+      // fresh full budget then lands the answer instead of re-thinking
+      // from scratch (the stacking-loop root cause).
+      llmMessages = [
+        ...contMessages,
+        { role: 'assistant', content: contNotes.slice(0, 60_000) },
+        { role: 'user', content: NOTES_TO_ANSWER_INSTRUCTION },
+      ];
+    } else {
+      llmMessages = [
+        ...contMessages,
+        { role: 'assistant', content: contBase.content || '[début de réponse — aucun contenu reçu]' },
+        { role: 'user', content: CONTINUE_INSTRUCTION },
+      ];
+    }
     console.log(
-      `[v12-flow] continuation round — base ${contBase.content.length} chars, ` +
-        `${contBase.output.length} output items, skills: ${prevSkills.join(', ') || 'none'}`
+      `[v12-flow] continuation round ${contRoundCount + 1} (thinking streak ${thinkingRoundStreak}) — ` +
+        `base ${contBase.content.length} chars, ${contBase.output.length} output items, ` +
+        `notes ${contNotes.length} chars${!contBase.content.trim() && contNotes.trim() ? ' (convert mode)' : ''}, ` +
+        `skills: ${prevSkills.join(', ') || 'none'}`
     );
   } else if (historyMap && userMessageId) {
     // load_messages_from_db: chain up to user_message_id (getMessageList walks
@@ -1847,6 +1922,15 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const v = (params as any)[key] ?? (form as any)[key];
     if (v !== undefined && v !== null) reqBody[key] = v;
   }
+  // True ONLY when the output cap came from the USER'S OWN params — an
+  // explicit cap is a deliberate choice and is respected (no token-limit
+  // auto-continue). MUST be captured BEFORE the catalog pin below: the pin
+  // sets reqBody.max_tokens on EVERY built-in model, and the old
+  // `reqBody.max_tokens !== undefined` read classified the pin as a user cap
+  // — silently killing the finish_reason "length" auto-continue (and the
+  // thinking-only chain guard) on every built-in model.
+  const userCappedOutput =
+    (params as any).max_tokens !== undefined || (form as any).max_tokens !== undefined;
   // « Max tokens infinie » on every built-in model: the pinned ceilings are
   // each model's CATALOG MAXIMUM (verified live on the Kilo gateway
   // /api/v1/models + OpenRouter provider endpoints, 2026-11-10) — dots-3-
@@ -1881,10 +1965,6 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       Math.min(catalog.max, catalog.ctx - estPrompt - 2_048)
     );
   }
-  // True when the OUTPUT CAP came from the user's own params — an explicit
-  // cap is a deliberate choice and is respected (no token-limit
-  // auto-continue); every other model runs to its catalog maximum.
-  const userCappedOutput = reqBody.max_tokens !== undefined;
   console.log(
     `[v12-flow] upstream request: model=${modelId} max_tokens=${
       reqBody.max_tokens ?? 'gateway-default'
@@ -2615,6 +2695,35 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         }
       }
     }
+    // Thinking-only completion guard (non-streaming variant): a complete
+    // response whose content is empty while reasoning exists — convert the
+    // notes into the final answer instead of persisting an empty message
+    // with a bare thinking block.
+    if (!String(content ?? '').trim() && reasoningOutput.length) {
+      const notes = reasoningTextFromOutput(reasoningOutput);
+      if (notes.trim()) {
+        let salvaged = '';
+        try {
+          salvaged = await repairNarration(notes, isTH ? 12_000 : undefined);
+        } catch (e) {
+          console.error('[v12-flow] thinking-only completion repair failed (non-streaming)', e);
+        }
+        if (salvaged.trim()) {
+          console.log(
+            `[v12-flow] thinking-only completion (non-streaming) — notes converted into a ${salvaged.length}-char final answer`
+          );
+          content = salvaged;
+          if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
+          // Compose the MESSAGE item into the output (thought blocks + the
+          // salvaged answer) — the output-driven renderer needs it, while the
+          // OpenAI JSON consumers read message.content as usual.
+          if (data) {
+            data.output = [...reasoningOutput, assistantMessageOutputItem(salvaged)];
+          }
+          reasoningOutput = [...reasoningOutput, assistantMessageOutputItem(salvaged)];
+        }
+      }
+    }
     // Document blocks → downloadable file cards on the assistant message.
     const rawContent = content;
     const docResult = await processGeneratedDocuments(content);
@@ -2892,17 +3001,55 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       }
     };
 
+    // Continuation-round tag routing: the plain-append shortcut must never
+    // paste RAW reasoning-tag prose into the answer content. A model that
+    // opens the continuation with <thinking>/… (re-thinking) needs its tags
+    // PARSED — a lookahead flag flips the round into tag-accumulator mode the
+    // moment the round's new content starts with a reasoning opening tag
+    // (partial-chunk safe: prefix matching), the base content is seeded into
+    // the accumulator, and every further delta flows through the structured
+    // path — thinking blocks + clean answer, exactly like a first round.
+    let contTagMode = false;
+    let contRoundNewContent = '';
+    const contOpensWithReasoningTag = (text: string): boolean => {
+      const t = text.replace(/^\s+/, '');
+      if (t.length < 2) return false;
+      for (const [start] of REASONING_TAG_PAIRS) {
+        const n = Math.min(start.length, t.length);
+        if (t.slice(0, n) === start.slice(0, n)) return true;
+      }
+      return false;
+    };
     const processContentDelta = async (delta: string): Promise<void> => {
       aggregate += delta;
       if (contBase && !nativeReasoning.active) {
+        contRoundNewContent += delta;
+        if (
+          !contTagMode &&
+          contRoundNewContent.length <= 4_000 &&
+          contOpensWithReasoningTag(contRoundNewContent)
+        ) {
+          contTagMode = true;
+          console.log(
+            '[v12-flow] continuation round opens with a reasoning tag — routing through the tag accumulator'
+          );
+          // Seed the interrupted base BEFORE the round's own deltas so the
+          // structured message item carries base+new (the accumulator is
+          // fresh per round; without the seed the final content would drop
+          // the previous rounds' partial answer).
+          if (contBase.content) reasoning.push(contBase.content);
+        }
+        if (!contTagMode) {
         // Continuation round before any (new) reasoning: plain append — the
         // base already rides `aggregate` and the screen; no narration valve,
         // no <think> tag detection on mid-code text. Once reasoning for this
         // round arrives, the native branch takes over (snapshots carry the
         // seeded base+new content).
-        await clearThinkingStatus();
-        await emitContentDelta(delta);
-        return;
+          await clearThinkingStatus();
+          await emitContentDelta(delta);
+          return;
+        }
+        // contTagMode: fall through to the structured accumulator paths below.
       }
       if (nativeReasoning.active) {
         // Structured snapshots only (plain deltas would double-append).
@@ -3106,6 +3253,86 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           : `[v12-flow] time budget exhausted mid-generation (${FLOW_WALL_MS}ms) — ` +
               `truncated at ${truncatedContent.length} chars for auto-continue`
       );
+      // Round bookkeeping (server-side chain state): a round that ended with
+      // NO answer text — only reasoning blocks — is a THINKING-ONLY round.
+      // Left unchecked the auto-continue loop re-thinks from scratch every
+      // round (notes never ride into the context) and stacks one « Réflexion »
+      // block per round over a message that never gets its answer.
+      contRoundCount += 1;
+      const thinkingOnlyRound =
+        !String(truncatedContent ?? '').trim() &&
+        (Array.isArray(truncatedOutput) && truncatedOutput.some((it: any) => it?.type === 'reasoning'));
+      thinkingRoundStreak = thinkingOnlyRound ? thinkingRoundStreak + 1 : 0;
+      const chainMeta = {
+        nelth_cont_round: contRoundCount,
+        nelth_thinking_rounds: thinkingRoundStreak,
+      };
+      // Chain stop — two consecutive thinking-only rounds (a convert round
+      // itself produced no answer: the model is pathologically re-analyzing)
+      // or five rounds total (degenerate content-creep loop). One last
+      // salvage: a repair call converts the accumulated notes into the final
+      // answer; on failure the message finalizes WITHOUT the nelth:continue
+      // marker so the chain ends here instead of stacking another block.
+      if (thinkingRoundStreak >= 2 || contRoundCount >= 5) {
+        console.warn(
+          `[v12-flow] auto-continue chain stop — round ${contRoundCount}, thinking-only streak ${thinkingRoundStreak}; attempting notes salvage`
+        );
+        let salvaged = '';
+        const notes = reasoningTextFromOutput(truncatedOutput);
+        if (notes.trim()) {
+          try {
+            salvaged = await repairNarration(notes, isTH ? 12_000 : 25_000);
+          } catch (e) {
+            console.error('[v12-flow] thinking-notes salvage repair failed', e);
+          }
+        }
+        await clearThinkingStatus();
+        if (salvaged.trim()) {
+          console.log(
+            `[v12-flow] thinking-only chain — notes salvaged into a ${salvaged.length}-char final answer`
+          );
+          await emitContentDelta(salvaged);
+          // Compose the MESSAGE item into the output array (thought blocks +
+          // salvaged answer): the frontend renders the message item as the
+          // answer text — an output array without one would render ONLY the
+          // thought blocks and drop the salvaged answer.
+          const salvageOutput = [...(truncatedOutput ?? []), assistantMessageOutputItem(salvaged)];
+          await persistAssistant(salvaged, usage, true, salvageOutput, null, salvaged, {
+            ...chainMeta,
+            nelth_thinking_rounds: 0,
+          });
+          finishTask();
+          await emit({
+            type: 'chat:completion',
+            data: {
+              done: true,
+              output: salvageOutput,
+              content: salvaged,
+              ...(usage ? { usage } : {}),
+              ...(webCitations?.length ? { sources: webCitations } : {}),
+            },
+          });
+          return nullJson();
+        }
+        // Salvage failed — finalize the partial as done (no marker, no more
+        // rounds: better a short honest stop than an endless thinking loop).
+        await persistAssistant(truncatedContent, usage, true, truncatedOutput, null, truncatedContent, {
+          truncated: true,
+          file_intent: userAskedForFile,
+          ...chainMeta,
+        });
+        finishTask();
+        await emit({
+          type: 'chat:completion',
+          data: {
+            done: true,
+            ...(truncatedOutput ? { output: truncatedOutput, content: truncatedContent } : { content: truncatedContent }),
+            ...(usage ? { usage } : {}),
+            ...(webCitations?.length ? { sources: webCitations } : {}),
+          },
+        });
+        return nullJson();
+      }
       await clearThinkingStatus();
       await emit({
         type: 'nelth:continue',
@@ -3125,6 +3352,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       await persistAssistant(truncatedContent, usage, false, truncatedOutput, null, truncatedContent, {
         truncated: true,
         file_intent: userAskedForFile,
+        ...chainMeta,
       });
       finishTask();
       await emit({
@@ -3350,6 +3578,47 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           : tagOut
         : null;
       finalContent = finalReasoning.usedStructured || reasoning.dropped ? finalReasoning.content : aggregate;
+    }
+
+    // Thinking-only completion guard (no truncation involved): the round
+    // ENDED cleanly (finish stop / stream end) but produced only reasoning
+    // blocks — no answer text at all. Convert the notes into the final answer
+    // with a repair call so the message never finalizes as a stack of
+    // « Réflexion » blocks over an empty answer. The output array (this round
+    // OR the previous rounds' persisted items) then gets the composed MESSAGE
+    // item — without it the frontend renders the thought blocks and drops the
+    // repaired answer text.
+    const guardOutput = Array.isArray(finalOutput) ? finalOutput : contBase?.output;
+    if (
+      !finalContent.trim() &&
+      Array.isArray(guardOutput) &&
+      guardOutput.some((it: any) => it?.type === 'reasoning')
+    ) {
+      const notes = reasoningTextFromOutput(guardOutput);
+      let salvaged = '';
+      try {
+        salvaged = await repairNarration(notes, isTH ? 12_000 : undefined);
+      } catch (e) {
+        console.error('[v12-flow] thinking-only completion repair failed', e);
+      }
+      if (salvaged.trim()) {
+        console.log(
+          `[v12-flow] thinking-only completion — notes converted into a ${salvaged.length}-char final answer`
+        );
+        finalContent = salvaged;
+        finalOutput = [...guardOutput, assistantMessageOutputItem(salvaged)];
+      }
+    }
+    // Continuation round that answered in PLAIN mode over a structured
+    // history: without a composed message item the frontend keeps rendering
+    // the previous rounds' reasoning blocks and NEVER shows this round's
+    // answer (the persisted output lingers through the upsert merge).
+    if (
+      !finalOutput &&
+      (contBase?.output?.length ?? 0) > 0 &&
+      finalContent.trim()
+    ) {
+      finalOutput = [...contBase.output, assistantMessageOutputItem(finalContent)];
     }
 
     // Short-answer flush: an answer under the 60-char narration threshold

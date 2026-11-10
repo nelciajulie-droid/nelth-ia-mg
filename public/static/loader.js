@@ -2866,8 +2866,12 @@ html.nsrc-lock{overflow:hidden}
     // Timeline de-decoration runs first, in every state.
     stripTimelineDecor(msgEl);
     // Done marker: the action toolbar only renders on completed messages.
+    // The aria-labels are LOCALIZED (French UI: « Copier », « Lire à haute
+    // voix ») — matching the English label alone left the cleanup blind on
+    // every non-English session and the transient thinking rows lingered.
     const done = !!msgEl.querySelector(
-      'button[aria-label="Copy"], button[aria-label="Read Aloud"]'
+      'button[aria-label="Copy"], button[aria-label="Copier"], button[aria-label="Copiar"], ' +
+        'button[aria-label="Read Aloud"], button[aria-label="Lire à haute voix"], button[aria-label="Leer en voz alta"]'
     );
     if (!done && !messageResponding(msgEl)) {
       return; // still silent — keep the live shimmer row
