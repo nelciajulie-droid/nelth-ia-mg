@@ -36,12 +36,10 @@ const nextConfig: NextConfig = {
         {
           // SPA fallback for client-side routes (/chat, /auth, /admin/...).
           // API namespaces are excluded so the catch-all route handlers win;
-          // /images is excluded too — it is the Nelth-IA Images studio served
-          // directly by Next.js (src/app/images/page.tsx), NOT a SPA route;
           // real static files (/_app/*, /favicon.png, /manifest.json, ...) are
           // served from public/ by the filesystem step BEFORE these rewrites.
           source:
-            "/:path((?!api(?:/|$)|ollama(?:/|$)|openai(?:/|$)|oauth(?:/|$)|openapi(?:/|$)|docs(?:/|$)|_next(?:/|$)|_vercel(?:/|$)|ws(?:/|$)|health(?:/|$)|litellm(?:/|$)|images(?:/|$)|index\\.html).*)",
+            "/:path((?!api(?:/|$)|ollama(?:/|$)|openai(?:/|$)|oauth(?:/|$)|openapi(?:/|$)|docs(?:/|$)|_next(?:/|$)|_vercel(?:/|$)|ws(?:/|$)|health(?:/|$)|litellm(?:/|$)|index\\.html).*)",
           destination: "/index.html",
         },
       ],
