@@ -182,9 +182,46 @@ export class ReasoningAccumulator {
   private mode: 'plain' | 'structured' = 'plain';
   private segFirstSeen: number[] = [];
   private segClosedAt: number[] = [];
+  private readonly dropReasoning: boolean;
+  private droppedSomething = false;
+
+  /**
+   * Strict no-thinking tier (e.g. the TokenHarbor flash model, where thinking
+   * is disabled at the model level): with `dropReasoning: true`, reasoning
+   * segments are DISCARDED instead of structured — a chain-of-thought the
+   * model leaks into the content stream never reaches the UI, and the clean
+   * text keeps flowing as plain `choices` deltas (the mode never switches
+   * to structured). This enforces the no-thinking contract on OUR side:
+   * the wire-level `thinking: {type:'disabled'}` switch is only a request
+   * hint, and hybrid models occasionally disobey it.
+   */
+  constructor(opts: { dropReasoning?: boolean } = {}) {
+    this.dropReasoning = !!opts.dropReasoning;
+  }
+
+  /** True when reasoning segments were dropped (finish() content ≠ raw). */
+  get dropped(): boolean {
+    return this.dropReasoning && this.droppedSomething;
+  }
 
   push(delta: string, now = Date.now()): PushResult {
     this.text += delta;
+    if (this.dropReasoning) {
+      const { segments, tagSeen } = segmentReasoning(this.text);
+      if (tagSeen) this.droppedSomething = true;
+      const clean = cleanContentOf(segments);
+      // Hold back a trailing partial tag start — the same guarantee as plain
+      // mode: the literal tag text never flashes while it may still
+      // complete on a later chunk (and once completed, it is dropped).
+      const hold = partialTagSuffixLen(clean);
+      const safeLen = clean.length - hold;
+      if (safeLen > this.emittedPlain) {
+        const plainDelta = clean.slice(this.emittedPlain, safeLen);
+        this.emittedPlain = safeLen;
+        return { mode: 'plain', switched: false, plainDelta };
+      }
+      return { mode: 'plain', switched: false, plainDelta: '' };
+    }
     if (this.mode === 'structured') {
       return { mode: 'structured', switched: false };
     }
@@ -207,12 +244,33 @@ export class ReasoningAccumulator {
 
   /** Structured snapshot (full output array) — call only in structured mode. */
   snapshot(now = Date.now(), allDone = false): OutputItem[] {
+    if (this.dropReasoning) {
+      // Drop mode: single message item built from the CLEAN text (used by
+      // the incremental checkpoints — the leaked reasoning never lands in
+      // the DB either).
+      const clean = cleanContentOf(segmentReasoning(this.text).segments);
+      return clean
+        ? [
+            {
+              type: 'message',
+              id: hexId('m', 0),
+              status: allDone ? 'completed' : 'in_progress',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: clean }],
+            },
+          ]
+        : [];
+    }
     const { segments } = segmentReasoning(this.text);
     this.markTimings(now, segments);
     return buildOutputItems(segments, this.segFirstSeen, this.segClosedAt, now, allDone);
   }
 
   finish(now = Date.now()): FinishResult {
+    if (this.dropReasoning) {
+      const clean = cleanContentOf(segmentReasoning(this.text).segments);
+      return { usedStructured: false, output: null, content: clean };
+    }
     if (this.mode !== 'structured') {
       return { usedStructured: false, output: null, content: this.text };
     }

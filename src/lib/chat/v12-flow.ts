@@ -2414,13 +2414,20 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     if (reasoningOutput.length) {
       content = stripReasoningTags(content);
       if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
-      data.output = reasoningOutput;
+      if (isTH) {
+        // Flash tier: thinking is OFF — the model leaked <thinking> blocks
+        // inside the content anyway. Keep the stripped answer, DROP the
+        // reasoning items: no collapsible block, direct answer only.
+        reasoningOutput = [];
+      } else {
+        data.output = reasoningOutput;
+      }
     } else {
       // Native reasoning (Kilo gateway & OpenRouter-style providers): the
       // chain-of-thought arrives in `message.reasoning`, separate from the
       // content → structured output items.
       const native = data?.choices?.[0]?.message?.reasoning;
-      if (typeof native === 'string' && native.trim()) {
+      if (!isTH && typeof native === 'string' && native.trim()) {
         // Anchor: reasoning started when the request was sent (the gateway
         // buffered the chain-of-thought server-side), ended when the complete
         // response arrived.
@@ -2485,7 +2492,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
 
     // Reasoning tag detection (Python tag_output_handler port): plain-choices
     // deltas until a tag appears, then structured `output` snapshots.
-    const reasoning = new ReasoningAccumulator();
+    // Flash tier (TokenHarbor — thinking DISABLED at the model level): drop
+    // mode enforces the no-thinking contract on OUR side — any <thinking>/
+    // etc. block the model leaks into the content stream (hybrid models
+    // occasionally disobey the wire-level switch) is stripped, never
+    // structured, never rendered; the clean answer streams as plain deltas.
+    const reasoning = new ReasoningAccumulator(isTH ? { dropReasoning: true } : {});
     let lastStructuredEmit = 0;
     const emitStructured = async (force = false) => {
       const now = Date.now();
@@ -2755,6 +2767,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       }
     };
 
+    // One-shot leak log for the flash tier (reasoning deltas dropped below).
+    let thReasoningLeakLogged = false;
     const handleUpstreamLine = async (line: string) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
@@ -2786,7 +2800,19 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           // exists, so the user stared at a bare "Réflexion" placeholder and
           // only saw the full reasoning text in one frame when the first
           // content chunk finally decided the gate — the exact bug this fixes.)
-          await processReasoningDelta(reasoningDelta);
+          if (isTH) {
+            // Flash tier: thinking is OFF — the free gateway/model
+            // occasionally leaks delta.reasoning anyway. DROP it: the
+            // chain-of-thought is never rendered, whatever the model does.
+            if (!thReasoningLeakLogged) {
+              thReasoningLeakLogged = true;
+              console.log(
+                '[v12-flow] TH flash reasoning leak — dropped (thinking is disabled for this model)'
+              );
+            }
+          } else {
+            await processReasoningDelta(reasoningDelta);
+          }
         }
         if (delta) {
           if (skillGate && !skillGate.decided) {
@@ -2878,7 +2904,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         const fr = reasoning.finish();
         const tagOut = fr.output ?? [];
         truncatedOutput = fr.usedStructured ? (contBase ? [...contBase.output, ...tagOut] : tagOut) : null;
-        truncatedContent = fr.usedStructured ? fr.content : aggregate;
+        truncatedContent = fr.usedStructured || reasoning.dropped ? fr.content : aggregate;
       }
       console.warn(
         `[v12-flow] time budget exhausted mid-generation (${FLOW_WALL_MS}ms) — ` +
@@ -3093,7 +3119,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           ? [...contBase.output, ...tagOut]
           : tagOut
         : null;
-      finalContent = finalReasoning.usedStructured ? finalReasoning.content : aggregate;
+      finalContent = finalReasoning.usedStructured || reasoning.dropped ? finalReasoning.content : aggregate;
     }
 
     // Short-answer flush: an answer under the 60-char narration threshold
@@ -3157,6 +3183,19 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           finalContent = stripped;
           finalOutput = null;
         }
+      }
+    }
+
+    // Flash tier: the narration-repair round-trip (and any late leak on the
+    // main stream) is itself a flash call — strip any <thinking> block the
+    // repair answer carries (the streaming drop mode above covers only the
+    // delta path, not the non-streaming repair content).
+    if (isTH) {
+      const strippedFinal = stripReasoningTags(finalContent);
+      if (strippedFinal !== finalContent) {
+        console.log('[v12-flow] TH flash — thinking leak stripped from final content');
+        finalContent = strippedFinal;
+        finalOutput = null;
       }
     }
 
@@ -3537,6 +3576,9 @@ async function generateChatTitle(route: ModelRoute, messages: { role: string; co
     let content: string =
       data?.choices?.[0]?.message?.content ?? data?.message?.content ?? '';
     if (!content) return null;
+    // Flash tier: strip any thinking leak from the title text (same contract
+    // as the main flow — thinking is disabled for this model).
+    if (isTokenharborModel(route.model)) content = stripReasoningTags(content);
 
     // Python: title_string[find('{'):rfind('}')+1] → JSONCodec.loads().get('title')
     const start = content.indexOf('{');
