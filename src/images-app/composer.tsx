@@ -41,7 +41,7 @@ function RatioGlyph({ ratio, className }: { ratio: string; className?: string })
   return (
     <span
       aria-hidden="true"
-      className={cx('inline-block rounded-[2px] bg-[#171717]', className)}
+      className={cx('inline-block rounded-[2px] bg-[var(--images-glyph)]', className)}
       style={{ width: gw, height: gh }}
     />
   );
@@ -62,7 +62,7 @@ function RatioPicker({
   const [open, setOpen] = React.useState(false);
   if (disabled) {
     return (
-      <span className="flex items-center gap-1.5 rounded-full border border-[#EAEAEA] px-2.5 py-1.5 text-[13px] font-medium text-[#bdbdbd]" title="Format non contrôlable par le moteur actif">
+      <span className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]" title="Format non contrôlable par le moteur actif">
         <RatioGlyph ratio={ratio} className="opacity-40" />
         {ratio}
       </span>
@@ -72,7 +72,7 @@ function RatioPicker({
     <div className="relative">
       <button
         type="button"
-        className="flex items-center gap-1.5 rounded-full border border-[#EAEAEA] px-2.5 py-1.5 text-[13px] font-medium text-[#171717] transition-colors hover:bg-[#F7F7F7]"
+        className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -80,14 +80,14 @@ function RatioPicker({
       >
         <RatioGlyph ratio={ratio} />
         {ratio}
-        <ChevronDown className="size-3 text-[#777777]" strokeWidth={2} />
+        <ChevronDown className="size-3 text-[var(--images-muted)]" strokeWidth={2} />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div
             role="listbox"
-            className="images-pop absolute bottom-full left-0 z-50 mb-2 grid w-[188px] grid-cols-3 gap-1 rounded-[14px] border border-[#EAEAEA] bg-white p-2 shadow-[0_8px_28px_rgba(0,0,0,0.10)]"
+            className="images-pop absolute bottom-full left-0 z-50 mb-2 grid w-[188px] grid-cols-3 gap-1 rounded-[14px] border border-[var(--images-line)] bg-[var(--images-surface)] p-2 shadow-[var(--images-shadow-pop)]"
           >
             {ratios.map((r) => (
               <button
@@ -97,7 +97,7 @@ function RatioPicker({
                 aria-selected={r === ratio}
                 className={cx(
                   'flex items-center justify-center gap-1.5 rounded-[10px] px-2 py-2 text-[12px] font-medium transition-colors',
-                  r === ratio ? 'bg-[#F2F2F2] text-[#171717]' : 'text-[#777777] hover:bg-[#F7F7F7] hover:text-[#171717]'
+                  r === ratio ? 'bg-[var(--images-chip)] text-[var(--images-ink)]' : 'text-[var(--images-muted)] hover:bg-[var(--images-hover)] hover:text-[var(--images-ink)]'
                 )}
                 onClick={() => {
                   onChange(r);
@@ -169,7 +169,7 @@ function MicButton({ onTranscript }: { onTranscript(text: string): void }) {
       type="button"
       onClick={toggle}
       className={cx(
-        'flex size-9 items-center justify-center rounded-full text-[#171717] transition-colors hover:bg-[#F2F2F2]',
+        'flex size-9 items-center justify-center rounded-full text-[var(--images-ink)] transition-colors hover:bg-[var(--images-chip)]',
         listening && 'images-mic-live'
       )}
       title={listening ? 'Arrêter la dictée' : 'Dicter le prompt'}
@@ -225,7 +225,7 @@ export function Composer(props: ComposerProps) {
   };
 
   return (
-    <div className="rounded-[24px] border border-[#EAEAEA] bg-white shadow-[0_2px_16px_rgba(0,0,0,0.05)]">
+    <div className="rounded-[24px] border border-[var(--images-line)] bg-[var(--images-surface)] shadow-[var(--images-shadow-card)]">
       {/* Zone de saisie (masquée en mode compact) */}
       <div
         className={cx(
@@ -241,7 +241,7 @@ export function Composer(props: ComposerProps) {
           rows={1}
           placeholder="Décrivez ce que vous imaginez"
           aria-label="Description de l'image à créer"
-          className="block w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-6 text-[#171717] outline-none placeholder:text-[#9aa0a6]"
+          className="block w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-6 text-[var(--images-ink)] outline-none placeholder:text-[var(--images-faint)]"
         />
         {/* Références attachées (image-to-image) */}
         {references.length > 0 && (
@@ -249,16 +249,16 @@ export function Composer(props: ComposerProps) {
             {references.map((ref) => (
               <span
                 key={ref.id}
-                className="flex max-w-[220px] items-center gap-1.5 rounded-full border border-[#EAEAEA] bg-[#FAFAFA] py-1 pl-1 pr-2 text-[12px] text-[#171717]"
+                className="flex max-w-[220px] items-center gap-1.5 rounded-full border border-[var(--images-line)] bg-[var(--images-subtle)] py-1 pl-1 pr-2 text-[12px] text-[var(--images-ink)]"
               >
-                <span className="flex size-6 items-center justify-center overflow-hidden rounded-full bg-[#F2F2F2] text-[10px] text-[#777777]">
+                <span className="flex size-6 items-center justify-center overflow-hidden rounded-full bg-[var(--images-chip)] text-[10px] text-[var(--images-muted)]">
                   {ref.label.slice(0, 2).toUpperCase()}
                 </span>
                 <span className="truncate font-medium">{ref.label}</span>
                 <button
                   type="button"
                   onClick={() => onRemoveReference(ref.id)}
-                  className="flex size-4 shrink-0 items-center justify-center rounded-full text-[#777777] hover:text-[#171717]"
+                  className="flex size-4 shrink-0 items-center justify-center rounded-full text-[var(--images-muted)] hover:text-[var(--images-ink)]"
                   aria-label={`Détacher ${ref.label}`}
                 >
                   <svg viewBox="0 0 24 24" className="size-3" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
@@ -278,8 +278,8 @@ export function Composer(props: ComposerProps) {
           type="button"
           onClick={onTogglePanel}
           className={cx(
-            'flex size-8 items-center justify-center rounded-full text-[#171717] transition-colors',
-            panelOpen ? 'bg-[#F2F2F2]' : 'hover:bg-[#F2F2F2]'
+            'flex size-8 items-center justify-center rounded-full text-[var(--images-ink)] transition-colors',
+            panelOpen ? 'bg-[var(--images-chip)]' : 'hover:bg-[var(--images-chip)]'
           )}
           title="Joindre des médias"
           aria-label="Joindre des médias"
@@ -296,14 +296,14 @@ export function Composer(props: ComposerProps) {
             onKeyDown={onKeyDown}
             placeholder="Décrivez ce que vous imaginez"
             aria-label="Description de l'image à créer"
-            className="min-w-0 flex-1 bg-transparent px-2 text-[15px] leading-6 text-[#171717] outline-none placeholder:text-[#9aa0a6]"
+            className="min-w-0 flex-1 bg-transparent px-2 text-[15px] leading-6 text-[var(--images-ink)] outline-none placeholder:text-[var(--images-faint)]"
           />
         )}
 
         {/* Chips (mode étendu) */}
         {!compact && (
           <>
-            <span className="flex items-center gap-1.5 rounded-full bg-[#F2F2F2] px-3 py-1.5 text-[13px] font-medium text-[#171717]">
+            <span className="flex items-center gap-1.5 rounded-full bg-[var(--images-chip)] px-3 py-1.5 text-[13px] font-medium text-[var(--images-ink)]">
               <svg viewBox="0 0 24 24" className="size-[15px]" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <rect x="3" y="3" width="18" height="18" rx="2" />
                 <circle cx="9" cy="9" r="1.6" />
@@ -313,7 +313,7 @@ export function Composer(props: ComposerProps) {
             </span>
 
             {/* Segment Vitesse | Qualité 2.0 — vitesse = 1 image, qualité = 2 */}
-            <div className="flex items-center gap-1 rounded-full bg-[#F5F5F5] p-[3px]" role="radiogroup" aria-label="Régime de génération">
+            <div className="flex items-center gap-1 rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Régime de génération">
               <button
                 type="button"
                 role="radio"
@@ -322,8 +322,8 @@ export function Composer(props: ComposerProps) {
                 className={cx(
                   'rounded-full px-3 py-1 text-[13px] transition-all',
                   mode === 'vitesse'
-                    ? 'border border-[#EAEAEA] bg-white font-medium text-[#171717] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-                    : 'font-medium text-[#777777]'
+                    ? 'border border-[var(--images-line)] bg-[var(--images-pill)] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]'
+                    : 'font-medium text-[var(--images-muted)]'
                 )}
               >
                 Vitesse
@@ -336,8 +336,8 @@ export function Composer(props: ComposerProps) {
                 className={cx(
                   'rounded-full px-3 py-1 text-[13px] transition-all',
                   mode === 'qualite'
-                    ? 'border border-[#EAEAEA] bg-white font-medium text-[#171717] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-                    : 'font-medium text-[#777777]'
+                    ? 'border border-[var(--images-line)] bg-[var(--images-pill)] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]'
+                    : 'font-medium text-[var(--images-muted)]'
                 )}
               >
                 Qualité 2.0
@@ -360,10 +360,10 @@ export function Composer(props: ComposerProps) {
           onClick={submit}
           disabled={disabled || generating || !prompt.trim()}
           className={cx(
-            'flex size-9 items-center justify-center rounded-full text-white transition-all',
+            'flex size-9 items-center justify-center rounded-full text-[var(--images-on-accent)] transition-all',
             disabled || generating || !prompt.trim()
-              ? 'cursor-default bg-[#CDE0FA] text-white'
-              : 'bg-[#4D9BF5] hover:bg-[#3D8BEA] active:scale-95'
+              ? 'cursor-default bg-[var(--images-accent-soft)] text-[var(--images-on-accent)]'
+              : 'bg-[var(--images-accent)] hover:bg-[var(--images-accent-strong)] active:scale-95'
           )}
           title="Générer"
           aria-label="Générer"

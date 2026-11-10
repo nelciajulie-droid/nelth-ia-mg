@@ -5,19 +5,122 @@
 @source not "../../.next/**";
 
 /* ==========================================================================
-   Nelth-IA Images — standalone white workspace (video-reference design).
-   Pure white surfaces, #EAEAEA hairlines, #171717 ink, sky-blue accent.
+   Nelth-IA Images — design system à jetons (thème du SPA hôte).
+
+   Le workspace vit dans la zone centrale du shell Open WebUI : il suit
+   désormais le thème de l'application. En clair, les jetons reproduisent
+   EXACTEMENT le design blanc d'origine (référence vidéo). En sombre, ils
+   reprennent la palette dark custom de l'hôte (public/static/custom.css,
+   html.dark) : fond gray-900 #212121, surfaces gray-850 #303030, texte
+   gray-100 #ececec, séparateurs #4d4d4d — l'espace Images se fond dans
+   la sidebar sans aucune couture.
    ========================================================================== */
 
 :root {
+  /* Surfaces */
+  --images-bg: #ffffff;             /* fond de page */
+  --images-surface: #ffffff;        /* composer, panneaux, popovers, éditeurs */
+  --images-pill: #ffffff;           /* pilule sélectionnée dans un segment */
+  --images-subtle: #fafafa;         /* cartes d'échec, fonds à peine décalés */
+  --images-bg-translucent: rgba(255, 255, 255, 0.95); /* header sticky */
+
+  /* Traits */
+  --images-line: #eaeaea;           /* hairlines */
+  --images-line-strong: #c9c9c9;    /* focus, séparateurs marqués */
+
+  /* Texte */
+  --images-ink: #171717;            /* texte principal */
+  --images-muted: #777777;          /* texte secondaire */
+  --images-faint: #9aa0a6;          /* placeholder, icônes discrètes */
+  --images-disabled: #bdbdbd;       /* contrôles désactivés */
+
+  /* Interactions */
+  --images-chip: #f2f2f2;           /* chips actifs, fonds d'icônes */
+  --images-chip-soft: #f5f5f5;      /* conteneur segmenté */
+  --images-hover: #f7f7f7;          /* survol */
+  --images-skeleton: #ececec;       /* squelettes de génération */
+  --images-empty-icon: #d5d5d5;     /* états vides */
+  --images-glyph: #171717;          /* glyphe ratio / point taille */
+
+  /* Accent (sky) */
   --images-accent: #4d9bf5;
   --images-accent-strong: #3d8bea;
-  --images-ink: #171717;
-  --images-muted: #777777;
-  --images-faint: #9aa0a6;
-  --images-line: #eaeaea;
-  --images-chip: #f2f2f2;
-  --images-skeleton: #ececec;
+  --images-accent-soft: #cde0fa;    /* bouton Générer désactivé */
+  --images-on-accent: #ffffff;
+
+  /* Boutons « encre » (Importer, Régénérer…) — inversés en sombre */
+  --images-btn-ink: #171717;
+  --images-btn-on-ink: #ffffff;
+
+  /* Danger */
+  --images-danger: #b42318;         /* texte */
+  --images-danger-bg: #fbf1f0;      /* survol */
+
+  /* Contours d'images (galerie, vignettes) */
+  --images-ring: rgba(0, 0, 0, 0.05);
+  --images-ring-strong: rgba(0, 0, 0, 0.15);
+
+  /* Ombres (portées accentuées en sombre pour garder l'élévation) */
+  --images-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.03);
+  --images-shadow-btn: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --images-shadow-card: 0 2px 16px rgba(0, 0, 0, 0.05);
+  --images-shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.10);
+  --images-shadow-toast: 0 6px 24px rgba(0, 0, 0, 0.12);
+
+  /* Barres de défilement */
+  --images-scroll-thumb: #eaeaea;
+  --images-scroll-thumb-hover: #dcdcdc;
+}
+
+/* ── Sombre : palette dark custom de l'hôte (html.dark, public/static/custom.css) ──
+ * Fond gray-900 #212121, surfaces gray-850 #303030, hover #3a3a3a, texte
+ * gray-100 #ececec / gray-300 #b4b4b4, séparateurs #4d4d4d. L'accent ciel
+ * et les pilules « encre » s'inversent (fond clair, texte sombre) comme
+ * le bouton d'envoi du chat en sombre. */
+:is(html.dark, html .dark) {
+  --images-bg: #212121;             /* fond app (gray-900 hôte) */
+  --images-surface: #303030;        /* composer / panneaux (gray-850) */
+  --images-pill: #3f3f3f;           /* pilule sélectionnée */
+  --images-subtle: #282828;         /* cartes d'échec */
+  --images-bg-translucent: rgba(33, 33, 33, 0.95);
+
+  --images-line: #3d3d3d;
+  --images-line-strong: #4d4d4d;   /* gray-700 hôte (séparateurs) */
+
+  --images-ink: #ececec;            /* gray-100 hôte */
+  --images-muted: #b4b4b4;          /* gray-300 hôte */
+  --images-faint: #8f8f8f;          /* gray-400 hôte */
+  --images-disabled: #676767;       /* gray-600 hôte */
+
+  --images-chip: #3d3d3d;
+  --images-chip-soft: #353535;
+  --images-hover: #3a3a3a;
+  --images-skeleton: #353535;
+  --images-empty-icon: #4d4d4d;
+  --images-glyph: #ececec;
+
+  --images-accent: #4d9bf5;
+  --images-accent-strong: #3d8bea;
+  --images-accent-soft: #27405e;
+  --images-on-accent: #ffffff;
+
+  --images-btn-ink: #ececec;
+  --images-btn-on-ink: #171717;
+
+  --images-danger: #ef6a4d;
+  --images-danger-bg: rgba(239, 106, 77, 0.12);
+
+  --images-ring: #383838;
+  --images-ring-strong: #4d4d4d;
+
+  --images-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --images-shadow-btn: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --images-shadow-card: 0 2px 16px rgba(0, 0, 0, 0.45);
+  --images-shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --images-shadow-toast: 0 6px 24px rgba(0, 0, 0, 0.5);
+
+  --images-scroll-thumb: #3d3d3d;
+  --images-scroll-thumb-hover: #4d4d4d;
 }
 
 .images-root {
@@ -25,12 +128,14 @@
     "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  background: var(--images-bg);
+  color: var(--images-ink);
 }
 
 /* Thin neutral scrollbars (galerie + panneaux). */
 .images-scroll {
   scrollbar-width: thin;
-  scrollbar-color: var(--images-line) transparent;
+  scrollbar-color: var(--images-scroll-thumb) transparent;
 }
 .images-scroll::-webkit-scrollbar {
   width: 8px;
@@ -40,14 +145,14 @@
   background: transparent;
 }
 .images-scroll::-webkit-scrollbar-thumb {
-  background: var(--images-line);
+  background: var(--images-scroll-thumb);
   border-radius: 999px;
 }
 .images-scroll::-webkit-scrollbar-thumb:hover {
-  background: #dcdcdc;
+  background: var(--images-scroll-thumb-hover);
 }
 
-/* Skeleton shimmer (génération en cours) — flat #ECECEC + soft pulse. */
+/* Skeleton shimmer (génération en cours) — flat + soft pulse. */
 @keyframes images-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }

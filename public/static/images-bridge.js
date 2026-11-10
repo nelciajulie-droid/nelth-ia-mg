@@ -278,7 +278,7 @@
     overlayEl.setAttribute('aria-label', 'Images');
     overlayEl.style.cssText =
       'position:absolute;inset:0;z-index:40;display:flex;flex-direction:column;' +
-      'overflow:hidden;background:#FFFFFF;opacity:0;transition:opacity .18s ease';
+      'overflow:hidden;background:var(--images-bg,#FFFFFF);opacity:0;transition:opacity .18s ease';
     mainEl.appendChild(overlayEl);
     requestAnimationFrame(() => {
       if (overlayEl) overlayEl.style.opacity = '1';

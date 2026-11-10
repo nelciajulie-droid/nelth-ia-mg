@@ -26,7 +26,7 @@ const ACTION_BY_CATEGORY: Record<string, string> = {
 export function InspirationGallery({ onUse }: { onUse(entry: GalleryEntry): void }) {
   return (
     <div>
-      <div className="mb-4 flex items-center justify-center gap-2 text-[12px] font-medium text-[#777777]">
+      <div className="mb-4 flex items-center justify-center gap-2 text-[12px] font-medium text-[var(--images-muted)]">
         <ImageIcon className="size-3.5" strokeWidth={1.8} aria-hidden="true" />
         Idées pour commencer
       </div>
@@ -38,7 +38,7 @@ export function InspirationGallery({ onUse }: { onUse(entry: GalleryEntry): void
               key={entry.id}
               type="button"
               onClick={() => onUse(entry)}
-              className="group relative mb-2 block w-full break-inside-avoid overflow-hidden rounded-[12px] text-left ring-1 ring-black/5 transition-shadow hover:ring-black/15"
+              className="group relative mb-2 block w-full break-inside-avoid overflow-hidden rounded-[12px] text-left ring-1 ring-[var(--images-ring)] transition-shadow hover:ring-[var(--images-ring-strong)]"
               title={`${action} — ${entry.prompt.slice(0, 80)}…`}
             >
               <img

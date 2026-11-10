@@ -340,23 +340,23 @@ export function ImagesApp() {
 
   if (auth.kind === 'checking') {
     return (
-      <div className="images-root flex h-full items-center justify-center bg-white">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#EAEAEA] border-t-[#4D9BF5]" />
+      <div className="images-root flex h-full items-center justify-center bg-[var(--images-bg)]">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--images-line)] border-t-[var(--images-accent)]" />
       </div>
     );
   }
 
   if (auth.kind === 'denied') {
     return (
-      <div className="images-root flex h-full flex-col items-center justify-center gap-3 bg-white px-6 text-center">
-        <p className="text-[15px] font-semibold text-[#171717]">Session requise</p>
-        <p className="max-w-[320px] text-[13px] leading-5 text-[#777777]">
+      <div className="images-root flex h-full flex-col items-center justify-center gap-3 bg-[var(--images-bg)] px-6 text-center">
+        <p className="text-[15px] font-semibold text-[var(--images-ink)]">Session requise</p>
+        <p className="max-w-[320px] text-[13px] leading-5 text-[var(--images-muted)]">
           Connectez-vous à Nelth-IA puis rouvrez Images depuis la barre latérale.
         </p>
         <button
           type="button"
           onClick={() => window.location.reload()}
-          className="mt-2 rounded-full bg-[#171717] px-4 py-2 text-[13px] font-medium text-white hover:opacity-90"
+          className="mt-2 rounded-full bg-[var(--images-btn-ink)] px-4 py-2 text-[13px] font-medium text-[var(--images-btn-on-ink)] hover:opacity-90"
         >
           Recharger
         </button>
@@ -367,15 +367,15 @@ export function ImagesApp() {
   const selectedIds = new Set(references.map((r) => r.id));
 
   return (
-    <div className="images-root relative flex h-full flex-col bg-white text-[#171717]">
+    <div className="images-root relative flex h-full flex-col bg-[var(--images-bg)] text-[var(--images-ink)]">
       <div ref={scrollRef} onScroll={onScroll} className="images-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         {/* Bloc sticky : header + titre + composeur (titre/toolbar se compactent au défilement) */}
-        <div className="sticky top-0 z-30 bg-white/95 backdrop-blur-md">
+        <div className="sticky top-0 z-30 bg-[var(--images-bg-translucent)] backdrop-blur-md">
           <div className="flex items-center justify-end px-4 pt-4 pb-1 sm:px-6">
             <button
               type="button"
               onClick={onNewCanvas}
-              className="flex items-center gap-1.5 rounded-full border border-[#EAEAEA] bg-white px-3.5 py-1.5 text-[13px] font-medium text-[#171717] shadow-[0_1px_2px_rgba(0,0,0,0.03)] transition-colors hover:bg-[#F7F7F7]"
+              className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] bg-[var(--images-surface)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-sm)] transition-colors hover:bg-[var(--images-hover)]"
             >
               <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" />
@@ -392,7 +392,7 @@ export function ImagesApp() {
             )}
             aria-hidden={scrolled}
           >
-            <h1 className="px-4 text-center text-[22px] font-bold leading-8 tracking-[-0.015em] text-[#171717] sm:text-[26px]">
+            <h1 className="px-4 text-center text-[22px] font-bold leading-8 tracking-[-0.015em] text-[var(--images-ink)] sm:text-[26px]">
               Qu’allons-nous imaginer ?
             </h1>
           </div>
@@ -426,7 +426,7 @@ export function ImagesApp() {
           </div>
 
           {/* Séparateur fluide quand compact */}
-          {scrolled && <div className="h-px bg-[#EAEAEA]" />}
+          {scrolled && <div className="h-px bg-[var(--images-line)]" />}
         </div>
 
         {/* Panneau média attaché (non sticky — défile avec le contenu) */}
@@ -479,10 +479,10 @@ export function ImagesApp() {
             key={toast.id}
             role="status"
             className={cx(
-              'images-pop rounded-full px-4 py-2 text-[13px] font-medium shadow-[0_6px_24px_rgba(0,0,0,0.12)]',
+              'images-pop rounded-full px-4 py-2 text-[13px] font-medium shadow-[var(--images-shadow-toast)]',
               toast.tone === 'error'
                 ? 'bg-[#B42318] text-white'
-                : 'border border-[#EAEAEA] bg-white text-[#171717]'
+                : 'border border-[var(--images-line)] bg-[var(--images-surface)] text-[var(--images-ink)]'
             )}
           >
             {toast.text}

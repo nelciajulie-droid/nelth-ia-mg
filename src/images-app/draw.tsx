@@ -114,31 +114,31 @@ export function DrawOverlay({
   }
 
   return (
-    <div className="images-fade fixed inset-0 z-50 flex flex-col bg-white" role="dialog" aria-modal="true" aria-label="Dessiner">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#EAEAEA] px-3 sm:px-5">
+    <div className="images-fade fixed inset-0 z-50 flex flex-col bg-[var(--images-bg)]" role="dialog" aria-modal="true" aria-label="Dessiner">
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--images-line)] px-3 sm:px-5">
         <button
           type="button"
           onClick={onClose}
-          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#F2F2F2] hover:text-[#171717]"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium text-[var(--images-muted)] transition-colors hover:bg-[var(--images-chip)] hover:text-[var(--images-ink)]"
           aria-label="Retour"
         >
           <ArrowLeft className="size-4" strokeWidth={2} />
           Retour
         </button>
-        <span className="text-[15px] font-semibold text-[#171717]">Dessiner</span>
+        <span className="text-[15px] font-semibold text-[var(--images-ink)]">Dessiner</span>
         <button
           type="button"
           onClick={save}
           disabled={!dirty || saving}
-          className="flex items-center gap-1.5 rounded-full bg-[#171717] px-3.5 py-1.5 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-full bg-[var(--images-btn-ink)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--images-btn-on-ink)] transition-opacity hover:opacity-90 disabled:opacity-40"
         >
           {saving ? 'Ajout…' : 'Ajouter au studio'}
         </button>
       </header>
 
       {/* Barre d'outils */}
-      <div className="flex flex-wrap items-center justify-center gap-2 border-b border-[#EAEAEA] px-4 py-3">
-        <div className="flex items-center gap-1 rounded-full bg-[#F5F5F5] p-[3px]">
+      <div className="flex flex-wrap items-center justify-center gap-2 border-b border-[var(--images-line)] px-4 py-3">
+        <div className="flex items-center gap-1 rounded-full bg-[var(--images-chip-soft)] p-[3px]">
           <button
             type="button"
             aria-label="Crayon"
@@ -146,7 +146,7 @@ export function DrawOverlay({
             onClick={() => setErase(false)}
             className={cx(
               'flex size-7 items-center justify-center rounded-full transition-all',
-              !erase ? 'border border-[#EAEAEA] bg-white text-[#171717] shadow-[0_1px_2px_rgba(0,0,0,0.08)]' : 'text-[#777777]'
+              !erase ? 'border border-[var(--images-line)] bg-[var(--images-pill)] text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]' : 'text-[var(--images-muted)]'
             )}
           >
             <Pencil className="size-3.5" strokeWidth={2} />
@@ -158,7 +158,7 @@ export function DrawOverlay({
             onClick={() => setErase(true)}
             className={cx(
               'flex size-7 items-center justify-center rounded-full transition-all',
-              erase ? 'border border-[#EAEAEA] bg-white text-[#171717] shadow-[0_1px_2px_rgba(0,0,0,0.08)]' : 'text-[#777777]'
+              erase ? 'border border-[var(--images-line)] bg-[var(--images-pill)] text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]' : 'text-[var(--images-muted)]'
             )}
           >
             <Eraser className="size-3.5" strokeWidth={2} />
@@ -175,18 +175,18 @@ export function DrawOverlay({
               onClick={() => setSize(s)}
               className={cx(
                 'flex size-7 items-center justify-center rounded-full transition-colors',
-                size === s ? 'bg-[#F2F2F2]' : 'hover:bg-[#F7F7F7]'
+                size === s ? 'bg-[var(--images-chip)]' : 'hover:bg-[var(--images-hover)]'
               )}
             >
               <span
-                className="rounded-full bg-[#171717]"
+                className="rounded-full bg-[var(--images-glyph)]"
                 style={{ width: s + 2, height: s + 2, opacity: size === s ? 1 : 0.55 }}
               />
             </button>
           ))}
         </div>
 
-        <div className="mx-1 hidden h-5 w-px bg-[#EAEAEA] sm:block" />
+        <div className="mx-1 hidden h-5 w-px bg-[var(--images-line)] sm:block" />
 
         <div className="flex items-center gap-1.5">
           {COLORS.map((c) => (
@@ -201,20 +201,20 @@ export function DrawOverlay({
               }}
               className={cx(
                 'size-5 rounded-full transition-transform',
-                color === c && !erase ? 'scale-110 ring-2 ring-[#171717] ring-offset-2' : 'ring-1 ring-black/10'
+                color === c && !erase ? 'scale-110 ring-2 ring-[var(--images-ink)] ring-offset-2 ring-offset-[var(--images-bg)]' : 'ring-1 ring-[var(--images-ring)]'
               )}
               style={{ background: c }}
             />
           ))}
         </div>
 
-        <div className="mx-1 hidden h-5 w-px bg-[#EAEAEA] sm:block" />
+        <div className="mx-1 hidden h-5 w-px bg-[var(--images-line)] sm:block" />
 
         <button
           type="button"
           onClick={undo}
           disabled={!dirty}
-          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#F2F2F2] hover:text-[#171717] disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium text-[var(--images-muted)] transition-colors hover:bg-[var(--images-chip)] hover:text-[var(--images-ink)] disabled:opacity-40"
         >
           <Undo2 className="size-3.5" strokeWidth={2} />
           Annuler
@@ -223,7 +223,7 @@ export function DrawOverlay({
           type="button"
           onClick={clearAll}
           disabled={!dirty}
-          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#FBF1F0] hover:text-[#B42318] disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium text-[var(--images-muted)] transition-colors hover:bg-[var(--images-danger-bg)] hover:text-[var(--images-danger)] disabled:opacity-40"
         >
           <Trash2 className="size-3.5" strokeWidth={2} />
           Effacer
@@ -232,7 +232,7 @@ export function DrawOverlay({
 
       {/* Canvas */}
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4 sm:p-8">
-        <div className="w-full max-w-[760px] overflow-hidden rounded-[16px] border border-[#EAEAEA] shadow-[0_2px_16px_rgba(0,0,0,0.05)]">
+        <div className="w-full max-w-[760px] overflow-hidden rounded-[16px] border border-[var(--images-line)] shadow-[var(--images-shadow-card)]">
           <canvas
             ref={canvasRef}
             width={CANVAS_W}

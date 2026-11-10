@@ -38,7 +38,7 @@ function sideItem(
       onClick={onClick}
       className={cx(
         'flex shrink-0 items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13px] font-medium transition-colors',
-        active ? 'bg-[#F2F2F2] text-[#171717]' : 'text-[#777777] hover:bg-[#F7F7F7] hover:text-[#171717]'
+        active ? 'bg-[var(--images-chip)] text-[var(--images-ink)]' : 'text-[var(--images-muted)] hover:bg-[var(--images-hover)] hover:text-[var(--images-ink)]'
       )}
       aria-current={active ? 'true' : undefined}
     >
@@ -70,7 +70,7 @@ function GridCard({
         className="images-skeleton relative flex items-center justify-center rounded-[12px]"
         title={item.prompt ?? 'Génération en cours'}
       >
-        <span className="relative z-10 px-1.5 py-1 text-center text-[11px] font-medium text-[#777777]">
+        <span className="relative z-10 px-1.5 py-1 text-center text-[11px] font-medium text-[var(--images-muted)]">
           {phaseLabel(item.phase)}
         </span>
       </div>
@@ -82,7 +82,7 @@ function GridCard({
       <button
         type="button"
         onClick={onOpen}
-        className="flex items-center justify-center rounded-[12px] border border-[#EAEAEA] bg-[#FAFAFA] text-[11px] font-medium text-[#777777] transition-colors hover:bg-[#F2F2F2]"
+        className="flex items-center justify-center rounded-[12px] border border-[var(--images-line)] bg-[var(--images-subtle)] text-[11px] font-medium text-[var(--images-muted)] transition-colors hover:bg-[var(--images-chip)]"
         title={item.error ?? 'Génération échouée'}
       >
         Échec
@@ -94,7 +94,7 @@ function GridCard({
     <div
       className={cx(
         'group relative overflow-hidden rounded-[12px] transition-shadow',
-        selected ? 'ring-2 ring-[#4D9BF5]' : 'ring-1 ring-black/5 hover:ring-black/15'
+        selected ? 'ring-2 ring-[var(--images-accent)]' : 'ring-1 ring-[var(--images-ring)] hover:ring-[var(--images-ring-strong)]'
       )}
     >
       <button
@@ -131,10 +131,10 @@ export function MediaPanel(props: MediaPanelProps) {
   const list = tab === 'generations' ? generations : imports;
 
   return (
-    <div className="images-fade mt-2 flex h-[min(480px,62vh)] flex-col overflow-hidden rounded-[20px] border border-[#EAEAEA] bg-white shadow-[0_2px_16px_rgba(0,0,0,0.05)] sm:flex-row">
+    <div className="images-fade mt-2 flex h-[min(480px,62vh)] flex-col overflow-hidden rounded-[20px] border border-[var(--images-line)] bg-[var(--images-surface)] shadow-[var(--images-shadow-card)] sm:flex-row">
       {/* Colonne d'onglets (référence vidéo : liste verticale ~200px) */}
       <nav
-        className="flex items-center gap-1 overflow-x-auto border-b border-[#EAEAEA] p-2 sm:w-[200px] sm:flex-col sm:items-stretch sm:overflow-visible sm:border-b-0 sm:border-r"
+        className="flex items-center gap-1 overflow-x-auto border-b border-[var(--images-line)] p-2 sm:w-[200px] sm:flex-col sm:items-stretch sm:overflow-visible sm:border-b-0 sm:border-r"
         aria-label="Bibliothèque"
       >
         {sideItem(
@@ -150,7 +150,7 @@ export function MediaPanel(props: MediaPanelProps) {
           () => onTabChange('imports')
         )}
         <div className="hidden sm:mt-auto sm:block">
-          <div className="mx-2 my-1 h-px bg-[#EAEAEA]" />
+          <div className="mx-2 my-1 h-px bg-[var(--images-line)]" />
           {sideItem(
             'Dessiner',
             <Pencil className="size-4" strokeWidth={1.8} />,
@@ -159,7 +159,7 @@ export function MediaPanel(props: MediaPanelProps) {
           )}
           <label
             htmlFor="nelth-images-file"
-            className="flex shrink-0 cursor-pointer select-none items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#F7F7F7] hover:text-[#171717]"
+            className="flex shrink-0 cursor-pointer select-none items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13px] font-medium text-[var(--images-muted)] transition-colors hover:bg-[var(--images-hover)] hover:text-[var(--images-ink)]"
           >
             <Upload className="size-4" strokeWidth={1.8} />
             Importer des médias
@@ -170,12 +170,12 @@ export function MediaPanel(props: MediaPanelProps) {
       {/* Contenu */}
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center justify-between px-4 py-3">
-          <span className="text-[15px] font-semibold text-[#171717]">
+          <span className="text-[15px] font-semibold text-[var(--images-ink)]">
             {tab === 'generations' ? 'Générations' : 'Importations'}
           </span>
           <label
             htmlFor="nelth-images-file"
-            className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-full bg-[#171717] px-3.5 py-1.5 text-[13px] font-medium text-white transition-opacity hover:opacity-90 active:scale-[0.98]"
+            className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-full bg-[var(--images-btn-ink)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--images-btn-on-ink)] transition-opacity hover:opacity-90 active:scale-[0.98]"
           >
             <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
               <path d="M12 5v14M5 12h14" />
@@ -187,8 +187,8 @@ export function MediaPanel(props: MediaPanelProps) {
         <div className="images-scroll flex-1 overflow-y-auto px-4 pb-4">
           {list.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-              <ImageIcon className="mb-3 size-6 text-[#d5d5d5]" strokeWidth={1.5} aria-hidden="true" />
-              <p className="text-[13px] text-[#777777]">
+              <ImageIcon className="mb-3 size-6 text-[var(--images-empty-icon)]" strokeWidth={1.5} aria-hidden="true" />
+              <p className="text-[13px] text-[var(--images-muted)]">
                 {tab === 'generations'
                   ? 'Vos générations s’afficheront ici'
                   : 'Vos fichiers importés s’afficheront ici'}
@@ -212,11 +212,11 @@ export function MediaPanel(props: MediaPanelProps) {
       </div>
 
       {/* Actions mobiles bas de colonne ( Dessiner / Importer des médias ) */}
-      <div className="flex items-center gap-1 border-t border-[#EAEAEA] p-2 sm:hidden">
+      <div className="flex items-center gap-1 border-t border-[var(--images-line)] p-2 sm:hidden">
         {sideItem('Dessiner', <Pencil className="size-4" strokeWidth={1.8} />, false, onDraw)}
         <label
           htmlFor="nelth-images-file"
-          className="flex shrink-0 cursor-pointer select-none items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#F7F7F7] hover:text-[#171717]"
+          className="flex shrink-0 cursor-pointer select-none items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13px] font-medium text-[var(--images-muted)] transition-colors hover:bg-[var(--images-hover)] hover:text-[var(--images-ink)]"
         >
           <Upload className="size-4" strokeWidth={1.8} />
           Importer des médias
