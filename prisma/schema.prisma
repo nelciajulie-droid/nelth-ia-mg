@@ -811,3 +811,32 @@ model Chunk {
   @@index([knowledge_id])
   @@map("chunk")
 }
+
+// ─── imagine studio (Nelth-IA Images) ─────────────────────────────────────────
+// One row per studio image (generated / edited / variation / uploaded). The
+// bytes live in the existing files pipeline (file_id → /api/v1/files/{id}/content);
+// this table holds the metadata + lifecycle (status/phase) polled by the studio.
+model ImageItem {
+  id           String  @id
+  user_id      String
+  name         String?
+  prompt       String?
+  file_id      String?
+  provider     String?
+  model        String?
+  status       String? // generating | processing | completed | failed
+  aspect_ratio String?
+  width        Int?
+  height       Int?
+  favorite     Boolean @default(false)
+  source       String? // generate | edit | variation | upload
+  parent_id    String?
+  meta         String? // JSON {phase, style, error, …}
+  created_at   Int?
+  updated_at   Int?
+
+  @@index([user_id])
+  @@index([user_id, status])
+  @@index([created_at])
+  @@map("image_item")
+}
