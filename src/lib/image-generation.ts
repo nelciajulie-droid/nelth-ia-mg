@@ -76,22 +76,21 @@ export interface GenerateImageOptions {
  *
  * ChatGPT-like behavior: retry invisibly. The chain runs up to three
  * attempts — the user's prompt, the user's prompt again (transient blips),
- * then the enriched prompt (short-prompt rejections) — under a global
- * deadline that keeps the whole flow inside the serverless budget (Vercel
- * maxDuration 300s: ~220s of attempts + download + persist). Every attempt
- * restarts the live phases so the generating card keeps moving.
+ * then the enriched prompt (short-prompt rejections). There is NO global
+ * time budget anymore: each attempt runs its job to completion however
+ * long the upstream takes — a generation is never interrupted by a clock.
+ * Every attempt restarts the live phases so the generating card keeps
+ * moving. (The Vercel invocation window is the only physical ceiling,
+ * route maxDuration 300s — nothing else cuts a running generation.)
  */
 const PROMPT_ENRICHMENT = ' — image détaillée et de haute qualité';
-const RETRY_GLOBAL_DEADLINE_MS = 220_000;
-const ATTEMPT_POLL_TIMEOUT_MS = 90_000;
-const RETRY_MIN_REMAINING_MS = 15_000;
 
 /**
  * Generate an image with the built-in Nelthai engine → raw image bytes.
  *
- * Runs the async job to completion (polling every 1.5s), retries on the
- * transient failure modes above, and downloads the first produced image
- * before its CDN URL expires.
+ * Runs the async job to completion (polling every 1.5s, NO time limit),
+ * retries on the transient failure modes above, and downloads the first
+ * produced image before its CDN URL expires.
  */
 export async function generateSdImage(
   prompt: string,
@@ -112,16 +111,9 @@ export async function generateSdImage(
       ? [original]
       : [original, original, `${original}${PROMPT_ENRICHMENT}`];
 
-  const deadline = Date.now() + RETRY_GLOBAL_DEADLINE_MS;
   let lastFailure: unknown = null;
 
   for (let attempt = 0; attempt < attempts.length; attempt++) {
-    const remaining = deadline - Date.now();
-    if (attempt > 0 && remaining < RETRY_MIN_REMAINING_MS) {
-      console.warn('[image-generation] retry budget exhausted — surfacing the failure');
-      break;
-    }
-
     try {
       // Live label reset: the card shows the job starting over instead of
       // freezing on the failed attempt's last phase.
@@ -131,7 +123,7 @@ export async function generateSdImage(
         : await submitNelthaiTextToImage(attempts[attempt]);
       const urls = await waitForNelthaiImages(jobId, {
         onPhase: (phase) => options.onPhase?.(phase),
-        timeoutMs: Math.max(RETRY_MIN_REMAINING_MS, Math.min(ATTEMPT_POLL_TIMEOUT_MS, remaining)),
+        // No timeoutMs: poll until the job completes, however long it runs.
       });
 
       // The CDN URLs are short-lived — a download blip retries the whole job
@@ -166,7 +158,7 @@ export async function generateSdImage(
     }
   }
 
-  // Every attempt failed (or the budget ran out): a French, actionable
+  // Every attempt failed: a French, actionable
   // message instead of the gateway's bare "error" word.
   throw new Error(
     'La génération d’image a échoué après plusieurs tentatives. Le service d’images a probablement refusé ce sujet (politique de contenu) ou est momentanément indisponible. Essayez de reformuler votre demande avec un peu plus de détails — par exemple « un chat orange qui dort sur un canapé » plutôt que « chat » — puis relancez.'

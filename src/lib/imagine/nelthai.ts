@@ -161,7 +161,9 @@ export async function submitNelthaiImageToImage(
 export async function getNelthaiJob(jobId: string): Promise<NelthaiJob> {
   const res = await fetch(`${NELTHAI_API_BASE}/api/metaai/jobs/${encodeURIComponent(jobId)}`, {
     headers: { accept: 'application/json' },
-    signal: AbortSignal.timeout(20_000),
+    // Per-HTTP-call cap only (a single snapshot) — NEVER a generation
+    // deadline: generations run as long as the upstream job runs.
+    signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) throw new Error(`Nelthai poll failed: HTTP ${res.status}`);
   return (await res.json()) as NelthaiJob;
@@ -170,7 +172,12 @@ export async function getNelthaiJob(jobId: string): Promise<NelthaiJob> {
 export interface WaitForNelthaiOptions {
   /** Fired on every live phase CHANGE (label of the generation card). */
   onPhase?: (phase: NelthaiPhase) => void;
-  /** Overall budget (default 180s — observed generations run 15-40s). */
+  /**
+   * NO wall-clock deadline by default — the poller runs until the job
+   * reaches a terminal state (done/failed), however long the upstream
+   * takes. A caller MAY pass an explicit safety ceiling, but nothing in
+   * the app does anymore: generations are never time-limited.
+   */
   timeoutMs?: number;
   /** Poll interval (default 1.5s; 500ms floor). */
   pollMs?: number;
@@ -189,14 +196,16 @@ function imageUrlsOf(job: NelthaiJob): string[] {
  *
  * Phase transitions (sending → generating → image) are surfaced through
  * `onPhase` the moment the poller sees them — the UI shows them live as the
- * label of the generating card. Throws when the job fails or times out.
+ * label of the generating card. There is NO time limit: the loop ends only
+ * on a terminal job state (or a persistently dead gateway — 5 consecutive
+ * poll errors). Throws when the job fails.
  */
 export async function waitForNelthaiImages(
   jobId: string,
   options: WaitForNelthaiOptions = {}
 ): Promise<string[]> {
-  const timeoutMs = options.timeoutMs ?? 180_000;
   const pollMs = Math.max(500, options.pollMs ?? 1_500);
+  const deadline = options.timeoutMs ?? Infinity;
   const startedAt = Date.now();
   let lastPhase: NelthaiPhase | null = null;
   let lastError: unknown = null;
@@ -206,9 +215,9 @@ export async function waitForNelthaiImages(
   let consecutiveErrors = 0;
 
   for (;;) {
-    if (Date.now() - startedAt > timeoutMs) {
+    if (Date.now() - startedAt > deadline) {
       throw new Error(
-        `Image generation timed out after ${Math.round(timeoutMs / 1000)}s` +
+        `Image generation timed out after ${Math.round((Date.now() - startedAt) / 1000)}s` +
           (lastError instanceof Error ? ` (last poll error: ${lastError.message})` : '')
       );
     }

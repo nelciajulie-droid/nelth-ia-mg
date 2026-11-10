@@ -1,7 +1,11 @@
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// Long-lived SSE stream — Vercel serverless: allow the full 60s Hobby window.
-export const maxDuration = 60;
+// Long-lived SSE stream. Video/photo generation turns run INSIDE this
+// invocation (vibes ~35-60s+, nelthai ~15-40s, retries included) — the old
+// 60s Hobby-era cap hard-killed the function mid-generation (truncated
+// stream). The plan's ceiling is 300s (vercel.json) — take the full window
+// so a generation is never interrupted by the platform.
+export const maxDuration = 300;
 
 import { NextRequest } from 'next/server';
 import { buildCtx } from '@/server/http';

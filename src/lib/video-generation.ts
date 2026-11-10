@@ -99,15 +99,17 @@ export function detectVideoFormat(text: string): {
 }
 
 /**
- * Global budget keeps the whole flow inside the serverless budget (Vercel
- * maxDuration 300s): ~215s of submit+poll+download, then persistence.
+ * NO wall-clock budget — a generation runs until its batch reaches a
+ * terminal state, however long the render takes (the user explicitly wants
+ * continuity over any time limit). The Vercel invocation window (route
+ * maxDuration 300s) is the only physical ceiling; in dev nothing cuts a
+ * running batch. Guards that still fire: batch error, poll exhaustion
+ * (MAX_POLL_BLIPS consecutive failures — a dead gateway), and the
+ * fast-submit retry below (a quick 502 left no server-side job).
  */
-const RETRY_GLOBAL_DEADLINE_MS = 215_000;
 /** A submit that fails fast (<20s) left no server-side job → retry at once. */
 const FAST_SUBMIT_FAIL_MS = 20_000;
 const MAX_SUBMIT_ATTEMPTS = 3;
-/** How long a single batch may take to complete before the turn fails. */
-const POLL_TIMEOUT_MS = 180_000;
 const POLL_INTERVAL_MS = 4_000;
 /** Consecutive poll failures tolerated before giving up on a batch. */
 const MAX_POLL_BLIPS = 4;
@@ -124,20 +126,15 @@ type VibesBatchContentLike = { videoUrl?: unknown };
 
 /**
  * Poll a video batch to completion → the generated video URLs.
- * Throws on batch error, poll exhaustion or timeout.
+ *
+ * NO deadline: the loop ends only on the batch's terminal state
+ * (isComplete / hasError) or a persistently dead gateway (blips). A slow
+ * render is NEVER interrupted by a clock.
  */
 async function waitForVibesVideo(batchId: string): Promise<string[]> {
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
   let blips = 0;
-  let lastError: unknown = null;
 
   for (;;) {
-    if (Date.now() > deadline) {
-      throw new Error(
-        `Video generation timed out after ${Math.round(POLL_TIMEOUT_MS / 1000)}s` +
-          (lastError instanceof Error ? ` (last poll error: ${lastError.message})` : '')
-      );
-    }
     try {
       const batch = await vibesPollBatch(batchId);
       blips = 0;
@@ -162,7 +159,6 @@ async function waitForVibesVideo(batchId: string): Promise<string[]> {
     } catch (e) {
       // A terminal outcome parsed above must propagate immediately.
       if (e instanceof Error && e.message.startsWith('Video generation')) throw e;
-      lastError = e;
       if (++blips >= MAX_POLL_BLIPS) {
         throw new Error(
           `Video generation failed: ${e instanceof Error ? e.message : String(e)}`
@@ -208,7 +204,7 @@ async function submitAnimateJob(motionPrompt: string, source: VideoSourceImage):
  *
  * Submission is retried when it fails FAST (a quick 502 means no job was
  * created server-side); a batch that already runs is never re-rolled, only
- * its polling continues until the global deadline.
+ * its polling continues — with NO time limit — until the render completes.
  */
 export async function generateVideo(
   prompt: string,
@@ -218,14 +214,13 @@ export async function generateVideo(
     throw new Error('Prompt is required for video generation');
   }
 
-  const deadline = Date.now() + RETRY_GLOBAL_DEADLINE_MS;
   let lastFailure: unknown = null;
 
   for (let attempt = 0; attempt < MAX_SUBMIT_ATTEMPTS; attempt++) {
     // Only the SUBMIT is retried, and only on fast failures — a slow failure
     // or a batch already accepted leaves the retry loop (the poll phase
-    // handles its own transient blips).
-    if (attempt > 0 && Date.now() > deadline) break;
+    // handles its own transient blips). No global wall clock: each attempt
+    // polls its batch to completion however long the render takes.
 
     const submitStartedAt = Date.now();
     try {
@@ -256,8 +251,9 @@ export async function generateVideo(
       lastFailure = lastErr;
     } catch (e) {
       lastFailure = e;
-      // Poll-phase terminal failures (batch error/timeout) are NOT retried —
-      // the subject was likely refused; only fast submit blips restart.
+      // Poll-phase terminal failures (batch error / poll exhaustion) are
+      // NOT retried — the subject was likely refused; only fast submit blips
+      // restart.
       if (e instanceof Error && e.message.startsWith('Video generation')) {
         console.error('[video-generation] batch failed:', e.message);
         break;

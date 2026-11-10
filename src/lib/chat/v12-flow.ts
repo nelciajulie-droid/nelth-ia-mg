@@ -2038,18 +2038,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // a FRESH serverless invocation with its own full budget) instead of the
   // raw "Chat completion stream failed" banner.
   //
-  // The wall MUST stay below the REAL platform limit: the Hobby plan caps
-  // functions at 60s (route maxDuration=60). A wall longer than that never
-  // fires — Vercel hard-kills the invocation instead, cutting the SSE stream
-  // without the marker (browser: truncated stream / empty error body →
-  // "Failed to execute 'json' on 'Response': Unexpected end of JSON input").
-  // 52s leaves ~8s of finalization headroom (persist + marker + close).
+  // The wall MUST stay below the REAL platform limit: the route now runs
+  // with maxDuration=300 (chat/completions — video/photo generation turns
+  // need the full window; vercel.json parity), so the wall aligns with the
+  // 285s upstream-call caps used across the pipeline. A budget abort
+  // triggers the graceful truncation path (finalizeTruncated: persist the
+  // partial + the nelth:continue marker for the loader.js SSE bridge, which
+  // re-requests with __nelth_continue in a FRESH serverless invocation with
+  // its own full budget) instead of the raw "Chat completion stream failed"
+  // banner — ~15s of finalization headroom under the 300s platform kill.
   // NELTH_FLOW_BUDGET_MS (env): tuning knob / local testing (short budgets
   // exercise the auto-continue chain without waiting real minutes).
   const FLOW_WALL_MS = (() => {
     const tuned = parseInt(String(process.env.NELTH_FLOW_BUDGET_MS || ''), 10);
     if (Number.isFinite(tuned) && tuned >= 10_000) return tuned;
-    return process.env.VERCEL ? 52_000 : 285_000;
+    return 285_000;
   })();
   const flowWallAt = Date.now() + FLOW_WALL_MS;
   let activeCallTimeout: AbortSignal | null = null; // the current call's timeout signal (truncation classification)

@@ -11,7 +11,8 @@
  *     mode, qualities, max count…).
  *   • Async generation — rows are created in status 'generating' and the
  *     router schedules the worker with next/server `after()`; the UI polls
- *     /items (which also self-heals stale rows — serverless-safe).
+ *     /items. NO time limit: a worker heartbeat keeps live rows fresh and
+ *     the reaper only fails rows whose worker died (serverless freeze).
  *   • Persistence — bytes through the existing files pipeline (file_id →
  *     /api/v1/files/{id}/content), metadata in the image_item table.
  */
@@ -355,75 +356,91 @@ async function createQueuedItem(
   return rowToItem(row);
 }
 
-/** Generate + persist one item through the ACTIVE engine. */
+/**
+ * Generate + persist one item through the ACTIVE engine.
+ *
+ * A HEARTBEAT bumps the row's updated_at every 20s while this worker runs —
+ * the stale reaper can then NEVER interrupt a live generation (however
+ * slow the upstream): it only fires for rows whose worker died
+ * (serverless freeze), 30 minutes after the last sign of life.
+ */
+const HEARTBEAT_MS = 20_000;
+
 async function runOneGeneration(
   user: ApiUser,
   item: ImagineItem,
   plan: GenerationPlan
 ): Promise<void> {
-  const engine = await resolveActiveEngine();
+  const heartbeat = setInterval(() => {
+    void patchItemRow(item.id, {}).catch(() => undefined);
+  }, HEARTBEAT_MS);
   try {
-    const effectivePrompt = buildEffectivePrompt(plan, engine.kind === 'openai' ? 'exact' : 'creative-hint');
-    let bytes: Buffer;
-    let contentType: string;
-    if (engine.kind === 'openai') {
-      const result = await generateViaOpenAi(engine, effectivePrompt, plan.sourceImages ?? []);
-      bytes = result.bytes;
-      contentType = result.contentType;
-    } else {
-      const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
-      const generated = await generateSdImage(effectivePrompt, null, {
-        sourceImages: sources,
-        onPhase: (phase) => {
-          void setItemMeta(item.id, { phase }).catch(() => undefined);
-        },
-      });
-      bytes = generated.bytes;
-      contentType = generated.contentType;
-    }
-
-    // Persist through the files pipeline (existing architecture).
-    const extension = contentType === 'image/jpeg' ? '.jpg' : contentType === 'image/webp' ? '.webp' : '.png';
-    const fileItem = await uploadFileHandler(
-      user,
-      {
-        bytes,
-        filename: `imagine-${Date.now()}${extension}`,
-        contentType,
-      },
-      { model: 'imagine-studio', source: 'imagine_studio', item_id: item.id },
-      false
-    );
-    const fileId = fileItem?.id;
-    if (!fileId) throw new Error('La sauvegarde de l’image a échoué.');
-
-    // Dimensions via sharp (already a dependency).
-    let width: number | null = null;
-    let height: number | null = null;
+    const engine = await resolveActiveEngine();
     try {
-      const metadata = await sharpMetadata(bytes);
-      width = metadata.width ?? null;
-      height = metadata.height ?? null;
-    } catch {
-      /* unreadable dims — stored as null */
-    }
+      const effectivePrompt = buildEffectivePrompt(plan, engine.kind === 'openai' ? 'exact' : 'creative-hint');
+      let bytes: Buffer;
+      let contentType: string;
+      if (engine.kind === 'openai') {
+        const result = await generateViaOpenAi(engine, effectivePrompt, plan.sourceImages ?? []);
+        bytes = result.bytes;
+        contentType = result.contentType;
+      } else {
+        const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
+        const generated = await generateSdImage(effectivePrompt, null, {
+          sourceImages: sources,
+          onPhase: (phase) => {
+            void setItemMeta(item.id, { phase }).catch(() => undefined);
+          },
+        });
+        bytes = generated.bytes;
+        contentType = generated.contentType;
+      }
 
-    await patchItemRow(item.id, {
-      status: 'completed',
-      file_id: fileId,
-      provider: engine.kind === 'builtin' ? 'builtin' : 'openai',
-      model: engine.kind === 'builtin' ? 'nelthai-imagine' : engine.openaiModel,
-      width,
-      height,
-      meta: JSON.stringify({ style: plan.style ?? null, phase: null }),
-    });
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'La génération d’image a échoué.';
-    await patchItemRow(item.id, {
-      status: 'failed',
-      meta: JSON.stringify({ style: plan.style ?? null, phase: null, error: message }),
-    }).catch(() => undefined);
+      // Persist through the files pipeline (existing architecture).
+      const extension = contentType === 'image/jpeg' ? '.jpg' : contentType === 'image/webp' ? '.webp' : '.png';
+      const fileItem = await uploadFileHandler(
+        user,
+        {
+          bytes,
+          filename: `imagine-${Date.now()}${extension}`,
+          contentType,
+        },
+        { model: 'imagine-studio', source: 'imagine_studio', item_id: item.id },
+        false
+      );
+      const fileId = fileItem?.id;
+      if (!fileId) throw new Error('La sauvegarde de l’image a échoué.');
+
+      // Dimensions via sharp (already a dependency).
+      let width: number | null = null;
+      let height: number | null = null;
+      try {
+        const metadata = await sharpMetadata(bytes);
+        width = metadata.width ?? null;
+        height = metadata.height ?? null;
+      } catch {
+        /* unreadable dims — stored as null */
+      }
+
+      await patchItemRow(item.id, {
+        status: 'completed',
+        file_id: fileId,
+        provider: engine.kind === 'builtin' ? 'builtin' : 'openai',
+        model: engine.kind === 'builtin' ? 'nelthai-imagine' : engine.openaiModel,
+        width,
+        height,
+        meta: JSON.stringify({ style: plan.style ?? null, phase: null }),
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'La génération d’image a échoué.';
+      await patchItemRow(item.id, {
+        status: 'failed',
+        meta: JSON.stringify({ style: plan.style ?? null, phase: null, error: message }),
+      }).catch(() => undefined);
+    }
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
@@ -529,15 +546,19 @@ export async function runGenerationBatch(
 }
 
 // ---------------------------------------------------------------------------
-// Stale-row reaper (serverless safety net)
+// Stale-row reaper (frozen-worker safety net)
 // ---------------------------------------------------------------------------
 
-const STALE_SECONDS = 480;
+const STALE_SECONDS = 1800;
 
 /**
- * Rows stuck in generating/processing for > 8 minutes are marked failed —
- * covers a Vercel instance frozen mid-flight after its response. Dialect-safe
- * (Prisma only — no JSON_SET SQL which differs between SQLite and Postgres).
+ * Rows stuck in generating/processing with NO sign of life for 30 minutes are
+ * marked failed — the ONLY rows that can ever be reaped: the worker heartbeat
+ * (runOneGeneration) bumps updated_at every 20s while a generation actually
+ * runs, so a live generation — however slow the upstream — is NEVER
+ * interrupted. This covers only a Vercel instance frozen mid-flight after its
+ * response (no heartbeat anymore). Dialect-safe (Prisma only — no JSON_SET SQL
+ * which differs between SQLite and Postgres).
  */
 async function reapStaleItems(userId: string): Promise<void> {
   await ensureImageItemsTable();
