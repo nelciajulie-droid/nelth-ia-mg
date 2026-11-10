@@ -1971,6 +1971,49 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         try { src.cancel(reason); } catch { /* best effort */ }
       },
     });
+  // Gateway tail guard — fixes the strict-gateway 400
+  //   {"error":{"message":"The last message must have role=user.",…}}
+  // Some OpenAI-compatible gateways (TokenHarbor / Nelth-4.0_Flash,
+  // OpenRouter-style unified routes) reject ANY payload whose last message
+  // is not role=user. Our injection protocol legitimately delivers
+  // tool-result-style instructions as messages AFTER the last user message
+  // (skills pre-selected, USE_SKILL pass-2, connector <tool_result>) —
+  // those are role:"system", so the payload tail breaks the rule and the
+  // whole turn dies with the raw upstream error. Fix: re-stamp the trailing
+  // contiguous system block as user-role messages (the plain-chat tool-result
+  // convention — content byte-for-byte unchanged) so every gateway accepts
+  // the shape. No path of ours ends with assistant (continuation and
+  // narration-repair both append an explicit closing user message), but a
+  // defensive final continue-message is appended should that invariant ever
+  // break, instead of letting a strict gateway 400 the turn.
+  const withGatewaySafeTail = (body: Record<string, any>): Record<string, any> => {
+    const msgs: any[] = Array.isArray(body.messages) ? [...body.messages] : [];
+    if (msgs.length) {
+      let i = msgs.length - 1;
+      while (i >= 0 && msgs[i]?.role === 'system') i--;
+      const rebranded = msgs.length - 1 - i;
+      for (let j = i + 1; j < msgs.length; j++) {
+        msgs[j] = { ...msgs[j], role: 'user' };
+      }
+      if (rebranded > 0) {
+        console.log(
+          `[v12-flow] gateway tail guard — re-stamped ${rebranded} trailing system message(s) as user ("last message must have role=user")`
+        );
+      }
+      const lastRole = msgs[msgs.length - 1]?.role;
+      if (lastRole !== 'user') {
+        console.warn(
+          `[v12-flow] upstream payload ends with role=${String(lastRole)} — appending a neutral continue user message`
+        );
+        msgs.push({
+          role: 'user',
+          content: '(Continue and complete your answer to my previous request.)',
+        });
+      }
+    }
+    return { ...body, messages: msgs };
+  };
+
   const callUpstream = (
     body: Record<string, any>,
     signalOverride?: AbortSignal
@@ -1979,20 +2022,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       ? (async () => {
           // z-ai engine bridge: same two models, OpenAI-compatible Response —
           // reasoning flags map onto the SDK's thinking switch.
+          const payload = withGatewaySafeTail(body);
           const { zaiUpstreamResponse } = await import('@/lib/zai-llm');
           const signal = upstreamSignal();
           const res = await zaiUpstreamResponse({
-            messages: body.messages ?? [],
-            stream: body.stream === true,
-            temperature: body.temperature,
-            top_p: body.top_p,
-            max_tokens: body.max_tokens,
+            messages: payload.messages ?? [],
+            stream: payload.stream === true,
+            temperature: payload.temperature,
+            top_p: payload.top_p,
+            max_tokens: payload.max_tokens,
             thinking:
-              body.reasoning?.enabled === true || body.include_reasoning === true
+              payload.reasoning?.enabled === true || payload.include_reasoning === true
                 ? 'enabled'
                 : 'disabled',
           });
-          if (body.stream === true && res.body) {
+          if (payload.stream === true && res.body) {
             return new Response(signalGuardedStream(res.body, signal), {
               status: res.status,
               headers: res.headers,
@@ -2000,12 +2044,15 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           }
           return res;
         })()
-      : fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: signalOverride ?? upstreamSignal(),
-        });
+      : (() => {
+          const payload = withGatewaySafeTail(body);
+          return fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: signalOverride ?? upstreamSignal(),
+          });
+        })();
 
   /**
    * Narration repair (flow scope): one corrective call converting the model's
