@@ -234,6 +234,34 @@ function localStripNarration(content: string): string {
  */
 const CONTINUE_INSTRUCTION = `Your previous answer was interrupted mid-output by a platform limit (time budget or output-token cap) — the conversation shows exactly where it stopped. Continue EXACTLY from that point: do not repeat anything already written, do not re-introduce or summarize the answer, do not apologize or mention the interruption. If the output stopped inside a code block, continue inside that same code block and close it properly when the code ends. Emit ONLY the continuation, starting with the very next character.`;
 
+/**
+ * Conservative prompt-size estimate for the « max tokens infinie » clamp —
+ * chars/3 per text part (over-estimates prose, close for code) + 2 000 per
+ * image block + 8 per message envelope. Used ONLY to keep the pinned
+ * max_tokens under the model's TOTAL context window: several providers
+ * (AtlasCloud serving dots-3-note-preview:free) bind prompt + completion
+ * TOGETHER and 400 the whole request when the sum overflows — see the
+ * context-aware clamp in the flow below.
+ */
+function estimatePromptTokens(messages: any[]): number {
+  let tokens = 0;
+  for (const m of messages ?? []) {
+    tokens += 8; // role/structure envelope
+    const content = m?.content;
+    if (typeof content === 'string') {
+      tokens += Math.ceil(content.length / 3);
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (typeof part === 'string') tokens += Math.ceil(part.length / 3);
+        else if (part?.type === 'text' && typeof part.text === 'string')
+          tokens += Math.ceil(part.text.length / 3);
+        else if (part?.type === 'image_url' || part?.image_url) tokens += 2_000;
+      }
+    }
+  }
+  return tokens;
+}
+
 export async function handleChatCompletionV12(user: ApiUser, form: any): Promise<Response> {
   const json = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data === null ? 'null' : data === undefined ? 'null' : data), {
@@ -1821,21 +1849,37 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   }
   // « Max tokens infinie » on every built-in model: the pinned ceilings are
   // each model's CATALOG MAXIMUM (verified live on the Kilo gateway
-  // /api/v1/models, 2026-11-10) — dots-3-note-preview:free 460 800 completion
-  // tokens, nemotron-3-ultra-550b-a55b:free 65 536. Nothing lower is ever
-  // applied: without an explicit max_tokens the OpenAI-compatible gateways
-  // enforce their own low default (~4k) and long code answers die mid-stream
-  // with finish_reason "length". The flash tier (TokenHarbor
-  // deepseek-v4.1-flash:free — catalog not queryable from this region) gets
-  // 131 072: the same model family on the Kilo gateway allows 943 718, and a
-  // gateway that finds the value too large is handled by the self-healing
-  // ladder below (step-down retry), never a dead turn. The user's own
-  // params.max_tokens still wins.
-  if (reqBody.max_tokens === undefined && isKilo) {
-    reqBody.max_tokens = modelId === KILO_REASONING_MODEL_ID ? 65_536 : 460_800;
-  }
-  if (reqBody.max_tokens === undefined && isTH) {
-    reqBody.max_tokens = 131_072;
+  // /api/v1/models + OpenRouter provider endpoints, 2026-11-10) — dots-3-
+  // note-preview:free 460 800 completion tokens, nemotron-3-ultra-550b-a55b:
+  // free 65 536, deepseek-v4.1-flash (flash tier) 131 072. Nothing lower is
+  // ever applied: without an explicit max_tokens the OpenAI-compatible
+  // gateways enforce their own low default (~4k) and long code answers die
+  // mid-stream with finish_reason "length". The user's own params.max_tokens
+  // still wins.
+  //
+  // CONTEXT-AWARE CLAMP — the provider window binds prompt + completion
+  // TOGETHER, and a catalog completion max can exceed the remaining room:
+  // dots-3-note-preview:free is served by AtlasCloud as max_completion
+  // 460 800 inside a 512 000-token TOTAL window, so the blind 460 800 pin
+  // 400s any conversation whose prompt passes ~51 200 tokens (reproduced in
+  // production 2026-11-10: `Provider returned error` → raw
+  // {"code":400,"msg":"bad request"} from AtlasCloud, request_id
+  // 9cb66f0a — NO token keyword in the body). The pin is therefore clamped
+  // against a conservative estimate of THIS request's prompt minus 2 048
+  // headroom, floored at 32 768 so long code answers keep their runway (the
+  // finish_reason "length" auto-continue covers the rest); whatever a bad
+  // estimate still lets through is caught by the self-healing ladder below.
+  if (reqBody.max_tokens === undefined && (isKilo || isTH)) {
+    const catalog = isTH
+      ? { max: 131_072, ctx: 1_048_576 } // deepseek-v4.1-flash (TokenHarbor/AtlasCloud)
+      : modelId === KILO_REASONING_MODEL_ID
+        ? { max: 65_536, ctx: 1_000_000 } // nemotron-3-ultra (Nvidia)
+        : { max: 460_800, ctx: 512_000 }; // dots-3-note-preview (AtlasCloud)
+    const estPrompt = estimatePromptTokens(llmMessages);
+    reqBody.max_tokens = Math.max(
+      32_768,
+      Math.min(catalog.max, catalog.ctx - estPrompt - 2_048)
+    );
   }
   // True when the OUTPUT CAP came from the user's own params — an explicit
   // cap is a deliberate choice and is respected (no token-limit
@@ -2063,40 +2107,68 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
 
   /**
    * Self-healing output ceiling (« max tokens infinie »). The pinned
-   * max_tokens values are each model's catalog maximum — but a gateway we
-   * cannot query (TokenHarbor is region-blocked from the build region) may
-   * enforce a LOWER completion cap and answer 400 instead of clamping.
-   * Instead of a dead turn, step down the ladder and retry: 32 768 (generous
-   * proven-working tier) then the gateway default (no max_tokens). The
-   * surviving value is mirrored into reqBody so the skill pass-2 and the
-   * narration repair inherit the accepted ceiling. Only token-limit 400s
-   * match — generic provider flakes keep their own retry path.
+   * max_tokens values are each model's catalog maximum — but the serving
+   * provider may refuse values our estimate thought safe, and a strict
+   * OpenAI-compatible host answers 400 with NO token keyword in the body
+   * (AtlasCloud on dots-3-note-preview:free returns a bare
+   * `{"code":400,"msg":"bad request"}` when prompt + max_tokens overflows
+   * its window — the old text-sniffing ladder never fired on it). So the
+   * ladder NO LONGER sniffs the error text: ANY 400 from a built-in gateway
+   * steps the request down until something is accepted — 32 768 (generous
+   * proven-working tier) → the gateway default (no max_tokens: its ~4k
+   * default output is extended by the finish_reason "length" auto-continue)
+   * → non-standard reasoning/thinking flags stripped (last resort for a
+   * gateway that chokes on those fields). The surviving shape is mirrored
+   * into reqBody so the skill pass-2, the narration repair and the
+   * auto-continue rounds inherit it. A user-set params.max_tokens is also
+   * stepped down on rejection — an impossible cap must not kill the turn
+   * (the deliberate-cap rule governs auto-continue, not error recovery).
+   * Malformed-request 400s simply burn two fast-failing retries and surface
+   * as before — no behavior lost, no dead turn gained.
    */
-  const TOKEN_LIMIT_LADDER: Array<number | undefined> = [32_768, undefined];
-  const TOKEN_LIMIT_400 =
-    /max_tokens|max.?completion|token.{0,20}limit|limit.{0,30}token|too large|exceed|maximum.{0,40}tokens|tokens.{0,40}maximum|longer than the maximum/i;
   const callUpstreamTokenSafe = async (
     body: Record<string, any>,
     signalOverride?: AbortSignal
   ): Promise<Response> => {
     let res = await callUpstream(body, signalOverride);
-    for (const step of TOKEN_LIMIT_LADDER) {
-      if (!(isKilo || isTH) || res.status !== 400 || body.max_tokens === undefined) return res;
-      const probe = await res.clone().text().catch(() => '');
-      if (!TOKEN_LIMIT_400.test(probe)) return res;
-      console.warn(
-        `[v12-flow] gateway rejected max_tokens=${body.max_tokens} (token limit) — stepping down to ${
-          step ?? 'gateway default'
-        }`
-      );
-      if (step === undefined) {
+    if (!(isKilo || isTH) || res.status !== 400) return res;
+    const steps: Array<() => string> = [];
+    if (typeof body.max_tokens === 'number' && body.max_tokens > 32_768) {
+      steps.push(() => {
+        body.max_tokens = 32_768;
+        reqBody.max_tokens = 32_768;
+        return 'max_tokens → 32 768';
+      });
+    }
+    if (body.max_tokens !== undefined) {
+      steps.push(() => {
         delete body.max_tokens;
         delete reqBody.max_tokens;
-      } else {
-        body.max_tokens = step;
-        reqBody.max_tokens = step;
-      }
+        return 'max_tokens → gateway default';
+      });
+    }
+    if (
+      body.thinking !== undefined ||
+      body.reasoning !== undefined ||
+      body.include_reasoning !== undefined
+    ) {
+      steps.push(() => {
+        delete body.thinking;
+        delete body.reasoning;
+        delete body.include_reasoning;
+        delete reqBody.thinking;
+        delete reqBody.reasoning;
+        delete reqBody.include_reasoning;
+        return 'reasoning/thinking flags stripped';
+      });
+    }
+    for (const apply of steps) {
+      const probe = (await res.clone().text().catch(() => '')).slice(0, 160).replace(/\s+/g, ' ');
+      console.warn(
+        `[v12-flow] upstream 400 (${probe || 'no body'}) — self-healing: ${apply()}`
+      );
       res = await callUpstream(body, signalOverride);
+      if (res.status !== 400) return res;
     }
     return res;
   };
@@ -2139,12 +2211,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     };
     delete body.stream_options;
     const repairSignal = timeoutMs ? repairTimeoutSignal(timeoutMs) : undefined;
-    let res = await callUpstream(body, repairSignal);
+    let res = await callUpstreamTokenSafe(body, repairSignal);
     if (!res.ok) {
       // Provider flake retry (same guard as the main call — the free dots
       // model occasionally 400s a perfectly valid request).
       await new Promise((r) => setTimeout(r, 600));
-      res = await callUpstream(body, repairSignal);
+      res = await callUpstreamTokenSafe(body, repairSignal);
     }
     if (!res.ok) throw new Error(`repair upstream ${res.status}`);
     const data = await res.json().catch(() => null);
@@ -2455,7 +2527,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
             data: { action: 'skill', description: `Skill « ${skill.label || skill.name} » chargé`, done: false },
           });
           try {
-            const res2 = await callUpstream({
+            const res2 = await callUpstreamTokenSafe({
               ...reqBody,
               messages: await buildSkillInjectionMessages(llmMessages, skill),
             });
@@ -3553,12 +3625,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
               const messages2 = alreadyLoaded
                 ? llmMessages
                 : await buildSkillInjectionMessages(llmMessages, skill);
-              res2 = await callUpstream({ ...reqBody, messages: messages2 });
+              res2 = await callUpstreamTokenSafe({ ...reqBody, messages: messages2 });
               if ((isKilo || isTH) && res2.status === 400) {
                 const probe = await res2.clone().text().catch(() => '');
                 if (/bad request|Provider returned error/i.test(probe)) {
                   console.warn('[v12-flow] 5c skill pass-2 gateway 400 flake — retrying');
-                  res2 = await callUpstream({
+                  res2 = await callUpstreamTokenSafe({
                     ...reqBody,
                     messages: alreadyLoaded
                       ? llmMessages
