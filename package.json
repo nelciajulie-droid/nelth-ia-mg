@@ -9,6 +9,7 @@
     "postinstall": "bun scripts/prisma.mjs generate",
     "start": "bun scripts/serve.mjs start",
     "lint": "eslint .",
+    "build:images": "bun scripts/build-images.ts",
     "db:push": "bun scripts/prisma.mjs db push --accept-data-loss",
     "db:generate": "bun scripts/prisma.mjs generate",
     "db:migrate": "bun scripts/prisma.mjs migrate dev",
@@ -92,6 +93,7 @@
     "zustand": "^5.0.6"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.3.5",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^3.0.0",
     "@types/cheerio": "^1.0.0",

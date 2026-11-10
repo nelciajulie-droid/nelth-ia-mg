@@ -1,0 +1,267 @@
+/**
+ * Nelth-IA Images — vue détail plein blanc (édition prompt, retouche,
+ * variations, téléchargement, réutilisation en référence, suppression).
+ */
+
+import * as React from 'react';
+import {
+  ArrowLeft,
+  Download,
+  Pencil,
+  Repeat,
+  Trash2,
+  Type,
+  Upload,
+  Wand2,
+} from 'lucide-react';
+import { AuthImg, cx, formatTime, phaseLabel, sourceLabel, Spinner } from './ui';
+import { downloadImage } from './api';
+import type { ImagineItem } from '../lib/images/types';
+
+export interface DetailOverlayProps {
+  item: ImagineItem;
+  busy: string | null;
+  onClose(): void;
+  onEdit(itemId: string, prompt: string, kind: 'texte' | 'retouche'): void;
+  onVariation(itemId: string): void;
+  onUseReference(item: ImagineItem): void;
+  onDelete(itemId: string): void;
+}
+
+function pillButton(
+  label: string,
+  icon: React.ReactNode,
+  props: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+    variant?: 'ink' | 'outline' | 'ghost' | 'danger';
+    hideLabelOnMobile?: boolean;
+  }
+) {
+  const { variant = 'outline', hideLabelOnMobile, className, ...rest } = props;
+  const styles: Record<string, string> = {
+    ink: 'bg-[#171717] text-white hover:opacity-90',
+    outline: 'border border-[#EAEAEA] bg-white text-[#171717] hover:bg-[#F7F7F7]',
+    ghost: 'text-[#777777] hover:bg-[#F2F2F2] hover:text-[#171717]',
+    danger: 'text-[#777777] hover:bg-[#FBF1F0] hover:text-[#B42318]',
+  };
+  return (
+    <button
+      type="button"
+      className={cx(
+        'flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 py-1.5 text-[13px] font-medium transition-all active:scale-[0.97]',
+        styles[variant],
+        className
+      )}
+      {...rest}
+    >
+      {icon}
+      {hideLabelOnMobile ? <span className="max-sm:hidden">{label}</span> : label}
+    </button>
+  );
+}
+
+export function DetailOverlay(props: DetailOverlayProps) {
+  const { item, busy, onClose, onEdit, onVariation, onUseReference, onDelete } = props;
+  const [editor, setEditor] = React.useState<'texte' | 'retouche' | null>(null);
+  const [instructions, setInstructions] = React.useState('');
+
+  const pending = item.status === 'generating' || item.status === 'processing';
+  const ratio = item.aspect_ratio ?? '1:1';
+  const [rw, rh] = ratio.split(':').map(Number);
+  const aspect = rw && rh ? `${rw} / ${rh}` : '1 / 1';
+
+  function submitEditor() {
+    if (!instructions.trim() || !editor) return;
+    onEdit(item.id, instructions.trim(), editor);
+    setEditor(null);
+    setInstructions('');
+  }
+
+  return (
+    <div
+      className="images-fade fixed inset-0 z-50 flex flex-col bg-white"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Détail de l'image"
+    >
+      {/* Barre supérieure */}
+      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[#EAEAEA] px-3 sm:px-5">
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#F2F2F2] hover:text-[#171717]"
+          aria-label="Retour à la bibliothèque"
+        >
+          <ArrowLeft className="size-4" strokeWidth={2} />
+          Retour
+        </button>
+        <span className="mx-2 hidden min-w-0 flex-1 truncate text-center text-[13px] text-[#777777] sm:mx-3 sm:block">
+          {item.name ?? item.prompt ?? 'Image'}
+        </span>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {pillButton('Télécharger', <Download className="size-3.5" strokeWidth={2} />, {
+            variant: 'ghost',
+            onClick: () => void downloadImage(item.url ?? '', item.name ?? `nelth-image-${item.id}.png`),
+            disabled: pending || !item.url,
+            title: 'Télécharger',
+            hideLabelOnMobile: true,
+          })}
+          {pillButton('Utiliser comme référence', <Upload className="size-3.5" strokeWidth={2} />, {
+            variant: 'ghost',
+            onClick: () => onUseReference(item),
+            disabled: pending || !item.url,
+            title: 'Utiliser comme référence',
+            hideLabelOnMobile: true,
+            className: 'max-sm:px-2.5',
+          })}
+        </div>
+      </header>
+
+      {/* Corps : grand aperçu centré */}
+      <div className="images-scroll flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-4 py-6 sm:px-8 sm:py-10">
+        <div className="flex w-full max-w-[820px] flex-col items-center">
+          {pending ? (
+            <div
+              className="images-skeleton flex w-full max-w-[520px] items-center justify-center rounded-[16px]"
+              style={{ aspectRatio: aspect }}
+            >
+              <span className="z-10 text-[13px] font-medium text-[#777777]">{phaseLabel(item.phase)}</span>
+            </div>
+          ) : item.status === 'failed' ? (
+            <div
+              className="flex w-full max-w-[520px] flex-col items-center justify-center gap-2 rounded-[16px] border border-[#EAEAEA] bg-[#FAFAFA] py-16"
+              style={{ aspectRatio: aspect }}
+            >
+              <span className="text-[14px] font-medium text-[#171717]">Génération échouée</span>
+              <span className="max-w-[380px] px-4 text-center text-[12px] text-[#777777]">
+                {item.error ?? 'Le moteur n’a pas pu produire cette image.'}
+              </span>
+            </div>
+          ) : (
+            <AuthImg
+              path={item.url}
+              alt={item.name ?? item.prompt ?? 'Image'}
+              className="max-h-[58vh] w-auto max-w-full rounded-[16px] ring-1 ring-black/5"
+              fallbackClassName="max-h-[58vh] w-auto max-w-full rounded-[16px]"
+            />
+          )}
+
+          {/* Métadonnées */}
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[12px] text-[#777777]">
+            <span>{sourceLabel(item)}</span>
+            {item.aspect_ratio && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{item.aspect_ratio}</span>
+              </>
+            )}
+            {item.width && item.height && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>
+                  {item.width}×{item.height}
+                </span>
+              </>
+            )}
+            {item.created_at && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{formatTime(item.created_at)}</span>
+              </>
+            )}
+          </div>
+
+          {/* Prompt d'origine */}
+          {item.prompt && (
+            <p className="mt-3 max-w-[560px] text-center text-[13px] leading-5 text-[#777777]">
+              {item.prompt}
+            </p>
+          )}
+
+          {/* Éditeur d'instructions (Modifier le texte / Retouche précise) */}
+          {editor && (
+            <div className="images-pop mt-5 w-full max-w-[560px] rounded-[16px] border border-[#EAEAEA] bg-white p-4 shadow-[0_2px_16px_rgba(0,0,0,0.05)]">
+              <label className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-[#171717]">
+                {editor === 'texte' ? <Type className="size-3.5" strokeWidth={2} /> : <Pencil className="size-3.5" strokeWidth={2} />}
+                {editor === 'texte' ? 'Nouveau texte ou description' : 'Retouche précise souhaitée'}
+              </label>
+              <textarea
+                value={instructions}
+                onChange={(e) => setInstructions(e.target.value)}
+                rows={2}
+                placeholder={
+                  editor === 'texte'
+                    ? 'Ex. : remplace le texte par « NELTH » dans le même style…'
+                    : 'Ex. : éclaircit l’arrière-plan, garde le sujet intact…'
+                }
+                className="block w-full resize-none rounded-[10px] border border-[#EAEAEA] px-3 py-2.5 text-[14px] leading-6 text-[#171717] outline-none placeholder:text-[#9aa0a6] focus:border-[#C9C9C9]"
+              />
+              <div className="mt-3 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  className="rounded-full px-3.5 py-1.5 text-[13px] font-medium text-[#777777] transition-colors hover:bg-[#F2F2F2] hover:text-[#171717]"
+                  onClick={() => {
+                    setEditor(null);
+                    setInstructions('');
+                  }}
+                >
+                  Annuler
+                </button>
+                <button
+                  type="button"
+                  disabled={!instructions.trim()}
+                  onClick={submitEditor}
+                  className="flex items-center gap-1.5 rounded-full bg-[#171717] px-3.5 py-1.5 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  Régénérer
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Actions (référence vidéo + master prompt §8) */}
+          <div className="mb-4 mt-6 flex flex-wrap items-center justify-center gap-2">
+            {pillButton('Modifier le texte', <Type className="size-3.5" strokeWidth={2} />, {
+              variant: 'ink',
+              onClick: () => {
+                setEditor('texte');
+                setInstructions('');
+              },
+              disabled: pending,
+              title: 'Éditer le texte ou la description de l’image',
+            })}
+            {pillButton('Retouche précise', <Pencil className="size-3.5" strokeWidth={2} />, {
+              variant: 'outline',
+              onClick: () => {
+                setEditor('retouche');
+                setInstructions('');
+              },
+              disabled: pending,
+            })}
+            {pillButton('Reimaginer', <Wand2 className="size-3.5" strokeWidth={2} />, {
+              variant: 'outline',
+              onClick: () => onVariation(item.id),
+              disabled: pending || busy === item.id,
+              title: 'Générer une variation de cette image',
+            })}
+            {pillButton('Boucle', <Repeat className="size-3.5" strokeWidth={2} />, {
+              variant: 'outline',
+              disabled: true,
+              title: 'Bientôt disponible — boucle animée',
+            })}
+            {pillButton('Supprimer', <Trash2 className="size-3.5" strokeWidth={2} />, {
+              variant: 'danger',
+              onClick: () => onDelete(item.id),
+              disabled: pending,
+            })}
+          </div>
+          {busy === item.id && (
+            <div className="mb-4 flex items-center gap-2 text-[12px] text-[#777777]">
+              <Spinner className="size-3.5" />
+              Mise en file…
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

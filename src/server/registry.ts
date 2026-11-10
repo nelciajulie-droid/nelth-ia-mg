@@ -38,6 +38,7 @@ import { routes as appsRoutes } from './routers/apps';
 import { routes as notificationsRoutes } from './routers/notifications';
 import { routes as audioRoutes } from './routers/audio';
 import { routes as imagesRoutes } from './routers/images';
+import { routes as imagineRoutes } from './routers/imagine';
 import { routes as oauthRoutes } from './routers/oauth';
 import { routes as pipelinesRoutes } from './routers/pipelines';
 import { routes as analyticsRoutes } from './routers/analytics';
@@ -56,6 +57,7 @@ export const V1_MOUNTS: Mount[] = [
   { name: 'pipelines', routes: pipelinesRoutes },
   { name: 'tasks', routes: tasksRoutes },
   { name: 'images', routes: imagesRoutes },
+  { name: 'imagine', routes: imagineRoutes }, // Nelth-IA Images studio (/api/v1/imagine/*)
   { name: 'audio', routes: audioRoutes },
   { name: 'retrieval', routes: retrievalRoutes },
   { name: 'configs', routes: configsRoutes },

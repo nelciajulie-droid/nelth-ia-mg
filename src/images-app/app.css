@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@source "./**/*.{ts,tsx}";
+@source not "../../public/**";
+@source not "../../.next/**";
+
+/* ==========================================================================
+   Nelth-IA Images — standalone white workspace (video-reference design).
+   Pure white surfaces, #EAEAEA hairlines, #171717 ink, sky-blue accent.
+   ========================================================================== */
+
+:root {
+  --images-accent: #4d9bf5;
+  --images-accent-strong: #3d8bea;
+  --images-ink: #171717;
+  --images-muted: #777777;
+  --images-faint: #9aa0a6;
+  --images-line: #eaeaea;
+  --images-chip: #f2f2f2;
+  --images-skeleton: #ececec;
+}
+
+.images-root {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Thin neutral scrollbars (galerie + panneaux). */
+.images-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--images-line) transparent;
+}
+.images-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.images-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.images-scroll::-webkit-scrollbar-thumb {
+  background: var(--images-line);
+  border-radius: 999px;
+}
+.images-scroll::-webkit-scrollbar-thumb:hover {
+  background: #dcdcdc;
+}
+
+/* Skeleton shimmer (génération en cours) — flat #ECECEC + soft pulse. */
+@keyframes images-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.images-skeleton {
+  background: var(--images-skeleton);
+  animation: images-pulse 1.6s ease-in-out infinite;
+}
+
+/* Transitions d'apparition (overlay, panneaux, toasts). */
+@keyframes images-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes images-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+.images-fade { animation: images-fade-in 0.18s ease-out; }
+.images-pop { animation: images-pop 0.22s cubic-bezier(0.2, 0.7, 0.3, 1); }
+
+/* Rétro-éclairage du bouton micro en écoute. */
+@keyframes images-mic-ping {
+  0% { box-shadow: 0 0 0 0 rgba(77, 155, 245, 0.45); }
+  70% { box-shadow: 0 0 0 10px rgba(77, 155, 245, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(77, 155, 245, 0); }
+}
+.images-mic-live {
+  animation: images-mic-ping 1.6s ease-out infinite;
+  color: var(--images-accent);
+}
