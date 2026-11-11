@@ -85,7 +85,12 @@ export function ImageStudio(props: ImageStudioProps) {
         className="images-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
       >
         {/* Bloc sticky : header + titre + composeur (se compacte au défilement) */}
-        <div className="sticky top-0 z-30 bg-[var(--images-bg-translucent)] backdrop-blur-md">
+        <div
+          className={cx(
+            'sticky top-0 z-30 bg-[var(--images-bg-translucent)] backdrop-blur-md',
+            props.scrolled && 'images-sticky-fade'
+          )}
+        >
           <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-1 sm:px-6">
             {/* Retour au fil de génération (les jobs continuent en fond). */}
             {props.hasTurns && (
@@ -172,8 +177,11 @@ export function ImageStudio(props: ImageStudioProps) {
             </motion.div>
           </div>
 
-          {/* Séparateur fluide quand compact */}
-          {props.scrolled && <div className="h-px bg-[var(--images-line)]" />}
+          {/* Fondu translucide flouté sous l'en-tête compact (remplace
+              l'ancienne ligne dure h-px — suit le thème via le jeton
+              --images-bg-translucent : blanc translucide en clair, gris
+              profond translucide en sombre). Voir .images-sticky-fade::after
+              dans app.css. */}
         </div>
 
         {/* Panneau média attaché (non sticky — défile avec le contenu) */}

@@ -168,6 +168,28 @@
   background: var(--images-scroll-thumb-hover);
 }
 
+/* Fondu translucide flouté sous l'en-tête compact du studio (remplace
+   l'ancienne ligne dure h-px). Le pseudo-élément s'étend SOUS le bloc
+   sticky (top: 100%) : le contenu qui défile en dessous traverse un voile
+   de plus en plus transparent — translucide + flou, sans coupure nette.
+   Thème : suit automatiquement --images-bg-translucent (blanc translucide
+   en clair, gris profond translucide en sombre) et le masque fait fondre
+   ensemble voile ET flou vers le bas, donc aucune arête résiduelle. */
+.images-sticky-fade::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 28px;
+  background: linear-gradient(to bottom, var(--images-bg-translucent), transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 30%, transparent);
+  mask-image: linear-gradient(to bottom, #000 30%, transparent);
+  pointer-events: none;
+}
+
 /* Skeleton shimmer (génération en cours) — flat + soft pulse. */
 @keyframes images-pulse {
   0%, 100% { opacity: 1; }
