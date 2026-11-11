@@ -13,6 +13,9 @@
  *     router schedules the worker with next/server `after()`; the UI polls
  *     /items. NO time limit: a worker heartbeat keeps live rows fresh and
  *     the reaper only fails rows whose worker died (serverless freeze).
+ *     V3/GIF : les N variations d'une action partagent UNE SEULE requête
+ *     Nelthai — le compte voyage dans le prompt (« N IMAGES ») et les
+ *     images rendues se répartissent sur les lignes (runNelthaiGroup).
  *   • Persistence — bytes through the existing files pipeline (file_id →
  *     /api/v1/files/{id}/content), metadata in the image_item table.
  */
@@ -25,6 +28,7 @@ import { hasPermission } from '@/lib/access-control';
 import { uploadFileHandler } from '@/server/routers/files';
 import {
   generateSdImage,
+  generateSdImages,
   resolveImageSources,
   type FileRefInput,
   type GeneratedImage,
@@ -573,6 +577,121 @@ async function runNelthaiImageGeneration(
   });
 }
 
+/**
+ * Directive de compte V3/GIF — la quantité demandée voyage DANS le prompt :
+ * « 3 IMAGES » pour 3 variations, « 1 IMAGE » pour une seule. Le moteur
+ * Nelthai rend alors les N images d'un SEUL job (image_urls[]) au lieu de
+ * N requêtes envoyées une à une. V2 et vidéo restent hors de ce chemin :
+ * leurs passerelles ne prennent pas la commande en prompt (fan-out par
+ * ligne inchangé).
+ */
+function nelthaiCountDirective(count: number): string {
+  return count > 1
+    ? `Generate exactly ${count} different images (${count} IMAGES).`
+    : 'Generate exactly 1 image (1 IMAGE).';
+}
+
+/** Marque une ligne en échec (miroir du catch de runOneGeneration). */
+async function failItem(item: ImagineItem, plan: GenerationPlan, err: unknown): Promise<void> {
+  const message = err instanceof Error ? err.message : 'La génération a échoué.';
+  await patchItemRow(item.id, {
+    status: 'failed',
+    meta: JSON.stringify({
+      style: plan.style ?? null,
+      phase: null,
+      kind: plan.kind ?? 'image',
+      model: plan.model ?? null,
+      resolution: plan.resolution ?? null,
+      error: message,
+    }),
+  }).catch(() => undefined);
+}
+
+/**
+ * V3/GIF — génération de GROUPE : UNE SEULE requête Nelthai pour toutes les
+ * lignes d'une même action de génération. Le compte demandé voyage dans le
+ * prompt (nelthaiCountDirective) et les images rendues par le job unique se
+ * répartissent sur les lignes (la i-ème image → i-ème ligne).
+ *
+ * Repli robuste — le pire cas égale l'ancien comportement, jamais pire :
+ *   • le moteur rend MOINS d'images que demandé → chaque ligne orpheline
+ *     retombe sur une génération individuelle (runOneGeneration) ;
+ *   • la requête de groupe échoue totalement → TOUTES les lignes retombent
+ *     sur la génération individuelle une-par-une (comportement historique).
+ *
+ * Heartbeats pour TOUTES les lignes pendant que la requête unique tourne —
+ * le reaper ne peut pas faucher un groupe vivant.
+ */
+async function runNelthaiGroup(
+  user: ApiUser,
+  entries: GenerationBatchEntry[]
+): Promise<void> {
+  const items = entries.map((entry) => entry.item);
+  const plan = entries[0].plan;
+  const isGif = (plan.kind ?? 'image') === 'gif';
+  const requested = Math.max(1, Math.min(entries[0].requested ?? items.length, 8));
+
+  const heartbeats = items.map((item) =>
+    setInterval(() => {
+      void patchItemRow(item.id, {}).catch(() => undefined);
+    }, HEARTBEAT_MS)
+  );
+
+  try {
+    // Prompt effectif : suffixe de style + hint de ratio (+ directive GIF)
+    // + directive de compte — la quantité fait partie de la demande.
+    let effectivePrompt = buildEffectivePrompt(plan, 'creative-hint');
+    if (isGif) effectivePrompt = `${effectivePrompt} ${GIF_MODE_DIRECTIVE}`.trim();
+    const directive = nelthaiCountDirective(requested);
+    effectivePrompt = `${effectivePrompt} ${directive}`.trim();
+
+    console.log(
+      `[imagine] groupe V3/GIF : 1 requête unique pour ${items.length} ligne(s) — « ${directive} »`
+    );
+
+    const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
+    const broadcastPhase = (phase: string) => {
+      for (const item of items) {
+        void setItemMeta(item.id, { phase }).catch(() => undefined);
+      }
+    };
+
+    const generated = await generateSdImages(effectivePrompt, requested, {
+      sourceImages: sources,
+      onPhase: broadcastPhase,
+    });
+
+    for (let index = 0; index < items.length; index++) {
+      const image: GeneratedImage | undefined = generated[index];
+      if (image) {
+        try {
+          await persistGeneratedMedia(user, items[index], plan, image.bytes, image.contentType, {
+            provider: 'builtin',
+            model: isGif ? 'nelth-v3-gif' : 'nelth-v3',
+          });
+        } catch (err) {
+          await failItem(items[index], plan, err);
+        }
+      } else {
+        // Ligne orpheline (le moteur a rendu moins d'images que demandé) →
+        // génération individuelle, comme avant (gère ses états/erreurs).
+        console.log(
+          `[imagine] groupe V3/GIF : ${generated.length}/${requested} image(s) rendues — ligne ${index + 1} en génération individuelle`
+        );
+        await runOneGeneration(user, items[index], plan);
+      }
+    }
+  } catch {
+    // Requête de groupe morte → repli intégral une-par-une.
+    console.warn('[imagine] groupe V3/GIF : requête unique échouée — repli individuel par ligne');
+    for (const entry of entries) {
+      await runOneGeneration(user, entry.item, entry.plan);
+    }
+  } finally {
+    for (const heartbeat of heartbeats) clearInterval(heartbeat);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Vidéo (vibes) — texte→vidéo (ratio 1:1/16:9/9:16 + résolution 480p/720p)
 // et image→vidéo (animate : le ratio suit l'image source).
@@ -652,6 +771,19 @@ async function runEngineGeneration(
 
 const HEARTBEAT_MS = 20_000;
 
+/** Une ligne mise en file + son plan + le compte demandé par l'action. */
+export interface GenerationBatchEntry {
+  item: ImagineItem;
+  plan: GenerationPlan;
+  /**
+   * Nombre d'images demandées par CETTE action de génération (V3/GIF : la
+   * quantité voyage dans le prompt — « N IMAGES » — pour UNE requête unique
+   * au lieu de N requêtes une-par-une). Absent pour édit/variations : une
+   * ligne = une image, pas de directive de compte sur ces chemins.
+   */
+  requested?: number;
+}
+
 /**
  * Generate + persist one item, ROUTED by the explicit plan:
  *
@@ -660,6 +792,10 @@ const HEARTBEAT_MS = 20_000;
  *   kind=image, model=v2  → vibes image (t2i ratio réel, i2i upload+edit)
  *   kind=image, model=v3  → nelthai (t2i, i2i multi-sources)
  *   aucun modèle          → moteur actif (legacy, comportement inchangé)
+ *
+ * Les GÉNÉRATIONS V3/GIF avec plusieurs variations passent par
+ * runNelthaiGroup (une requête unique pour toute l'action) — ce routeur
+ * individuelle ne sert que de repli (ligne orpheline, édit, variation).
  *
  * A HEARTBEAT bumps the row's updated_at every 20s while this worker runs —
  * the stale reaper can then NEVER interrupt a live generation (however
@@ -686,19 +822,7 @@ async function runOneGeneration(
       await runEngineGeneration(user, item, plan);
     }
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'La génération a échoué.';
-    await patchItemRow(item.id, {
-      status: 'failed',
-      meta: JSON.stringify({
-        style: plan.style ?? null,
-        phase: null,
-        kind: plan.kind ?? 'image',
-        model: plan.model ?? null,
-        resolution: plan.resolution ?? null,
-        error: message,
-      }),
-    }).catch(() => undefined);
+    await failItem(item, plan, err);
   } finally {
     clearInterval(heartbeat);
   }
@@ -784,19 +908,51 @@ const WORKER_CONCURRENCY = 2;
  * Background worker for a batch of queued items — scheduled by the router
  * through next/server `after()` so the POST returns immediately and the UI
  * polls the rows. Concurrency is capped to stay gentle with the gateway.
+ *
+ * V3/GIF (générations avec compte) : les lignes d'une même action partagent
+ * UN SEUL job Nelthai — le compte voyage dans le prompt (« N IMAGES »), les
+ * images rendues se répartissent sur les lignes (voir runNelthaiGroup). Les
+ * autres chemins (V2, vidéo, legacy, édit/variations) restent une requête
+ * par ligne avec la concurrence historique.
  */
 export async function runGenerationBatch(
   user: ApiUser,
-  batch: Array<{ item: ImagineItem; plan: GenerationPlan }>
+  batch: Array<{ item: ImagineItem; plan: GenerationPlan; requested?: number }>
 ): Promise<void> {
-  const queue = [...batch];
-  const runners = Array.from({ length: Math.min(WORKER_CONCURRENCY, queue.length) }, async () => {
+  // Partition : groupes V3/GIF (même plan = même action de génération) vs
+  // le reste (item par item).
+  const groups = new Map<GenerationPlan, GenerationBatchEntry[]>();
+  const singles: GenerationBatchEntry[] = [];
+  for (const entry of batch) {
+    const kind = entry.plan.kind ?? 'image';
+    const groupable =
+      kind !== 'video' &&
+      (kind === 'gif' || entry.plan.model === 'v3') &&
+      typeof entry.requested === 'number' &&
+      entry.requested >= 1;
+    if (groupable) {
+      const group = groups.get(entry.plan) ?? [];
+      group.push(entry);
+      groups.set(entry.plan, group);
+    } else {
+      singles.push(entry);
+    }
+  }
+
+  const runners: Array<Promise<void>> = [];
+  for (const group of groups.values()) {
+    runners.push(runNelthaiGroup(user, group));
+  }
+
+  const queue = [...singles];
+  const workers = Array.from({ length: Math.min(WORKER_CONCURRENCY, queue.length) }, async () => {
     for (;;) {
       const next = queue.shift();
       if (!next) return;
       await runOneGeneration(user, next.item, next.plan);
     }
   });
+  runners.push(...workers);
   await Promise.all(runners);
 }
 
@@ -892,12 +1048,18 @@ export async function queueGenerateItems(
   return items;
 }
 
-/** Build the deferred batch for queued items (router schedules with after()). */
+/** Build the deferred batch for queued items (router schedules with after()).
+ *
+ * `requested` = le nombre de lignes créées par l'action — c'est le compte
+ * effectif après les verrous serveur (queueGenerateItems ne crée que les
+ * lignes autorisées : i2i V2 et i2v → 1). Il voyage avec l'entrée pour que
+ * le worker V3/GIF construise la directive « N IMAGES » de la requête unique. */
 export function buildBatchPlan(
   items: ImagineItem[],
   input: GenerationPlan
-): Array<{ item: ImagineItem; plan: GenerationPlan }> {
-  return items.map((item) => ({ item, plan: input }));
+): GenerationBatchEntry[] {
+  const requested = items.length;
+  return items.map((item) => ({ item, plan: input, requested }));
 }
 
 export async function queueEditItem(

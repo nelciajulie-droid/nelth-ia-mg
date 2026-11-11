@@ -97,9 +97,32 @@ export async function generateSdImage(
   _size: string | null | undefined = null,
   options: GenerateImageOptions = {}
 ): Promise<GeneratedImage> {
+  const [image] = await generateSdImages(prompt, 1, options);
+  return image;
+}
+
+/**
+ * Generate up to `count` images from ONE Nelthai job → raw image bytes.
+ *
+ * The studio V3/GIF path folds the requested count INTO the prompt (the
+ * caller appends a count directive such as "3 IMAGES") so a SINGLE gateway
+ * request produces every variation at once (a job's image_urls[] can hold
+ * several URLs) instead of N back-to-back one-image requests.
+ *
+ * Same transient-failure tolerance as generateSdImage (see above): the
+ * chain retries the job, then the enriched prompt. Returns every image
+ * that could be downloaded (1..count) — possibly FEWER than requested
+ * when the engine produced fewer; callers decide how to cover the gap.
+ */
+export async function generateSdImages(
+  prompt: string,
+  count: number,
+  options: GenerateImageOptions = {}
+): Promise<GeneratedImage[]> {
   if (!prompt || !prompt.trim()) {
     throw new Error('Prompt is required for image generation');
   }
+  const wanted = Math.max(1, Math.min(Math.round(count) || 1, 8));
 
   const sources = (options.sourceImages ?? []).filter((s) =>
     s && ((s.kind === 'url' && /^https?:\/\//i.test(s.url)) || (s.kind === 'bytes' && s.bytes?.length))
@@ -128,14 +151,18 @@ export async function generateSdImage(
 
       // The CDN URLs are short-lived — a download blip retries the whole job
       // (regenerating is ~20s, far better than surfacing a download error).
+      // Take the first `wanted` downloadable images; extra URLs are ignored.
+      const images: GeneratedImage[] = [];
       let lastErr: unknown = new Error('The image service produced no downloadable image');
       for (const url of urls) {
+        if (images.length >= wanted) break;
         try {
-          return await downloadNelthaiImage(url);
+          images.push(await downloadNelthaiImage(url));
         } catch (e) {
           lastErr = e;
         }
       }
+      if (images.length) return images;
       lastFailure = lastErr;
     } catch (e) {
       lastFailure = e;
