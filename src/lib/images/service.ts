@@ -16,9 +16,12 @@
  *     V3/GIF : les N variations d'une action partagent UNE SEULE requête
  *     Nelthai — le compte voyage dans le prompt (« N IMAGES ») et les
  *     images rendues se répartissent sur les lignes (runNelthaiGroup).
+ *     V3/GIF reste STRICTEMENT en envoi de groupe : moins d'images rendues
+ *     ou échec du job unique → les lignes échouent, jamais de repli
+ *     une-par-une (règle utilisateur).
  *     V2 t2i et vidéo t2v : idem via le paramètre NATIF « variations » de
  *     la passerelle vibes — une seule action pour toute la génération
- *     (runVibesImageGroup / runVideoGroup), plus d'envoi une-par-une.
+ *     (runVibesImageGroup / runVideoGroup).
  *   • Persistence — bytes through the existing files pipeline (file_id →
  *     /api/v1/files/{id}/content), metadata in the image_item table.
  */
@@ -710,11 +713,14 @@ async function failItem(item: ImagineItem, plan: GenerationPlan, err: unknown): 
  * prompt (nelthaiCountDirective) et les images rendues par le job unique se
  * répartissent sur les lignes (la i-ème image → i-ème ligne).
  *
- * Repli robuste — le pire cas égale l'ancien comportement, jamais pire :
- *   • le moteur rend MOINS d'images que demandé → chaque ligne orpheline
- *     retombe sur une génération individuelle (runOneGeneration) ;
- *   • la requête de groupe échoue totalement → TOUTES les lignes retombent
- *     sur la génération individuelle une-par-une (comportement historique).
+ * Règle utilisateur — V3/GIF = TOUJOURS l'envoi de groupe, JAMAIS de repli
+ * une-par-une (plus aucun runOneGeneration ici) :
+ *   • le moteur rend MOINS d'images que demandé → les lignes orphelines sont
+ *     marquées en échec (failItem) — l'utilisateur relance l'action entière ;
+ *   • la requête de groupe échoue → TOUTES les lignes sont marquées en échec
+ *     avec l'erreur du groupe — aucune relance individuelle.
+ * (V2 t2i et vidéo t2v gardent leur repli : leur passerelle vibes expose un
+ * paramètre NATIF « variations », pas un compte dans le prompt.)
  *
  * Heartbeats pour TOUTES les lignes pendant que la requête unique tourne —
  * le reaper ne peut pas faucher un groupe vivant.
@@ -771,18 +777,26 @@ async function runNelthaiGroup(
         }
       } else {
         // Ligne orpheline (le moteur a rendu moins d'images que demandé) →
-        // génération individuelle, comme avant (gère ses états/erreurs).
+        // échec affiché, JAMAIS de génération individuelle : V3/GIF reste
+        // strictement en envoi de groupe (règle utilisateur).
         console.log(
-          `[imagine] groupe V3/GIF : ${generated.length}/${requested} image(s) rendues — ligne ${index + 1} en génération individuelle`
+          `[imagine] groupe V3/GIF : ${generated.length}/${requested} image(s) rendues — ligne ${index + 1} marquée en échec (pas de repli individuel)`
         );
-        await runOneGeneration(user, items[index], plan);
+        await failItem(
+          items[index],
+          plan,
+          new Error(
+            `La génération de groupe n'a livré que ${generated.length}/${requested} image(s) — relancez l'action pour retenter l'envoi de groupe.`
+          )
+        );
       }
     }
-  } catch {
-    // Requête de groupe morte → repli intégral une-par-une.
-    console.warn('[imagine] groupe V3/GIF : requête unique échouée — repli individuel par ligne');
+  } catch (err) {
+    // Requête de groupe morte → TOUTES les lignes échouent avec l'erreur.
+    // Aucun repli une-par-une : V3/GIF est TOUJOURS en envoi de groupe.
+    console.warn('[imagine] groupe V3/GIF : requête unique échouée — lignes marquées en échec, pas de repli individuel');
     for (const entry of entries) {
-      await runOneGeneration(user, entry.item, entry.plan);
+      await failItem(entry.item, entry.plan, err);
     }
   } finally {
     for (const heartbeat of heartbeats) clearInterval(heartbeat);
