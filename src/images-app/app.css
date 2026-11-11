@@ -176,14 +176,16 @@
 
    Subtilités :
    - overflow-x: auto ⇒ overflow-y se calcule en « auto/hidden » : la
-     boîte CLIPPE verticalement ses descendants positionnés. Or les
-     pop-overs des chips (variations/format) s'ouvrent vers le HAUT
-     (bottom-full, ~150 px) et le badge « new » de Nelth-V3 déborde de
-     9 px au-dessus du segment — ils seraient coupés.
+     boîte CLIPPE verticalement ses descendants positionnés. Or le badge
+     « new » de Nelth-V3 déborde de 9 px au-dessus du segment — il serait
+     coupé. (Les pop-overs variations/format ne sont plus concernés : ils
+     sont rendus au niveau du <body> en position fixe — voir PopoverShell
+     dans composer.tsx — après que le menu Format s'est fait rogner au
+     bord droit de cette boîte de défilement.)
    - padding-top: 170px + margin-top: -170px : la boîte de clip est la
      PADDING-box — en l'étirant au-dessus de la barre (sans décaler le
-     layout, la marge négative compense exactement), pop-overs et badge
-     restent intégralement visibles malgré le clip.
+     layout, la marge négative compense exactement), le badge « new »
+     reste intégralement visible malgré le clip.
    - pointer-events: none (rétabli sur les enfants) : la zone de padding
      est invisible et transparente aux clics — la zone de saisie et le
      reste du composeur restent cliquables en dessous.

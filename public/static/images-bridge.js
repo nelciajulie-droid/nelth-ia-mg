@@ -50,7 +50,11 @@
   // 20261112a2 — barre d'outils UNE SEULE LIGNE : plus jamais de
   // deuxième ligne pour micro/envoyer (flex-nowrap, ml-auto, shrink-0) ;
   // chips défilantes horizontalement sur écran étroit.
-  const BUILD = '20261112a2';
+  // 20261112a3 — pop-overs variations/format rendus en PORTAL à la racine
+  // de l'overlay (position fixe, ancrés au bouton) : le menu Format
+  // n'est plus jamais rogné au bord droit de la zone défilante des
+  // chips (fenêtre tronquée 1:1|4:3|9:16 + zone de défilement fantôme).
+  const BUILD = '20261112a3';
   const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
   const CSS_URL = '/static/images/app.css?v=' + BUILD;
 

@@ -14,11 +14,17 @@
  * manque ; micro et « Générer » restent ancrés à droite (ml-auto, shrink-0).
  * Jamais de retour à la ligne pour les deux boutons d'action.
  *
+ * Pop-overs en PORTAL vers <body> (position fixe) : la zone des chips est
+ * défilante (overflow-x) et clippait le menu Format à son bord droit — la
+ * fenêtre 1:1|4:3|9:16 apparaissait tronquée. Rendus au niveau du body et
+ * ancrés au bouton par calcul, ils ne sont plus jamais coupés.
+ *
  * L'ancien segment « Vitesse | Qualité 2.0 » a disparu : chaque catégorie
  * apporte SES contrôles.
  */
 
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowUp, ChevronDown, Clapperboard, Film, Image as ImageIcon, Mic, Plus } from 'lucide-react';
 import { cx } from './ui';
 
@@ -91,29 +97,98 @@ function RatioGlyph({ ratio, className }: { ratio: string; className?: string })
   );
 }
 
-/** Petits pop-overs discrets (même patron que le sélecteur de ratio). */
+/** Petits pop-overs discrets — rendus au niveau de l'OVERLAY via un PORTAL.
+ *
+ * La zone centrale des chips est défilante (overflow-x) : elle clippait le
+ * pop-over « absolute » à son bord droit (le menu Format tronqué, colonnes
+ * 3:2/2:3 invisibles) ET gonflait sa zone de défilement fantôme. En position
+ * fixe rendu à la racine de l'overlay (#nelth-images-overlay — le CSS du
+ * bundle y est scopé, les utilitaires continuent de s'appliquer ; aucun
+ * ancêtre transformé, la position fixe est donc rapportée au viewport), le
+ * pop-over, ancré au bouton par getBoundingClientRect :
+ * - est aligné au bord gauche du bouton par défaut ;
+ * - basculé au bord droit du bouton s'il déborde de la fenêtre ;
+ * - borné à 8 px des bords du viewport — jamais coupé ;
+ * - au-dessus du bouton (8 px), sous le bouton si la place manque en haut ;
+ * - se repositionne au défilement / redimensionnement (suit son ancre).
+ * Visuel inchangé : mêmes jetons, rayons, ombre et animation d'entrée. */
 function PopoverShell({
   open,
   onClose,
   children,
   width,
+  anchorRef,
 }: {
   open: boolean;
   onClose(): void;
   children: React.ReactNode;
   width: string;
+  /** Ancre = l'enveloppe .relative du bouton déclencheur. */
+  anchorRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  if (!open) return null;
-  return (
+  const popRef = React.useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = React.useState<{ left: number; top: number } | null>(null);
+
+  React.useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const anchor = anchorRef.current;
+    const pop = popRef.current;
+    if (!anchor || !pop) return;
+
+    const place = () => {
+      const rect = anchor.getBoundingClientRect();
+      const margin = 8;
+      const vw = window.innerWidth;
+      let left = rect.left;
+      if (left + pop.offsetWidth > vw - margin) left = rect.right - pop.offsetWidth;
+      left = Math.max(margin, Math.min(left, vw - margin - pop.offsetWidth));
+      let top = rect.top - pop.offsetHeight - 8;
+      if (top < margin) top = Math.min(rect.bottom + 8, Math.max(margin, window.innerHeight - margin - pop.offsetHeight));
+      setPos((prev) =>
+        prev && Math.abs(prev.left - left) < 0.5 && Math.abs(prev.top - top) < 0.5 ? prev : { left, top },
+      );
+    };
+
+    place();
+    const onMove = () => place();
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    return () => {
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('resize', onMove);
+    };
+  }, [open, anchorRef]);
+
+  if (!open || typeof document === 'undefined') return null;
+
+  // Cible du portal : la racine de l'overlay — le CSS du bundle y est scopé
+  // (voir scripts/build-images.ts : les utilitaires Tailwind matchent
+  // uniquement #nelth-images-overlay …). document.body en dernier recours
+  // (overlay absent : les utilitaires ne s'appliqueraient plus).
+  const host = document.getElementById('nelth-images-overlay') ?? document.body;
+
+  return createPortal(
     <>
+      {/* Rideau de fermeture — lui aussi en position fixe : superposition
+          cohérente avec le pop-over où qu'il s'ouvre dans la fenêtre. */}
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="images-pop absolute bottom-full left-0 z-50 mb-2 rounded-[14px] border border-[var(--images-line)] bg-[var(--images-surface)] p-2 shadow-[var(--images-shadow-pop)]"
-        style={{ width }}
+        ref={popRef}
+        className="images-pop fixed z-50 whitespace-nowrap rounded-[14px] border border-[var(--images-line)] bg-[var(--images-surface)] p-2 shadow-[var(--images-shadow-pop)]"
+        style={{
+          width,
+          left: pos ? `${pos.left}px` : 0,
+          top: pos ? `${pos.top}px` : 0,
+          visibility: pos ? 'visible' : 'hidden',
+        }}
       >
         {children}
       </div>
-    </>
+    </>,
+    host,
   );
 }
 
@@ -290,6 +365,7 @@ function VariationsPicker({
   onChange(value: number): void;
 }) {
   const [open, setOpen] = React.useState(false);
+  const anchorRef = React.useRef<HTMLDivElement | null>(null);
 
   if (locked) {
     return (
@@ -304,7 +380,7 @@ function VariationsPicker({
   }
 
   return (
-    <div className="relative shrink-0 whitespace-nowrap">
+    <div ref={anchorRef} className="relative shrink-0 whitespace-nowrap">
       <button
         type="button"
         className="flex items-center gap-1 rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
@@ -318,7 +394,7 @@ function VariationsPicker({
         {value}×
         <ChevronDown className="size-3 text-[var(--images-muted)]" strokeWidth={2} />
       </button>
-      <PopoverShell open={open} onClose={() => setOpen(false)} width="164px">
+      <PopoverShell open={open} onClose={() => setOpen(false)} width="164px" anchorRef={anchorRef}>
         <div role="listbox" aria-label="Variations" className="grid grid-cols-4 gap-1">
           {[1, 2, 3, 4].map((count) => (
             <button
@@ -365,6 +441,7 @@ function RatioPicker({
   onChange(value: string): void;
 }) {
   const [open, setOpen] = React.useState(false);
+  const anchorRef = React.useRef<HTMLDivElement | null>(null);
 
   if (disabled && auto) {
     return (
@@ -388,7 +465,7 @@ function RatioPicker({
     );
   }
   return (
-    <div className="relative shrink-0 whitespace-nowrap">
+    <div ref={anchorRef} className="relative shrink-0 whitespace-nowrap">
       <button
         type="button"
         className="flex items-center gap-1 rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
@@ -401,7 +478,7 @@ function RatioPicker({
         {ratio}
         <ChevronDown className="size-3 text-[var(--images-muted)]" strokeWidth={2} />
       </button>
-      <PopoverShell open={open} onClose={() => setOpen(false)} width="188px">
+      <PopoverShell open={open} onClose={() => setOpen(false)} width="188px" anchorRef={anchorRef}>
         <div role="listbox" className="grid grid-cols-3 gap-1">
           {ratios.map((r) => (
             <button
