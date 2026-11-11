@@ -9,6 +9,11 @@
  * format suit l'image de référence) + micro + bouton circulaire bleu ↑.
  * Compacté en pilule mono-ligne quand on défile.
  *
+ * Barre d'outils UNE SEULE LIGNE (flex-nowrap) : + | chips | micro | envoyer.
+ * Les chips défilent horizontalement (.images-chips-scroll) quand la place
+ * manque ; micro et « Générer » restent ancrés à droite (ml-auto, shrink-0).
+ * Jamais de retour à la ligne pour les deux boutons d'action.
+ *
  * L'ancien segment « Vitesse | Qualité 2.0 » a disparu : chaque catégorie
  * apporte SES contrôles.
  */
@@ -138,7 +143,7 @@ function CategorySegment({
 }) {
   const options: ComposerCategory[] = ['image', 'video', 'gif'];
   return (
-    <div className="flex items-center gap-1 rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Type de média">
+    <div className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Type de média">
       {options.map((option) => (
         <button
           key={option}
@@ -154,7 +159,7 @@ function CategorySegment({
                 : 'Générer des GIF animés (Nelth-V3)'
           }
           className={cx(
-            'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[13px] transition-all',
+            'flex items-center gap-1 rounded-full px-2 py-1 text-[13px] transition-all',
             category === option
               ? 'border border-[var(--images-line)] bg-[var(--images-pill)] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]'
               : 'font-medium text-[var(--images-muted)] hover:text-[var(--images-ink)]'
@@ -180,7 +185,7 @@ function ImageModelSegment({
   onChange(model: ImageModel): void;
 }) {
   return (
-    <div className="flex items-center gap-1 rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Modèle d'image">
+    <div className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Modèle d'image">
       <button
         type="button"
         role="radio"
@@ -188,7 +193,7 @@ function ImageModelSegment({
         onClick={() => onChange('v2')}
         title="Nelth-V2 — édition d'image fidèle et rapide"
         className={cx(
-          'rounded-full px-3 py-1 text-[13px] transition-all',
+          'rounded-full px-2.5 py-1 text-[13px] transition-all',
           model === 'v2'
             ? 'border border-[var(--images-line)] bg-[var(--images-pill)] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]'
             : 'font-medium text-[var(--images-muted)] hover:text-[var(--images-ink)]'
@@ -203,7 +208,7 @@ function ImageModelSegment({
         onClick={() => onChange('v3')}
         title="Nelth-V3 — nouveau modèle, jusqu’à 4 variations"
         className={cx(
-          'relative rounded-full px-3 py-1 text-[13px] transition-all',
+          'relative rounded-full px-2.5 py-1 text-[13px] transition-all',
           model === 'v3'
             ? 'border border-[var(--images-line)] bg-[var(--images-pill)] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]'
             : 'font-medium text-[var(--images-muted)] hover:text-[var(--images-ink)]'
@@ -234,7 +239,7 @@ function ResolutionSegment({
   onChange(resolution: VideoResolution): void;
 }) {
   return (
-    <div className="flex items-center gap-1 rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Résolution vidéo">
+    <div className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--images-chip-soft)] p-[3px]" role="radiogroup" aria-label="Résolution vidéo">
       {(['480p', '720p'] as VideoResolution[]).map((option) => (
         <button
           key={option}
@@ -244,7 +249,7 @@ function ResolutionSegment({
           onClick={() => onChange(option)}
           title={option === '480p' ? 'Résolution standard (plus rapide)' : 'Résolution HD 720p (plus lente)'}
           className={cx(
-            'rounded-full px-3 py-1 text-[13px] transition-all',
+            'rounded-full px-2.5 py-1 text-[13px] transition-all',
             resolution === option
               ? 'border border-[var(--images-line)] bg-[var(--images-pill)] font-medium text-[var(--images-ink)] shadow-[var(--images-shadow-btn)]'
               : 'font-medium text-[var(--images-muted)] hover:text-[var(--images-ink)]'
@@ -289,7 +294,7 @@ function VariationsPicker({
   if (locked) {
     return (
       <span
-        className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]"
+        className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]"
         title={lockHint ?? 'Une seule variation dans ce mode'}
       >
         <VariationsGlyph className="text-[var(--images-disabled)] opacity-60" />
@@ -299,10 +304,10 @@ function VariationsPicker({
   }
 
   return (
-    <div className="relative">
+    <div className="relative shrink-0 whitespace-nowrap">
       <button
         type="button"
-        className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
+        className="flex items-center gap-1 rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -364,7 +369,7 @@ function RatioPicker({
   if (disabled && auto) {
     return (
       <span
-        className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]"
+        className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]"
         title="Par défaut — suit le format de l’image de référence"
       >
         <svg viewBox="0 0 24 24" className="size-[15px] opacity-60" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -376,17 +381,17 @@ function RatioPicker({
   }
   if (disabled) {
     return (
-      <span className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]" title="Format non contrôlable par le moteur actif">
+      <span className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-disabled)]" title="Format non contrôlable par le moteur actif">
         <RatioGlyph ratio={ratio} className="opacity-40" />
         {ratio}
       </span>
     );
   }
   return (
-    <div className="relative">
+    <div className="relative shrink-0 whitespace-nowrap">
       <button
         type="button"
-        className="flex items-center gap-1.5 rounded-full border border-[var(--images-line)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
+        className="flex items-center gap-1 rounded-full border border-[var(--images-line)] px-2 py-1.5 text-[13px] font-medium text-[var(--images-ink)] transition-colors hover:bg-[var(--images-hover)]"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -477,7 +482,7 @@ function MicButton({ onTranscript }: { onTranscript(text: string): void }) {
       type="button"
       onClick={toggle}
       className={cx(
-        'flex size-9 items-center justify-center rounded-full text-[var(--images-ink)] transition-colors hover:bg-[var(--images-chip)]',
+        'flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--images-ink)] transition-colors hover:bg-[var(--images-chip)]',
         listening && 'images-mic-live'
       )}
       title={listening ? 'Arrêter la dictée' : 'Dicter le prompt'}
@@ -594,10 +599,12 @@ export function Composer(props: ComposerProps) {
         )}
       </div>
 
-      {/* Barre d'outils compacte (toujours visible) — les chips passent à la
-          ligne sur écran étroit (flex-wrap) : Image|Vidéo|GIF + V2|V3 + 2× +
-          2:3 tiennent ensemble sur desktop, s'empilent proprement sur mobile. */}
-      <div className="flex flex-wrap items-center gap-1.5 px-2.5 pb-2.5 pt-2">
+      {/* Barre d'outils compacte (toujours visible) — UNE SEULE LIGNE :
+          + | chips | micro | envoyer (flex + align-items:center, sans
+          flex-wrap). Les chips défilent horizontalement sur écran étroit
+          (.images-chips-scroll) ; micro + « Générer » restent ancrés à
+          droite (ml-auto, flex-shrink: 0) — jamais de deuxième ligne. */}
+      <div className="relative flex items-center gap-1 px-2.5 pb-2.5 pt-2">
         {/* + — attache la bibliothèque de médias sous le composeur */}
         <button
           type="button"
@@ -631,9 +638,12 @@ export function Composer(props: ComposerProps) {
           />
         )}
 
-        {/* Chips (mode étendu) */}
+        {/* Chips (mode étendu) — zone centrale défilante : la rangée entière
+            (catégorie, segment, variations, format) reste sur LA ligne de la
+            barre d'outils ; sur écran étroit elle défile horizontalement
+            (overflow-x-auto) au lieu de passer à la ligne. */}
         {!compact && (
-          <>
+          <div className="images-chips-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
             {/* Catégorie de média — Image | Vidéo | GIF */}
             <CategorySegment category={category} onChange={onCategoryChange} />
 
@@ -662,38 +672,49 @@ export function Composer(props: ComposerProps) {
               auto={ratioAuto}
               onChange={onRatioChange}
             />
-
-            <div className="min-w-2 flex-1" />
-          </>
+          </div>
         )}
 
-        {compact && <div className="flex-1" />}
+        {/* Fondu droit de la zone défilante — les chips s'effacent dans le
+            fond de la carte juste avant les boutons d'action : coupure
+            invisible quand tout tient, transition douce quand ça défile.
+            (Peint la couleur de surface : invisible sur fond de carte.) */}
+        {!compact && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 right-20 w-5 bg-gradient-to-l from-[var(--images-surface)] to-transparent"
+          />
+        )}
 
-        <MicButton onTranscript={(text) => onPromptChange(prompt ? `${prompt} ${text}`.trim() : text)} />
+        {/* Micro + Générer — ancrés à droite de LA ligne (margin-left:auto,
+            flex-shrink: 0) : jamais de retour à la ligne, jamais d'écrasement. */}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <MicButton onTranscript={(text) => onPromptChange(prompt ? `${prompt} ${text}`.trim() : text)} />
 
-        {/* Générer — bouton circulaire bleu ↑ (référence vidéo) */}
-        <button
-          type="button"
-          onClick={submit}
-          disabled={disabled || generating || !prompt.trim()}
-          className={cx(
-            'flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--images-on-accent)] transition-all',
-            disabled || generating || !prompt.trim()
-              ? 'cursor-default bg-[var(--images-accent-soft)] text-[var(--images-on-accent)]'
-              : 'bg-[var(--images-accent)] hover:bg-[var(--images-accent-strong)] active:scale-95'
-          )}
-          title="Générer"
-          aria-label="Générer"
-        >
-          {generating ? (
-            <svg className="size-[18px] animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.35" strokeWidth="2.5" />
-              <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-            </svg>
-          ) : (
-            <ArrowUp className="size-[18px]" strokeWidth="2.4" />
-          )}
-        </button>
+          {/* Générer — bouton circulaire bleu ↑ (référence vidéo) */}
+          <button
+            type="button"
+            onClick={submit}
+            disabled={disabled || generating || !prompt.trim()}
+            className={cx(
+              'flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--images-on-accent)] transition-all',
+              disabled || generating || !prompt.trim()
+                ? 'cursor-default bg-[var(--images-accent-soft)] text-[var(--images-on-accent)]'
+                : 'bg-[var(--images-accent)] hover:bg-[var(--images-accent-strong)] active:scale-95'
+            )}
+            title="Générer"
+            aria-label="Générer"
+          >
+            {generating ? (
+              <svg className="size-[18px] animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.35" strokeWidth="2.5" />
+                <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <ArrowUp className="size-[18px]" strokeWidth="2.4" />
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

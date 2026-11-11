@@ -168,6 +168,44 @@
   background: var(--images-scroll-thumb-hover);
 }
 
+/* Barre d'outils du composeur — zone centrale des chips, défilante.
+   UNE SEULE LIGNE, toujours : quand la place manque, les chips
+   (catégorie, modèle/résolution, variations, format) défilent
+   horizontalement au lieu de passer à la ligne ; micro et « Générer »
+   restent ancrés à droite par le composeur (ml-auto, flex-shrink: 0).
+
+   Subtilités :
+   - overflow-x: auto ⇒ overflow-y se calcule en « auto/hidden » : la
+     boîte CLIPPE verticalement ses descendants positionnés. Or les
+     pop-overs des chips (variations/format) s'ouvrent vers le HAUT
+     (bottom-full, ~150 px) et le badge « new » de Nelth-V3 déborde de
+     9 px au-dessus du segment — ils seraient coupés.
+   - padding-top: 170px + margin-top: -170px : la boîte de clip est la
+     PADDING-box — en l'étirant au-dessus de la barre (sans décaler le
+     layout, la marge négative compense exactement), pop-overs et badge
+     restent intégralement visibles malgré le clip.
+   - pointer-events: none (rétabli sur les enfants) : la zone de padding
+     est invisible et transparente aux clics — la zone de saisie et le
+     reste du composeur restent cliquables en dessous.
+   - Barre de défilement masquée : défilement naturel tactile/trackpad,
+     overscroll-x contenu pour ne pas entraîner le fil en dessous. */
+.images-chips-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-top: 170px;
+  margin-top: -170px;
+  pointer-events: none;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.images-chips-scroll > * {
+  pointer-events: auto;
+}
+.images-chips-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 /* Fondu translucide flouté sous l'en-tête compact du studio (remplace
    l'ancienne ligne dure h-px). Le pseudo-élément s'étend SOUS le bloc
    sticky (top: 100%) : le contenu qui défile en dessous traverse un voile

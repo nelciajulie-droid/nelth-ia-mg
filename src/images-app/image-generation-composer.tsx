@@ -89,7 +89,7 @@ export function ImageGenerationComposer(props: ImageGenerationComposerProps) {
       {/* Bibliothèque média attachée (popover au-dessus du composeur). */}
       {props.panelOpen && (
         <div className="images-pop absolute inset-x-4 bottom-full z-40 mb-3 sm:inset-x-6">
-          <div className="mx-auto w-full max-w-[640px]">
+          <div className="mx-auto w-full max-w-[680px]">
             <MediaPanel
               items={props.items}
               tab={props.panelTab}
@@ -110,7 +110,7 @@ export function ImageGenerationComposer(props: ImageGenerationComposerProps) {
         layoutId="images-composer"
         data-composer-glide="dock"
         transition={COMPOSER_TRANSITION}
-        className="mx-auto w-full max-w-[640px]"
+        className="mx-auto w-full max-w-[680px]"
       >
         <Composer
           prompt={props.prompt}

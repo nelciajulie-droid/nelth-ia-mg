@@ -165,7 +165,7 @@ export function ImageStudio(props: ImageStudioProps) {
               layoutId="images-composer"
         data-composer-glide="studio"
               transition={COMPOSER_TRANSITION}
-              className="mx-auto w-full max-w-[640px]"
+              className="mx-auto w-full max-w-[680px]"
             >
               <Composer
                 prompt={props.prompt}
@@ -207,7 +207,7 @@ export function ImageStudio(props: ImageStudioProps) {
         {/* Panneau média attaché (non sticky — défile avec le contenu) */}
         {props.panelOpen && (
           <div className="px-4 sm:px-6">
-            <div className="mx-auto w-full max-w-[640px]">
+            <div className="mx-auto w-full max-w-[680px]">
               <MediaPanel
                 items={props.items}
                 tab={props.panelTab}
