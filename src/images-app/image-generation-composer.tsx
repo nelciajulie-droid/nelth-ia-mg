@@ -18,7 +18,7 @@
 
 import * as React from 'react';
 import { motion } from 'framer-motion';
-import { Composer, type ComposerMode } from './composer';
+import { Composer, type ComposerCategory, type ImageModel, type VideoResolution } from './composer';
 import { MediaPanel, type PanelTab } from './mediapanel';
 import type { ImagineItem } from '../lib/images/types';
 
@@ -33,8 +33,17 @@ export interface ImageGenerationComposerProps {
   onRatioChange(value: string): void;
   ratios: string[];
   ratioDisabled: boolean;
-  mode: ComposerMode;
-  onModeChange(mode: ComposerMode): void;
+  ratioAuto: boolean;
+  category: ComposerCategory;
+  onCategoryChange(category: ComposerCategory): void;
+  imageModel: ImageModel;
+  onImageModelChange(model: ImageModel): void;
+  resolution: VideoResolution;
+  onResolutionChange(resolution: VideoResolution): void;
+  variations: number;
+  onVariationsChange(value: number): void;
+  variationsLocked: boolean;
+  variationsLockHint?: string;
   generating: boolean;
   disabled: boolean;
   onGenerate(): void;
@@ -110,8 +119,17 @@ export function ImageGenerationComposer(props: ImageGenerationComposerProps) {
           onRatioChange={props.onRatioChange}
           ratios={props.ratios}
           ratioDisabled={props.ratioDisabled}
-          mode={props.mode}
-          onModeChange={props.onModeChange}
+          ratioAuto={props.ratioAuto}
+          category={props.category}
+          onCategoryChange={props.onCategoryChange}
+          imageModel={props.imageModel}
+          onImageModelChange={props.onImageModelChange}
+          resolution={props.resolution}
+          onResolutionChange={props.onResolutionChange}
+          variations={props.variations}
+          onVariationsChange={props.onVariationsChange}
+          variationsLocked={props.variationsLocked}
+          variationsLockHint={props.variationsLockHint}
           compact={false}
           generating={props.generating}
           disabled={props.disabled}

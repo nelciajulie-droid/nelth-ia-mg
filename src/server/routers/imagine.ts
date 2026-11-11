@@ -92,6 +92,9 @@ export const routes: Route[] = [
         style?: string;
         n?: number;
         sourceImages?: FileRef[];
+        kind?: 'image' | 'video' | 'gif';
+        model?: 'v2' | 'v3';
+        resolution?: '480p' | '720p';
       }>();
       const prompt = typeof form?.prompt === 'string' ? form.prompt.trim() : '';
       if (!prompt) err(422, 'Field required (prompt)');
@@ -103,6 +106,15 @@ export const routes: Route[] = [
           ? form.aspectRatio
           : undefined;
 
+      // Nouveaux contrôles du composeur : catégorie de média (image/vidéo/
+      // GIF), modèle (Nelth-V2 vibes / Nelth-V3 nelthai), résolution vidéo.
+      const kind: 'image' | 'video' | 'gif' =
+        form?.kind === 'video' || form?.kind === 'gif' ? form.kind : 'image';
+      const model: 'v2' | 'v3' | undefined =
+        form?.model === 'v2' || form?.model === 'v3' ? form.model : undefined;
+      const resolution: '480p' | '720p' | undefined =
+        form?.resolution === '480p' || form?.resolution === '720p' ? form.resolution : undefined;
+
       let plan;
       try {
         plan = {
@@ -110,6 +122,10 @@ export const routes: Route[] = [
           style: typeof form?.style === 'string' ? form.style : undefined,
           aspectRatio,
           sourceImages: Array.isArray(form?.sourceImages) ? form.sourceImages : [],
+          kind,
+          // Le GIF n'existe qu'en V3 — le modèle est implicite et forcé.
+          model: kind === 'gif' ? 'v3' : model,
+          resolution: kind === 'video' ? resolution : undefined,
         };
         const items = await service.queueGenerateItems(ctx.user!, {
           ...plan,

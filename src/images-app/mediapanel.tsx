@@ -9,7 +9,7 @@
 
 import * as React from 'react';
 import { Image as ImageIcon, Maximize2, Pencil, Sparkles, Upload } from 'lucide-react';
-import { AuthImg, cx, phaseLabel } from './ui';
+import { AuthImg, AuthVideo, cx, isVideoItem, phaseLabel } from './ui';
 import type { ImagineItem } from '../lib/images/types';
 
 export type PanelTab = 'generations' | 'imports';
@@ -101,13 +101,23 @@ function GridCard({
         type="button"
         onClick={canAttach ? onPick : onOpen}
         className="block w-full"
-        aria-label={item.name ?? item.prompt ?? 'Image'}
+        aria-label={item.name ?? item.prompt ?? (isVideoItem(item) ? 'Vidéo' : 'Image')}
       >
-        <AuthImg
-          path={item.url}
-          alt={item.name ?? item.prompt ?? 'Image'}
-          className="aspect-square h-full w-full object-cover"
-        />
+        {isVideoItem(item) ? (
+          <AuthVideo
+            path={item.url}
+            alt={item.name ?? item.prompt ?? 'Vidéo'}
+            controls={false}
+            autoPlay
+            className="aspect-square h-full w-full object-cover"
+          />
+        ) : (
+          <AuthImg
+            path={item.url}
+            alt={item.name ?? item.prompt ?? 'Image'}
+            className="aspect-square h-full w-full object-cover"
+          />
+        )}
       </button>
       <button
         type="button"

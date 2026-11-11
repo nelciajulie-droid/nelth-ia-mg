@@ -44,7 +44,10 @@
   // défilement désactivée (.images-scroll) + hystérésis du compactage.
   // 20261111a2 — ligne de séparation remplacée par un fondu translucide
   // flouté sous l'en-tête compact (suit le thème clair/sombre).
-  const BUILD = '20261111a2';
+  // 20261112a1 — composeur V2 : catégorie Image|Vidéo|GIF, segment
+  // Nelth-V2|Nelth-V3 (badge NEW bleu), 480p|720p, variations 1-4,
+  // ratio Auto (image→image V2 / image→vidéo) + rendu vidéo des items.
+  const BUILD = '20261112a1';
   const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
   const CSS_URL = '/static/images/app.css?v=' + BUILD;
 

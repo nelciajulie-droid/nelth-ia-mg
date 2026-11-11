@@ -19,7 +19,7 @@
 import * as React from 'react';
 import { AiImageCard } from '../components/app/AiImageCard';
 import { authImageUrl, peekImage } from './api';
-import { phaseLabel } from './ui';
+import { isVideoItem, phaseLabel } from './ui';
 import type { ImagineItem } from '../lib/images/types';
 
 /**
@@ -84,14 +84,16 @@ export function ImageGenerationCard({ item, placeholderRatio }: ImageGenerationC
   const src = useAuthedSrc(url);
   const pending = !item || item.status === 'generating' || item.status === 'processing';
   const label = item ? phaseLabel(item.phase) : 'Envoi…';
+  const isVideo = isVideoItem(item);
 
   return (
     <AiImageCard
       generateDuration={9999}
       imageDone={!pending && Boolean(src)}
       imageSrc={src ?? undefined}
-      imageAlt={item?.name ?? item?.prompt ?? 'Image générée'}
+      imageAlt={item?.name ?? item?.prompt ?? (isVideo ? 'Vidéo générée' : 'Image générée')}
       label={label}
+      video={isVideo}
       className={aspectClassFor(item?.aspect_ratio ?? placeholderRatio)}
     />
   );

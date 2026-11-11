@@ -21,6 +21,8 @@ import { ImageGenerationWorkspace, type GenerationTurn } from './image-generatio
 import { DetailOverlay } from './detail';
 import { DrawOverlay } from './draw';
 import * as api from './api';
+import { isVideoItem, isGifItem, downloadExt } from './ui';
+import type { ComposerCategory, ImageModel, VideoResolution } from './composer';
 import type { ImagineCapabilities, ImagineItem } from '../lib/images/types';
 import type { GalleryEntry } from '../lib/images/gallery';
 
@@ -46,7 +48,13 @@ export function ImagesApp() {
   // ---- État composeur (racine — préservé à travers les vues) ----
   const [prompt, setPrompt] = React.useState('');
   const [ratio, setRatio] = React.useState('2:3');
-  const [mode, setMode] = React.useState<'vitesse' | 'qualite'>('qualite');
+  // Catégorie de média (Image | Vidéo | GIF) + contrôles contextuels :
+  // l'ancien segment Vitesse|Qualité 2.0 est remplacé par segment
+  // Nelth-V2|Nelth-V3 (image), 480p|720p (vidéo), rien (GIF — V3 only).
+  const [category, setCategory] = React.useState<ComposerCategory>('image');
+  const [imageModel, setImageModel] = React.useState<ImageModel>('v3');
+  const [resolution, setResolution] = React.useState<VideoResolution>('480p');
+  const [variations, setVariations] = React.useState(2);
   const [styleId, setStyleId] = React.useState<string | null>(null);
   const [references, setReferences] = React.useState<ImagineItem[]>([]);
   const [panelOpen, setPanelOpen] = React.useState(false);
@@ -170,12 +178,13 @@ export function ImagesApp() {
   // ---- Référence d'édition automatique : la dernière image complétée du fil
   //      s'attache au composeur (puce amovible) — les instructions suivantes
   //      partent en image-to-image réel. Retirable, réattachable.
+  //      (Les vidéos ne s'attachent pas : l'édition part d'une image.)
   const lastCompletedId = React.useMemo(() => {
     for (let t = turns.length - 1; t >= 0; t--) {
       const ids = turns[t].itemIds;
       for (let i = ids.length - 1; i >= 0; i--) {
         const item = itemsById.get(ids[i]);
-        if (item?.status === 'completed' && item.url) return item.id;
+        if (item?.status === 'completed' && item.url && !isVideoItem(item)) return item.id;
       }
     }
     return null;
@@ -274,9 +283,42 @@ export function ImagesApp() {
     return () => window.removeEventListener('keydown', onKey);
   }, [detailItem, drawing, view, wsPanelOpen, panelOpen]);
 
-  // ---- Génération (text → image) : un tour + transition vers le workspace ----
+  // ---- Règles des contrôles (catégorie × modèle × références) ----
+  // Ratios : 8 pour Nelth-V3 et le GIF ; 3 (1:1, 16:9, 9:16) pour Nelth-V2
+  // image et la vidéo texte→vidéo. Image→image V2 et image→vidéo : « Auto » —
+  // le format suit l'image de référence (verrouillé, inclicable).
+  const hasRefs = references.length > 0;
+  const activeRatios = React.useMemo(() => {
+    if (category === 'video') return ['1:1', '16:9', '9:16'];
+    if (category === 'image' && imageModel === 'v2') return ['1:1', '16:9', '9:16'];
+    return ['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'];
+  }, [category, imageModel]);
+
+  const ratioAuto =
+    (category === 'video' && hasRefs) || (category === 'image' && imageModel === 'v2' && hasRefs);
+  const ratioLocked = ratioAuto || capabilities?.aspectRatioMode === 'none';
+  // Variations verrouillées à 1 dans les mêmes conditions (i2i V2, i2v).
+  const variationsLocked = ratioAuto;
+  const effectiveVariations = variationsLocked ? 1 : variations;
+
+  // Ratio toujours valide pour la liste active (2:3 pour les 8 ratios,
+  // 1:1 pour le trio image, 16:9 pour la vidéo).
+  React.useEffect(() => {
+    if (ratioAuto) return;
+    if (!activeRatios.includes(ratio)) {
+      setRatio(category === 'video' ? '16:9' : activeRatios.includes('2:3') ? '2:3' : '1:1');
+    }
+  }, [activeRatios, ratio, ratioAuto, category]);
+
+  // Variations : défaut par catégorie/modèle (2 pour V3 et GIF, 1 sinon).
+  React.useEffect(() => {
+    const fallback = category === 'gif' || (category === 'image' && imageModel === 'v3') ? 2 : 1;
+    setVariations(fallback);
+  }, [category, imageModel]);
+
+  // ---- Génération (text → média) : un tour + transition vers le workspace ----
   const submitGenerateTurn = React.useCallback(
-    async (input: api.GenerateInput, prompt: string, expected: number) => {
+    async (input: api.GenerateInput, prompt: string, expected: number, placeholderRatio?: string) => {
       if (!capabilities || submitting) return;
       const turnId = newTurnId();
       setWsRestore(false);
@@ -288,7 +330,7 @@ export function ImagesApp() {
           kind: 'generate',
           createdAt: Date.now(),
           itemIds: [],
-          ratio: input.aspectRatio ?? '1:1',
+          ratio: placeholderRatio ?? input.aspectRatio ?? '1:1',
           expectedCount: expected,
           error: null,
           retry: { kind: 'generate', input },
@@ -312,7 +354,9 @@ export function ImagesApp() {
               : t
           )
         );
-        pushToast(`Génération lancée — ${queued.length} image${queued.length > 1 ? 's' : ''}`);
+        const noun =
+          input.kind === 'video' ? 'vidéo' : input.kind === 'gif' ? 'GIF' : 'image';
+        pushToast(`Génération lancée — ${queued.length} ${noun}${queued.length > 1 ? 's' : ''}`);
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Génération impossible';
         setTurns((cur) => cur.map((t) => (t.id === turnId ? { ...t, error: message } : t)));
@@ -428,24 +472,39 @@ export function ImagesApp() {
     [submitting, mergeItems, pushToast]
   );
 
-  // ---- Texte → image depuis le composeur (studio ou workspace) ----
+  // ---- Construction de la requête selon la catégorie / le modèle / le ratio
+  const buildGenerateInput = React.useCallback(
+    (text: string, refs: ImagineItem[]): api.GenerateInput => {
+      const withUrl = refs.filter((r) => r.url);
+      // Image→vidéo : une seule image source (le moteur anime la première).
+      const effectiveRefs = category === 'video' ? withUrl.slice(0, 1) : withUrl;
+      const attachable =
+        effectiveRefs.length > 0 &&
+        (category === 'video' || category === 'gif' || Boolean(capabilities?.features.imageToImage));
+      return {
+        prompt: text,
+        kind: category,
+        model: category === 'image' ? imageModel : category === 'gif' ? 'v3' : 'v2',
+        resolution: category === 'video' ? resolution : undefined,
+        aspectRatio: ratioAuto ? undefined : ratio,
+        style: styleId ?? undefined,
+        n: variationsLocked ? 1 : variations,
+        sourceImages: attachable
+          ? effectiveRefs.map((r) => ({ url: r.url ?? undefined, name: r.name ?? undefined, type: 'image' }))
+          : [],
+      };
+    },
+    [category, imageModel, resolution, ratio, ratioAuto, variations, variationsLocked, styleId, capabilities]
+  );
+
+  // ---- Texte → média depuis le composeur (studio ou workspace) ----
   const generateFromText = React.useCallback(
     (text: string) => {
       if (!text || !capabilities || submitting) return;
-      const n = Math.min(mode === 'vitesse' ? 1 : 2, capabilities.maxCount || 1);
-      void submitGenerateTurn(
-        {
-          prompt: text,
-          aspectRatio: capabilities.aspectRatioMode !== 'none' ? ratio : undefined,
-          style: styleId ?? undefined,
-          n,
-          sourceImages: [],
-        },
-        text,
-        n
-      );
+      const n = Math.min(effectiveVariations, capabilities.maxCount || 1);
+      void submitGenerateTurn(buildGenerateInput(text, []), text, n);
     },
-    [capabilities, submitting, mode, ratio, styleId, submitGenerateTurn]
+    [capabilities, submitting, effectiveVariations, buildGenerateInput, submitGenerateTurn]
   );
 
   const canGenerate = Boolean(capabilities?.features.textToImage) && auth.kind === 'ok';
@@ -456,33 +515,57 @@ export function ImagesApp() {
   const onStudioGenerate = React.useCallback(() => {
     const text = prompt.trim();
     if (!text || !capabilities || submitting) return;
-    const n = Math.min(mode === 'vitesse' ? 1 : 2, capabilities.maxCount || 1);
-    const canAttach = capabilities.features.imageToImage && references.length > 0;
-    void submitGenerateTurn(
-      {
-        prompt: text,
-        aspectRatio: capabilities.aspectRatioMode !== 'none' ? ratio : undefined,
-        style: styleId ?? undefined,
-        n,
-        sourceImages: canAttach
-          ? references.filter((r) => r.url).map((r) => ({ url: r.url ?? undefined }))
-          : [],
-      },
-      text,
-      n
-    );
-  }, [prompt, capabilities, submitting, mode, ratio, styleId, references, submitGenerateTurn]);
+    const n = Math.min(effectiveVariations, capabilities.maxCount || 1);
+    // Placeholder au ratio de la première référence quand le format la suit.
+    const placeholder = ratioAuto
+      ? references[0]?.aspect_ratio ?? (category === 'video' ? '16:9' : '1:1')
+      : ratio;
+    void submitGenerateTurn(buildGenerateInput(text, references), text, n, placeholder);
+  }, [
+    prompt,
+    capabilities,
+    submitting,
+    effectiveVariations,
+    ratio,
+    ratioAuto,
+    references,
+    category,
+    buildGenerateInput,
+    submitGenerateTurn,
+  ]);
 
-  // Workspace : si une référence d'édition est jointe → VRAI image-to-image.
+  // Workspace : référence d'édition + vidéo → image-to-video ; référence +
+  // image → VRAI image-to-image ; sinon texte→média.
   const onWorkspaceGenerate = React.useCallback(() => {
     const text = wsPrompt.trim();
     if (!text || submitting) return;
-    if (editReferenceItem && capabilities?.features.editing) {
+    if (editReferenceItem && category === 'video') {
+      // Image→vidéo : la référence devient la source d'animation (1 seule).
+      const placeholder = editReferenceItem.aspect_ratio ?? '16:9';
+      void submitGenerateTurn(
+        { ...buildGenerateInput(text, [editReferenceItem]), n: 1 },
+        text,
+        1,
+        placeholder
+      );
+      return;
+    }
+    if (editReferenceItem && capabilities?.features.editing && category === 'image') {
       void submitEditTurn(editReferenceItem.id, text, 'edit');
       return;
     }
     generateFromText(text);
-  }, [wsPrompt, submitting, editReferenceItem, capabilities, submitEditTurn, generateFromText]);
+  }, [
+    wsPrompt,
+    submitting,
+    editReferenceItem,
+    category,
+    capabilities,
+    buildGenerateInput,
+    submitGenerateTurn,
+    submitEditTurn,
+    generateFromText,
+  ]);
 
   // ---- Actions par résultat complété ----
   const attachEditReference = React.useCallback(
@@ -513,7 +596,8 @@ export function ImagesApp() {
   }, []);
 
   const onDownloadAction = React.useCallback((item: ImagineItem) => {
-    void api.downloadImage(item.url ?? '', item.name ?? `nelth-image-${item.id}.png`);
+    const fallback = `nelth-${isVideoItem(item) ? 'video' : isGifItem(item) ? 'gif' : 'image'}-${item.id}${downloadExt(item)}`;
+    void api.downloadImage(item.url ?? '', item.name ?? fallback);
   }, []);
 
   const onSaveAction = React.useCallback(
@@ -751,8 +835,23 @@ export function ImagesApp() {
               onPromptChange={setPrompt}
               ratio={ratio}
               onRatioChange={setRatio}
-              mode={mode}
-              onModeChange={setMode}
+              ratios={activeRatios}
+              ratioDisabled={ratioLocked}
+              ratioAuto={ratioAuto}
+              category={category}
+              onCategoryChange={setCategory}
+              imageModel={imageModel}
+              onImageModelChange={setImageModel}
+              resolution={resolution}
+              onResolutionChange={setResolution}
+              variations={variations}
+              onVariationsChange={setVariations}
+              variationsLocked={variationsLocked}
+              variationsLockHint={
+                category === 'video'
+                  ? 'Image→vidéo : une seule variation (le format suit l’image source)'
+                  : 'Image→image Nelth-V2 : une seule variation (le format suit l’image source)'
+              }
               generating={submitting}
               onGenerate={onStudioGenerate}
               references={references.map((r) => ({
@@ -771,7 +870,7 @@ export function ImagesApp() {
               onPickReference={toggleReference}
               onOpenDetail={(item) => setDetailItem(item)}
               selectedIds={selectedIds}
-              canAttach={Boolean(capabilities?.features.imageToImage)}
+              canAttach={Boolean(capabilities?.features.imageToImage) || category === 'video' || category === 'gif'}
               onUseIdea={onUseIdea}
               onNewCanvas={onNewCanvas}
               hasTurns={hasTurns}
@@ -801,10 +900,19 @@ export function ImagesApp() {
                 onPromptChange: setWsPrompt,
                 ratio,
                 onRatioChange: setRatio,
-                ratios: capabilities?.aspectRatios ?? ['1:1'],
-                ratioDisabled: capabilities?.aspectRatioMode === 'none' || !capabilities,
-                mode,
-                onModeChange: setMode,
+                ratios: activeRatios,
+                ratioDisabled: ratioLocked,
+                ratioAuto,
+                category,
+                onCategoryChange: setCategory,
+                imageModel,
+                onImageModelChange: setImageModel,
+                resolution,
+                onResolutionChange: setResolution,
+                variations,
+                onVariationsChange: setVariations,
+                variationsLocked,
+                variationsLockHint: 'Une seule variation dans ce mode',
                 onGenerate: onWorkspaceGenerate,
                 editReference: editReferenceItem,
                 onRemoveEditReference: removeEditReference,
@@ -817,7 +925,7 @@ export function ImagesApp() {
                 onPickReference: (item) => attachEditReference(item, false),
                 onOpenDetail: (item) => setDetailItem(item),
                 selectedIds: new Set(editReferenceId ? [editReferenceId] : []),
-                canAttach: Boolean(capabilities?.features.editing),
+                canAttach: Boolean(capabilities?.features.editing) || category === 'video' || category === 'gif',
               }}
               onScroll={onWorkspaceScroll}
             />

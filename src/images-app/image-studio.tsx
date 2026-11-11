@@ -14,7 +14,7 @@
 import * as React from 'react';
 import { motion } from 'framer-motion';
 import { Sparkles } from 'lucide-react';
-import { Composer, type ComposerMode } from './composer';
+import { Composer, type ComposerCategory, type ImageModel, type VideoResolution } from './composer';
 import { MediaPanel, type PanelTab } from './mediapanel';
 import { InspirationGallery } from './galleryview';
 import { COMPOSER_TRANSITION } from './image-generation-composer';
@@ -36,8 +36,19 @@ export interface ImageStudioProps {
   onPromptChange(value: string): void;
   ratio: string;
   onRatioChange(value: string): void;
-  mode: ComposerMode;
-  onModeChange(mode: ComposerMode): void;
+  ratios: string[];
+  ratioDisabled: boolean;
+  ratioAuto: boolean;
+  category: ComposerCategory;
+  onCategoryChange(category: ComposerCategory): void;
+  imageModel: ImageModel;
+  onImageModelChange(model: ImageModel): void;
+  resolution: VideoResolution;
+  onResolutionChange(resolution: VideoResolution): void;
+  variations: number;
+  onVariationsChange(value: number): void;
+  variationsLocked: boolean;
+  variationsLockHint?: string;
   generating: boolean;
   onGenerate(): void;
   references: Array<{ id: string; label: string; url: string | null }>;
@@ -161,10 +172,19 @@ export function ImageStudio(props: ImageStudioProps) {
                 onPromptChange={props.onPromptChange}
                 ratio={props.ratio}
                 onRatioChange={props.onRatioChange}
-                ratios={capabilities?.aspectRatios ?? ['1:1']}
-                ratioDisabled={capabilities?.aspectRatioMode === 'none' || !capabilities}
-                mode={props.mode}
-                onModeChange={props.onModeChange}
+                ratios={props.ratios}
+                ratioDisabled={props.ratioDisabled}
+                ratioAuto={props.ratioAuto}
+                category={props.category}
+                onCategoryChange={props.onCategoryChange}
+                imageModel={props.imageModel}
+                onImageModelChange={props.onImageModelChange}
+                resolution={props.resolution}
+                onResolutionChange={props.onResolutionChange}
+                variations={props.variations}
+                onVariationsChange={props.onVariationsChange}
+                variationsLocked={props.variationsLocked}
+                variationsLockHint={props.variationsLockHint}
                 compact={props.scrolled}
                 generating={props.generating}
                 disabled={!props.canGenerate}

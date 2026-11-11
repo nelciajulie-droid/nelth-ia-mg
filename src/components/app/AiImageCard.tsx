@@ -29,6 +29,8 @@ export interface AiImageCardProps {
   label?: string;
   showFooter?: boolean;
   className?: string;
+  /** Video media (studio video items): renders <video controls loop muted> instead of <img>. */
+  video?: boolean;
 }
 
 export function AiImageCard({
@@ -39,6 +41,7 @@ export function AiImageCard({
   label = "Generating image",
   showFooter = true,
   className,
+  video = false,
 }: AiImageCardProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const [seconds, setSeconds] = React.useState(0);
@@ -172,7 +175,20 @@ export function AiImageCard({
             exit={{ opacity: 0, filter: "blur(20px)" }}
             transition={{ duration: 0.9, ease: [0.22, 1, 0.36, 1] }}
           >
-            <img src={imageSrc} alt={imageAlt} className="h-full w-full object-cover" />
+            {video ? (
+              <video
+                src={imageSrc}
+                aria-label={imageAlt}
+                className="h-full w-full object-cover"
+                controls
+                loop
+                muted
+                playsInline
+                preload="metadata"
+              />
+            ) : (
+              <img src={imageSrc} alt={imageAlt} className="h-full w-full object-cover" />
+            )}
             <motion.div
               aria-hidden
               className="pointer-events-none absolute inset-0"

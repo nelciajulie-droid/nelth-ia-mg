@@ -14,7 +14,7 @@ import {
   Upload,
   Wand2,
 } from 'lucide-react';
-import { AuthImg, cx, formatTime, phaseLabel, sourceLabel, Spinner } from './ui';
+import { AuthImg, AuthVideo, cx, downloadExt, formatTime, isVideoItem, phaseLabel, sourceLabel, Spinner } from './ui';
 import { downloadImage } from './api';
 import type { ImagineItem } from '../lib/images/types';
 
@@ -65,6 +65,7 @@ export function DetailOverlay(props: DetailOverlayProps) {
   const [instructions, setInstructions] = React.useState('');
 
   const pending = item.status === 'generating' || item.status === 'processing';
+  const isVideo = isVideoItem(item);
   const ratio = item.aspect_ratio ?? '1:1';
   const [rw, rh] = ratio.split(':').map(Number);
   const aspect = rw && rh ? `${rw} / ${rh}` : '1 / 1';
@@ -100,7 +101,11 @@ export function DetailOverlay(props: DetailOverlayProps) {
         <div className="flex shrink-0 items-center gap-1.5">
           {pillButton('Télécharger', <Download className="size-3.5" strokeWidth={2} />, {
             variant: 'ghost',
-            onClick: () => void downloadImage(item.url ?? '', item.name ?? `nelth-image-${item.id}.png`),
+            onClick: () =>
+              void downloadImage(
+                item.url ?? '',
+                item.name ?? `nelth-${isVideo ? 'video' : 'image'}-${item.id}${downloadExt(item)}`
+              ),
             disabled: pending || !item.url,
             title: 'Télécharger',
             hideLabelOnMobile: true,
@@ -136,6 +141,14 @@ export function DetailOverlay(props: DetailOverlayProps) {
                 {item.error ?? 'Le moteur n’a pas pu produire cette image.'}
               </span>
             </div>
+          ) : isVideo ? (
+            <AuthVideo
+              path={item.url}
+              alt={item.name ?? item.prompt ?? 'Vidéo'}
+              controls
+              className="max-h-[58vh] w-auto max-w-full rounded-[16px] ring-1 ring-[var(--images-ring)]"
+              fallbackClassName="max-h-[58vh] w-full max-w-[520px] rounded-[16px]"
+            />
           ) : (
             <AuthImg
               path={item.url}
@@ -218,31 +231,36 @@ export function DetailOverlay(props: DetailOverlayProps) {
             </div>
           )}
 
-          {/* Actions (référence vidéo + master prompt §8) */}
+          {/* Actions (référence vidéo + master prompt §8) — édit image
+              indisponible sur les vidéos. */}
           <div className="mb-4 mt-6 flex flex-wrap items-center justify-center gap-2">
-            {pillButton('Modifier le texte', <Type className="size-3.5" strokeWidth={2} />, {
-              variant: 'ink',
-              onClick: () => {
-                setEditor('texte');
-                setInstructions('');
-              },
-              disabled: pending,
-              title: 'Éditer le texte ou la description de l’image',
-            })}
-            {pillButton('Retouche précise', <Pencil className="size-3.5" strokeWidth={2} />, {
-              variant: 'outline',
-              onClick: () => {
-                setEditor('retouche');
-                setInstructions('');
-              },
-              disabled: pending,
-            })}
-            {pillButton('Reimaginer', <Wand2 className="size-3.5" strokeWidth={2} />, {
-              variant: 'outline',
-              onClick: () => onVariation(item.id),
-              disabled: pending || busy === item.id,
-              title: 'Générer une variation de cette image',
-            })}
+            {!isVideo && (
+              <>
+                {pillButton('Modifier le texte', <Type className="size-3.5" strokeWidth={2} />, {
+                  variant: 'ink',
+                  onClick: () => {
+                    setEditor('texte');
+                    setInstructions('');
+                  },
+                  disabled: pending,
+                  title: 'Éditer le texte ou la description de l’image',
+                })}
+                {pillButton('Retouche précise', <Pencil className="size-3.5" strokeWidth={2} />, {
+                  variant: 'outline',
+                  onClick: () => {
+                    setEditor('retouche');
+                    setInstructions('');
+                  },
+                  disabled: pending,
+                })}
+                {pillButton('Reimaginer', <Wand2 className="size-3.5" strokeWidth={2} />, {
+                  variant: 'outline',
+                  onClick: () => onVariation(item.id),
+                  disabled: pending || busy === item.id,
+                  title: 'Générer une variation de cette image',
+                })}
+              </>
+            )}
             {pillButton('Boucle', <Repeat className="size-3.5" strokeWidth={2} />, {
               variant: 'outline',
               disabled: true,

@@ -69,6 +69,61 @@ export function AuthImg({
   return <img src={url} alt={alt ?? ''} className={className} draggable={false} />;
 }
 
+/** <video> authentifié — même résolution blob que AuthImg (items vidéo). */
+export function AuthVideo({
+  path,
+  alt,
+  className,
+  fallbackClassName,
+  controls = true,
+  autoPlay = false,
+}: {
+  path: string | null | undefined;
+  alt?: string;
+  className?: string;
+  fallbackClassName?: string;
+  controls?: boolean;
+  autoPlay?: boolean;
+}) {
+  const cached = path ? peekImage(path) : null;
+  const [url, setUrl] = React.useState<string | null>(cached);
+
+  React.useEffect(() => {
+    let alive = true;
+    setUrl(path ? peekImage(path) : null);
+    if (!path) return;
+    void authImageUrl(path).then((resolved) => {
+      if (alive) setUrl(resolved);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [path]);
+
+  if (!url) {
+    return (
+      <div
+        className={cx('images-skeleton', fallbackClassName ?? className)}
+        aria-label={alt}
+        role="img"
+      />
+    );
+  }
+  return (
+    <video
+      src={url}
+      aria-label={alt}
+      className={className}
+      controls={controls}
+      autoPlay={autoPlay}
+      loop
+      muted
+      playsInline
+      preload="metadata"
+    />
+  );
+}
+
 /** Libellés de phase (barre d'état des générations en cours). */
 export function phaseLabel(phase: ImaginePhase | null): string {
   switch (phase) {
@@ -84,6 +139,8 @@ export function phaseLabel(phase: ImaginePhase | null): string {
 }
 
 export function sourceLabel(item: ImagineItem): string {
+  if (isVideoItem(item)) return 'Vidéo';
+  if (isGifItem(item)) return 'GIF';
   switch (item.source) {
     case 'generate':
       return 'Générée';
@@ -96,6 +153,23 @@ export function sourceLabel(item: ImagineItem): string {
     default:
       return 'Image';
   }
+}
+
+/** Item vidéo (meta.kind === 'video') — rendu <video>, téléchargement .mp4. */
+export function isVideoItem(item: ImagineItem | null | undefined): boolean {
+  return Boolean(item && item.meta && (item.meta as Record<string, unknown>).kind === 'video');
+}
+
+/** Item GIF (meta.kind === 'gif') — rendu <img>, téléchargement .gif. */
+export function isGifItem(item: ImagineItem | null | undefined): boolean {
+  return Boolean(item && item.meta && (item.meta as Record<string, unknown>).kind === 'gif');
+}
+
+/** Extension de téléchargement selon le type d'item. */
+export function downloadExt(item: ImagineItem): string {
+  if (isVideoItem(item)) return '.mp4';
+  if (isGifItem(item)) return '.gif';
+  return '.png';
 }
 
 export function formatTime(ts: number): string {

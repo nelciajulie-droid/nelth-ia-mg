@@ -18,7 +18,7 @@ import { ImageResultActions, ItemFailureCard, TurnErrorCard } from './image-resu
 import { ImageGenerationComposer } from './image-generation-composer';
 import { cx } from './ui';
 import type { GenerateInput } from './api';
-import type { ComposerMode } from './composer';
+import type { ComposerCategory, ImageModel, VideoResolution } from './composer';
 import type { PanelTab } from './mediapanel';
 import type { ImagineCapabilities, ImagineItem } from '../lib/images/types';
 
@@ -199,8 +199,17 @@ export interface ImageGenerationWorkspaceProps {
     onRatioChange(value: string): void;
     ratios: string[];
     ratioDisabled: boolean;
-    mode: ComposerMode;
-    onModeChange(mode: ComposerMode): void;
+    ratioAuto: boolean;
+    category: ComposerCategory;
+    onCategoryChange(category: ComposerCategory): void;
+    imageModel: ImageModel;
+    onImageModelChange(model: ImageModel): void;
+    resolution: VideoResolution;
+    onResolutionChange(resolution: VideoResolution): void;
+    variations: number;
+    onVariationsChange(value: number): void;
+    variationsLocked: boolean;
+    variationsLockHint?: string;
     onGenerate(): void;
     editReference: ImagineItem | null;
     onRemoveEditReference(): void;
@@ -270,8 +279,17 @@ export function ImageGenerationWorkspace(props: ImageGenerationWorkspaceProps) {
         onRatioChange={composer.onRatioChange}
         ratios={composer.ratios}
         ratioDisabled={composer.ratioDisabled}
-        mode={composer.mode}
-        onModeChange={composer.onModeChange}
+        ratioAuto={composer.ratioAuto}
+        category={composer.category}
+        onCategoryChange={composer.onCategoryChange}
+        imageModel={composer.imageModel}
+        onImageModelChange={composer.onImageModelChange}
+        resolution={composer.resolution}
+        onResolutionChange={composer.onResolutionChange}
+        variations={composer.variations}
+        onVariationsChange={composer.onVariationsChange}
+        variationsLocked={composer.variationsLocked}
+        variationsLockHint={composer.variationsLockHint}
         generating={props.submitting}
         disabled={!props.canGenerate}
         onGenerate={composer.onGenerate}

@@ -9,6 +9,13 @@
 
 import type { ImagineCapabilities, ImagineItem } from '../lib/images/types';
 
+/** Type de média demandé au studio. */
+export type MediaKind = 'image' | 'video' | 'gif';
+/** Modèle d'image sélectionné (segment Nelth-V2 | Nelth-V3). */
+export type ImagineModel = 'v2' | 'v3';
+/** Résolution vidéo (segment 480p | 720p). */
+export type VideoResolutionChoice = '480p' | '720p';
+
 const TOKEN_KEYS = ['token', 'owu_token'] as const;
 
 export function getToken(): string | null {
@@ -70,8 +77,15 @@ export async function fetchItems(limit = 120): Promise<ImagineItem[]> {
 
 export interface GenerateInput {
   prompt: string;
+  /** Catégorie de média : image (défaut), vidéo ou GIF. */
+  kind?: MediaKind;
+  /** Modèle d'image : 'v2' (vibes) ou 'v3' (nelthai). GIF = toujours v3. */
+  model?: ImagineModel;
+  /** Résolution vidéo — catégorie vidéo uniquement. */
+  resolution?: VideoResolutionChoice;
   aspectRatio?: string;
   style?: string;
+  /** Nombre de variations (1-4) — verrouillé à 1 par le serveur en i2i V2 / i2v. */
   n?: number;
   sourceImages?: Array<{ id?: string; url?: string; name?: string; type?: string }>;
 }

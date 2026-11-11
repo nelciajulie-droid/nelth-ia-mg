@@ -29,6 +29,10 @@ import {
   type FileRefInput,
   type GeneratedImage,
 } from '@/lib/image-generation';
+import {
+  normalizeVibesAspectRatio,
+  normalizeVibesResolution,
+} from '@/lib/imagine/vibes';
 import { imagineStyleById, ratioHint, ratioToOpenAiSize } from '@/lib/images/styles';
 import type { ImagineCapabilities, ImagineItem } from '@/lib/images/types';
 
@@ -297,6 +301,12 @@ export interface GenerationPlan {
   style?: string;
   aspectRatio?: string;
   sourceImages?: FileRefInput[];
+  /** Catégorie de média : image (défaut), vidéo ou GIF. */
+  kind?: 'image' | 'video' | 'gif';
+  /** Modèle : 'v2' (vibes) ou 'v3' (nelthai) — indéfini → moteur actif. */
+  model?: 'v2' | 'v3';
+  /** Résolution vidéo (480p/720p) — catégorie vidéo uniquement. */
+  resolution?: '480p' | '720p';
 }
 
 function buildEffectivePrompt(plan: GenerationPlan, ratioMode: 'exact' | 'creative-hint' | 'none'): string {
@@ -310,6 +320,13 @@ function buildEffectivePrompt(plan: GenerationPlan, ratioMode: 'exact' | 'creati
   return parts.filter(Boolean).join(' ');
 }
 
+/**
+ * Directive GIF — accolée au prompt utilisateur en mode GIF : le V3 (seul
+ * modèle GIF) doit TOUJOURS produire un GIF animé, jamais une image fixe.
+ */
+const GIF_MODE_DIRECTIVE =
+  'Generate an animated GIF: a seamless looping animation with smooth, fluid motion. The output MUST be an animated GIF image, not a static picture.';
+
 // ---------------------------------------------------------------------------
 // Queued item creation + background worker
 // ---------------------------------------------------------------------------
@@ -321,6 +338,9 @@ interface QueuedItemInput {
   source: ImagineItem['source'];
   parentId?: string | null;
   status?: string;
+  kind?: 'image' | 'video' | 'gif';
+  model?: 'v2' | 'v3';
+  resolution?: '480p' | '720p';
 }
 
 async function createQueuedItem(
@@ -348,6 +368,9 @@ async function createQueuedItem(
       meta: JSON.stringify({
         style: input.style ?? null,
         phase: input.status === 'completed' ? null : 'sending',
+        kind: input.kind ?? 'image',
+        model: input.model ?? null,
+        resolution: input.resolution ?? null,
       }),
       created_at: now,
       updated_at: now,
@@ -356,16 +379,293 @@ async function createQueuedItem(
   return rowToItem(row);
 }
 
+async function sharpMetadata(bytes: Buffer): Promise<{ width?: number; height?: number }> {
+  const sharp = (await import('sharp')).default;
+  return sharp(bytes).metadata();
+}
+
+// ---------------------------------------------------------------------------
+// Persistence — bytes through the files pipeline (image, GIF et vidéo).
+// ---------------------------------------------------------------------------
+
+function mediaExtension(contentType: string, kind: string): string {
+  if (kind === 'video') return '.mp4';
+  if (contentType === 'image/gif') return '.gif';
+  if (contentType === 'image/jpeg') return '.jpg';
+  if (contentType === 'image/webp') return '.webp';
+  return '.png';
+}
+
+async function persistGeneratedMedia(
+  user: ApiUser,
+  item: ImagineItem,
+  plan: GenerationPlan,
+  bytes: Buffer,
+  contentType: string,
+  identity: { provider: string; model: string }
+): Promise<void> {
+  const kind = plan.kind ?? 'image';
+  const extension = mediaExtension(contentType, kind);
+  const fileItem = await uploadFileHandler(
+    user,
+    {
+      bytes,
+      filename: `imagine-${kind}-${Date.now()}${extension}`,
+      contentType,
+    },
+    { model: 'imagine-studio', source: 'imagine_studio', item_id: item.id },
+    false
+  );
+  const fileId = fileItem?.id;
+  if (!fileId) throw new Error('La sauvegarde du média a échoué.');
+
+  // Dimensions via sharp (images uniquement — pas les vidéos).
+  let width: number | null = null;
+  let height: number | null = null;
+  if (kind !== 'video') {
+    try {
+      const metadata = await sharpMetadata(bytes);
+      width = metadata.width ?? null;
+      height = metadata.height ?? null;
+    } catch {
+      /* unreadable dims — stored as null */
+    }
+  }
+
+  await patchItemRow(item.id, {
+    status: 'completed',
+    file_id: fileId,
+    provider: identity.provider,
+    model: identity.model,
+    width,
+    height,
+    meta: JSON.stringify({
+      style: plan.style ?? null,
+      phase: null,
+      kind,
+      model: plan.model ?? (kind === 'video' ? 'v2' : kind === 'gif' ? 'v3' : null),
+      resolution: plan.resolution ?? null,
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Nelth-V2 — image (vibes gateway) : texte→image et image→image (édition).
+// ---------------------------------------------------------------------------
+
+/** Bytes d'une source (upload vibes obligatoire) — télécharge les URLs nues. */
+async function sourceBytesOf(
+  source: Awaited<ReturnType<typeof resolveImageSources>>[number]
+): Promise<{ bytes: Buffer; filename: string; contentType: string }> {
+  if (source.kind === 'bytes') {
+    return {
+      bytes: source.bytes,
+      filename: source.filename || 'input.png',
+      contentType: source.contentType || 'image/png',
+    };
+  }
+  const res = await fetch(source.url, {
+    headers: { accept: 'image/*' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(`L'image source est illisible (HTTP ${res.status}).`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (!bytes.length) throw new Error('L’image source est vide.');
+  const contentType = (res.headers.get('content-type') || '').split(';')[0].trim();
+  return {
+    bytes,
+    filename: `input${mediaExtension(contentType, 'image')}`,
+    contentType: contentType.startsWith('image/') ? contentType : 'image/png',
+  };
+}
+
+async function runVibesImageGeneration(
+  user: ApiUser,
+  item: ImagineItem,
+  plan: GenerationPlan
+): Promise<void> {
+  const vibes = await import('@/lib/imagine/vibes');
+  // V2 : l'aspect_ratio est un VRAI paramètre gateway (1:1, 16:9, 9:16) —
+  // jamais de hint de composition dans le prompt.
+  const effectivePrompt = buildEffectivePrompt(plan, 'none');
+  const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
+
+  let imageUrl: string;
+  if (sources.length) {
+    // Image→image : upload dans le store vibes (mediaEntId obligatoire) →
+    // édition (auto-enhance du prompt via /api/prompts/enhance).
+    await setItemMeta(item.id, { phase: 'sending' });
+    const source = await sourceBytesOf(sources[0]);
+    const uploaded = await vibes.vibesUploadImage({
+      bytes: source.bytes,
+      filename: source.filename,
+      contentType: source.contentType,
+    });
+    await setItemMeta(item.id, { phase: 'generating' });
+    const edited = await vibes.vibesEditImage({
+      sourceImageEntId: uploaded.sourceImageEntId ?? uploaded.mediaEntId,
+      editPrompt: effectivePrompt,
+      allMediaEntIds: uploaded.allMediaEntIds,
+    });
+    imageUrl = edited.imageUrl;
+  } else {
+    // Texte→image : un seul appel single-variation par item (le studio file
+    // N items pour N variations — le fan-out vit dans vibesGenerateImages).
+    await setItemMeta(item.id, { phase: 'sending' });
+    const results = await vibes.vibesGenerateImages({
+      prompt: effectivePrompt,
+      aspectRatio: plan.aspectRatio,
+      variations: 1,
+    });
+    if (!results.length) throw new Error('La génération a échoué.');
+    await setItemMeta(item.id, { phase: 'generating' });
+    imageUrl = results[0].url;
+  }
+
+  // Nettoyage watermark + logo (repli : téléchargement direct des octets).
+  await setItemMeta(item.id, { phase: 'image' });
+  let bytes: Buffer;
+  let contentType: string;
+  try {
+    const cleaned = await vibes.vibesCleanImageBlob(imageUrl);
+    bytes = cleaned.bytes;
+    contentType = cleaned.contentType;
+  } catch {
+    const raw = await vibes.downloadVibesImage(imageUrl);
+    bytes = raw.bytes;
+    contentType = raw.contentType;
+  }
+
+  await persistGeneratedMedia(user, item, plan, bytes, contentType, {
+    provider: 'vibes',
+    model: 'nelth-v2',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Nelth-V3 — image & GIF (nelthai metaai) : texte→image, image→image
+// multi-sources. En mode GIF, la directive boucle TOUJOURS le prompt.
+// ---------------------------------------------------------------------------
+
+async function runNelthaiImageGeneration(
+  user: ApiUser,
+  item: ImagineItem,
+  plan: GenerationPlan,
+  isGif: boolean
+): Promise<void> {
+  // Le moteur Nelthai instant choisit sa taille de sortie — le ratio voyage
+  // comme guidage de composition dans le prompt (jamais un faux paramètre).
+  let effectivePrompt = buildEffectivePrompt(plan, 'creative-hint');
+  if (isGif) effectivePrompt = `${effectivePrompt} ${GIF_MODE_DIRECTIVE}`.trim();
+
+  const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
+  const generated = await generateSdImage(effectivePrompt, null, {
+    sourceImages: sources,
+    onPhase: (phase) => {
+      void setItemMeta(item.id, { phase }).catch(() => undefined);
+    },
+  });
+
+  await persistGeneratedMedia(user, item, plan, generated.bytes, generated.contentType, {
+    provider: 'builtin',
+    model: isGif ? 'nelth-v3-gif' : 'nelth-v3',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Vidéo (vibes) — texte→vidéo (ratio 1:1/16:9/9:16 + résolution 480p/720p)
+// et image→vidéo (animate : le ratio suit l'image source).
+// ---------------------------------------------------------------------------
+
+async function runVideoGeneration(
+  user: ApiUser,
+  item: ImagineItem,
+  plan: GenerationPlan
+): Promise<void> {
+  const { generateVideo } = await import('@/lib/video-generation');
+  const resolution = normalizeVibesResolution(plan.resolution);
+  const phaseOf = (phase: string): string =>
+    phase === 'sending' ? 'sending' : phase === 'rendering' ? 'generating' : 'image';
+
+  const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
+  const sourceImage = sources.length
+    ? await (async () => {
+        const source = await sourceBytesOf(sources[0]);
+        return {
+          bytes: source.bytes,
+          contentType: source.contentType,
+          filename: source.filename,
+        };
+      })()
+    : undefined;
+
+  const { bytes, contentType } = await generateVideo(plan.prompt, {
+    aspectRatio: normalizeVibesAspectRatio(plan.aspectRatio),
+    resolution,
+    sourceImage,
+    onPhase: (phase) => {
+      void setItemMeta(item.id, { phase: phaseOf(phase) }).catch(() => undefined);
+    },
+  });
+
+  await persistGeneratedMedia(user, item, plan, bytes, contentType, {
+    provider: 'vibes',
+    model: 'nelth-v2-video',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Legacy — moteur actif (aucun modèle explicite : OpenAI configuré ou
+// Nelthai intégré). Comportement historique du studio et du chat.
+// ---------------------------------------------------------------------------
+
+async function runEngineGeneration(
+  user: ApiUser,
+  item: ImagineItem,
+  plan: GenerationPlan
+): Promise<void> {
+  const engine = await resolveActiveEngine();
+  const effectivePrompt = buildEffectivePrompt(plan, engine.kind === 'openai' ? 'exact' : 'creative-hint');
+  let bytes: Buffer;
+  let contentType: string;
+  if (engine.kind === 'openai') {
+    const result = await generateViaOpenAi(engine, effectivePrompt, plan.sourceImages ?? []);
+    bytes = result.bytes;
+    contentType = result.contentType;
+  } else {
+    const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
+    const generated = await generateSdImage(effectivePrompt, null, {
+      sourceImages: sources,
+      onPhase: (phase) => {
+        void setItemMeta(item.id, { phase }).catch(() => undefined);
+      },
+    });
+    bytes = generated.bytes;
+    contentType = generated.contentType;
+  }
+  await persistGeneratedMedia(user, item, plan, bytes, contentType, {
+    provider: engine.kind === 'builtin' ? 'builtin' : 'openai',
+    model: engine.kind === 'builtin' ? 'nelthai-imagine' : engine.openaiModel,
+  });
+}
+
+const HEARTBEAT_MS = 20_000;
+
 /**
- * Generate + persist one item through the ACTIVE engine.
+ * Generate + persist one item, ROUTED by the explicit plan:
+ *
+ *   kind=video            → vibes vidéo (t2v ou i2v, 480p/720p)
+ *   kind=gif              → Nelth-V3 + directive GIF (V3 = seul modèle GIF)
+ *   kind=image, model=v2  → vibes image (t2i ratio réel, i2i upload+edit)
+ *   kind=image, model=v3  → nelthai (t2i, i2i multi-sources)
+ *   aucun modèle          → moteur actif (legacy, comportement inchangé)
  *
  * A HEARTBEAT bumps the row's updated_at every 20s while this worker runs —
  * the stale reaper can then NEVER interrupt a live generation (however
  * slow the upstream): it only fires for rows whose worker died
  * (serverless freeze), 30 minutes after the last sign of life.
  */
-const HEARTBEAT_MS = 20_000;
-
 async function runOneGeneration(
   user: ApiUser,
   item: ImagineItem,
@@ -375,78 +675,33 @@ async function runOneGeneration(
     void patchItemRow(item.id, {}).catch(() => undefined);
   }, HEARTBEAT_MS);
   try {
-    const engine = await resolveActiveEngine();
-    try {
-      const effectivePrompt = buildEffectivePrompt(plan, engine.kind === 'openai' ? 'exact' : 'creative-hint');
-      let bytes: Buffer;
-      let contentType: string;
-      if (engine.kind === 'openai') {
-        const result = await generateViaOpenAi(engine, effectivePrompt, plan.sourceImages ?? []);
-        bytes = result.bytes;
-        contentType = result.contentType;
-      } else {
-        const sources = plan.sourceImages?.length ? await resolveImageSources(plan.sourceImages) : [];
-        const generated = await generateSdImage(effectivePrompt, null, {
-          sourceImages: sources,
-          onPhase: (phase) => {
-            void setItemMeta(item.id, { phase }).catch(() => undefined);
-          },
-        });
-        bytes = generated.bytes;
-        contentType = generated.contentType;
-      }
-
-      // Persist through the files pipeline (existing architecture).
-      const extension = contentType === 'image/jpeg' ? '.jpg' : contentType === 'image/webp' ? '.webp' : '.png';
-      const fileItem = await uploadFileHandler(
-        user,
-        {
-          bytes,
-          filename: `imagine-${Date.now()}${extension}`,
-          contentType,
-        },
-        { model: 'imagine-studio', source: 'imagine_studio', item_id: item.id },
-        false
-      );
-      const fileId = fileItem?.id;
-      if (!fileId) throw new Error('La sauvegarde de l’image a échoué.');
-
-      // Dimensions via sharp (already a dependency).
-      let width: number | null = null;
-      let height: number | null = null;
-      try {
-        const metadata = await sharpMetadata(bytes);
-        width = metadata.width ?? null;
-        height = metadata.height ?? null;
-      } catch {
-        /* unreadable dims — stored as null */
-      }
-
-      await patchItemRow(item.id, {
-        status: 'completed',
-        file_id: fileId,
-        provider: engine.kind === 'builtin' ? 'builtin' : 'openai',
-        model: engine.kind === 'builtin' ? 'nelthai-imagine' : engine.openaiModel,
-        width,
-        height,
-        meta: JSON.stringify({ style: plan.style ?? null, phase: null }),
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'La génération d’image a échoué.';
-      await patchItemRow(item.id, {
-        status: 'failed',
-        meta: JSON.stringify({ style: plan.style ?? null, phase: null, error: message }),
-      }).catch(() => undefined);
+    const kind = plan.kind ?? 'image';
+    if (kind === 'video') {
+      await runVideoGeneration(user, item, plan);
+    } else if (plan.model === 'v2') {
+      await runVibesImageGeneration(user, item, plan);
+    } else if (kind === 'gif' || plan.model === 'v3') {
+      await runNelthaiImageGeneration(user, item, plan, kind === 'gif');
+    } else {
+      await runEngineGeneration(user, item, plan);
     }
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'La génération a échoué.';
+    await patchItemRow(item.id, {
+      status: 'failed',
+      meta: JSON.stringify({
+        style: plan.style ?? null,
+        phase: null,
+        kind: plan.kind ?? 'image',
+        model: plan.model ?? null,
+        resolution: plan.resolution ?? null,
+        error: message,
+      }),
+    }).catch(() => undefined);
   } finally {
     clearInterval(heartbeat);
   }
-}
-
-async function sharpMetadata(bytes: Buffer): Promise<{ width?: number; height?: number }> {
-  const sharp = (await import('sharp')).default;
-  return sharp(bytes).metadata();
 }
 
 /** OpenAI Images API (generations / edits) — real size + multipart. */
@@ -609,8 +864,17 @@ export async function queueGenerateItems(
     );
   }
 
+  const kind = input.kind ?? 'image';
+  const hasSources = (input.sourceImages?.length ?? 0) > 0;
+  // Règles de variations (miroir exact du composeur) :
+  //   image→image Nelth-V2 et image→vidéo → 1 SEULE variation ;
+  //   tout le reste (V3 t2i/i2i, V2 t2i, vidéo t2v, GIF) → 1 à 4.
+  const lockedToOne =
+    hasSources && (kind === 'video' || (kind === 'image' && input.model === 'v2'));
   const engine = await resolveActiveEngine();
-  const count = Math.max(1, Math.min(Math.round(input.n ?? 1), engine.kind === 'builtin' ? 4 : 4));
+  const count = lockedToOne
+    ? 1
+    : Math.max(1, Math.min(Math.round(input.n ?? 1), engine.kind === 'builtin' ? 4 : 4));
   const items: ImagineItem[] = [];
   for (let index = 0; index < count; index++) {
     items.push(
@@ -618,7 +882,10 @@ export async function queueGenerateItems(
         prompt: input.prompt,
         style: input.style,
         aspectRatio: input.aspectRatio,
-        source: input.sourceImages?.length ? 'edit' : 'generate',
+        source: hasSources ? 'edit' : 'generate',
+        kind,
+        model: input.model,
+        resolution: input.resolution,
       })
     );
   }
@@ -649,18 +916,34 @@ export async function queueEditItem(
     throw new Error('Cette image n’est pas encore disponible (génération en cours ?).');
   }
 
+  // L'édition d'un média hérite du modèle de son parent (éditer une image
+  // V2 reste V2, réimaginer un GIF reste un GIF) — jamais de bascule sournoise.
+  const parentMeta = parseMeta(row.meta);
+  const parentKind =
+    parentMeta.kind === 'video'
+      ? undefined // une vidéo ne s'édite pas en image — refusé plus bas
+      : parentMeta.kind === 'gif'
+        ? ('gif' as const)
+        : undefined;
+  const parentModel =
+    parentMeta.model === 'v2' || parentMeta.model === 'v3' ? parentMeta.model : undefined;
+
   const item = await createQueuedItem(user, {
     prompt,
-    style: typeof parseMeta(row.meta).style === 'string' ? (parseMeta(row.meta).style as string) : undefined,
+    style: typeof parentMeta.style === 'string' ? (parentMeta.style as string) : undefined,
     aspectRatio: row.aspect_ratio ?? undefined,
     source: 'edit',
     parentId: row.id,
+    kind: parentKind ?? 'image',
+    model: parentModel,
   });
 
   return {
     item,
     plan: {
       prompt,
+      kind: parentKind ?? 'image',
+      model: parentModel,
       sourceImages: [{ url: `/api/v1/files/${row.file_id}/content`, type: 'image' }],
     },
   };
@@ -684,18 +967,33 @@ export async function queueVariationItem(
     throw new Error('Cette image n’est pas encore disponible (génération en cours ?).');
   }
 
+  // La variation hérite elle aussi du modèle/kind du parent (un GIF reste
+  // un GIF via la directive, une image V2 reste V2).
+  const parentMeta = parseMeta(row.meta);
+  const parentKind =
+    parentMeta.kind === 'gif' ? ('gif' as const) : parentMeta.kind === 'video' ? undefined : undefined;
+  const parentModel =
+    parentMeta.model === 'v2' || parentMeta.model === 'v3' ? parentMeta.model : undefined;
+  const variationPrompt = row.prompt
+    ? `${VARIATION_PROMPT} (inspiration : ${row.prompt})`
+    : VARIATION_PROMPT;
+
   const item = await createQueuedItem(user, {
-    prompt: row.prompt ? `${VARIATION_PROMPT} (inspiration : ${row.prompt})` : VARIATION_PROMPT,
-    style: typeof parseMeta(row.meta).style === 'string' ? (parseMeta(row.meta).style as string) : undefined,
+    prompt: variationPrompt,
+    style: typeof parentMeta.style === 'string' ? (parentMeta.style as string) : undefined,
     aspectRatio: row.aspect_ratio ?? undefined,
     source: 'variation',
     parentId: row.id,
+    kind: parentKind ?? 'image',
+    model: parentModel,
   });
 
   return {
     item,
     plan: {
-      prompt: row.prompt ? `${VARIATION_PROMPT} (inspiration : ${row.prompt})` : VARIATION_PROMPT,
+      prompt: variationPrompt,
+      kind: parentKind ?? 'image',
+      model: parentModel,
       sourceImages: [{ url: `/api/v1/files/${row.file_id}/content`, type: 'image' }],
     },
   };

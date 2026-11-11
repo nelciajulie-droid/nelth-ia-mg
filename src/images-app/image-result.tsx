@@ -12,7 +12,7 @@
 
 import * as React from 'react';
 import { Download, Heart, ImageOff, Pencil, RefreshCw, Repeat, Upload } from 'lucide-react';
-import { cx, Spinner } from './ui';
+import { cx, isVideoItem, Spinner } from './ui';
 import { aspectClassFor } from './image-generation-card';
 import { downloadImage } from './api';
 import type { ImagineCapabilities, ImagineItem } from '../lib/images/types';
@@ -70,8 +70,8 @@ export function ImageResultActions(props: ImageResultActionsProps) {
   const primary = items.find((i) => i.status === 'completed' && i.url);
   if (!primary) return null;
 
-  const canEdit = Boolean(capabilities?.features.editing);
-  const canVariation = Boolean(capabilities?.features.variations);
+  const canEdit = Boolean(capabilities?.features.editing) && !isVideoItem(primary);
+  const canVariation = Boolean(capabilities?.features.variations) && !isVideoItem(primary);
   const busy = props.busyId === primary.id;
 
   return (
@@ -107,7 +107,11 @@ export function ImageResultActions(props: ImageResultActionsProps) {
         variant: 'ghost',
         onClick: () => props.onEditImage(primary, false),
         disabled: !canEdit,
-        title: 'Joindre cette image comme référence d’édition',
+        title: canEdit
+          ? 'Joindre cette image comme référence d’édition'
+          : isVideoItem(primary)
+            ? 'Les vidéos ne servent pas de référence d’édition'
+            : 'Édition non prise en charge par le moteur actif',
         hideLabelOnMobile: true,
         className: 'max-sm:px-2.5',
       })}
