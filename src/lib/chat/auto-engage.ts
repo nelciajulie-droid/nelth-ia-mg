@@ -27,13 +27,28 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
  *     matched no engine vocabulary and fell through to a plain refusal): a
  *     GIF is a short ANIMATED artifact → the VIDEO engine owns it, with a
  *     deterministic lexical net as backstop when the classifier misses;
+ *   • DETERMINISTIC ENGAGEMENT NETS for the plain image and video routings
+ *     too (mirror of the GIF/search nets): when the classifier call fails,
+ *     times out (free-gateway queues routinely exceed the 6.5s budget → fail
+ *     open) or answers conservatively, an explicit creation verb + media
+ *     noun ("dessine-moi un chat", "crée une vidéo de…", "fais-moi un logo")
+ *     still engages the right engine — reported as the production bug
+ *     "les autos décident mal" : the image/video paths had NO backstop,
+ *     only the search and GIF did;
+ *   • TRUNCATION-TOLERANT parsing: the free gateway model sometimes prefixes
+ *     prose or cuts the JSON mid-way — the known keys are recovered by regex
+ *     instead of discarding the whole answer;
  *   • the high-confidence lexical search net from auto-web-search.ts
  *     (identity/ranking/news questions force the search on regardless of a
- *     conservative classifier answer or a failed call);
+ *     conservative classifier answer or a failed call), plus a query
+ *     backfill — search=true with an empty query keeps the search alive on
+ *     the raw target text instead of silently dropping it;
  *   • transcript isolation: only user/assistant turns ride the decision call —
  *     system prompts (capability blocks, misspell hints) never pollute it;
- *   • cheap call: no thinking, temperature 0, ~160 max tokens, last 6 turns
- *     only, any failure fails open (all false — the turn proceeds as chat).
+ *   • cheap call: no thinking, temperature 0, ~300 max tokens (headroom
+ *     for a chatty preamble before the JSON), last 6 turns only, any failure
+ *     fails open (all false — the turn proceeds as chat, the nets above
+ *     catching the unambiguous cases).
  */
 
 export type AutoEngagementDecision = {
@@ -139,6 +154,46 @@ const VIDEO_WORD_RE = new RegExp(
 const GIF_REQUEST_RE = /\b(?:gifs?|jifs?)\b/i;
 
 // ---------------------------------------------------------------------------
+// Deterministic ENGAGEMENT nets (image & video) — the production backstop.
+// The classifier call fails open whenever the free gateway queues past the
+// 6.5s budget or emits an unparsable answer; until now ONLY the search and
+// GIF paths had lexical backstops, so an image/video request missed by the
+// classifier fell through to a plain text turn — the exact "les autos
+// décident toujours mal" report. The nets below engage the right engine on
+// UNAMBIGUOUS phrasings only: an explicit creation/draw verb + an explicit
+// media noun (or a bare draw verb). Nouns WITHOUT a creation verb ("j'ai vu
+// une image drôle", "recommande-moi un anime") never fire — the classifier
+// keeps those.
+// ---------------------------------------------------------------------------
+
+/** Image engagement net — explicit static-visual creation phrasing. */
+export const IMAGE_ENGAGE_RE = new RegExp(
+  [
+    // bare imperative draw verbs (fr + common misspellings + en)
+    '\\b(?:dessine(?:-moi)?|dessin(?:e|er|ez)|desine(?:-moi)?|draw|draws|paint|paints|peins?|peign)\\b',
+    // creation verb + explicit static-media noun (within 40 chars — "fais-moi
+    // un logo", "génère une image de…", "create a poster of…")
+    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|montre(?:-moi)?|show)\\b[^\\n]{0,40}?\\b(?:images?|photos?|photographie?s?|dessins?|illustrations?|logos?|ic[ôo]nes?|avatars?|affiches?|posters?|banni[èe]res?|fonds?\\s+d[’\']?[ée]cran|wallpapers?|visuels?|rendus?|renders?|mockups?|maquettes?|concept\\s+arts?|miniatures?|thumbnails?)\\b',
+  ].join('|'),
+  'i'
+);
+
+/** Video engagement net — explicit moving-artifact creation phrasing. */
+export const VIDEO_ENGAGE_RE = new RegExp(
+  [
+    // creation verb + explicit moving-media noun ("crée une vidéo", "fais un
+    // clip", "generate an animation")
+    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|produis(?:-moi)?|produce|producing)\\b[^\\n]{0,40}?\\b(?:vid[ée]os?|clips?|animations?|court[ -]?m[ée]trages?|reels?|stories?|tiktoks?|shorts?|film(?:s|ettes?)?|trailer?s?)\\b',
+    // explicit animate-an-existing-visual phrasings ("anime cette image",
+    // "fais bouger cette photo", "animate this image")
+    '\\banime(?:r|z|-moi|\\s+(?:cette?|cet|ce|la|le|l[’\']|ça|ca|moi|image|photo|dessin))\\b|\\banimates?|animate\\b|\\banimated\\b',
+    '\\b(?:fais|fait|mets|met)\\s+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
+    '\\b(?:make|put)\\s+(?:it|this|that)\\s+(?:move|in\\s+motion)\\b',
+  ].join('|'),
+  'i'
+);
+
+// ---------------------------------------------------------------------------
 // Lexical search safety net (verbatim from auto-web-search.ts)
 // ---------------------------------------------------------------------------
 
@@ -202,34 +257,69 @@ function truncate(text: string, max: number): string {
 /** The three aspect ratios the vibes engine accepts — nothing else. */
 const VIDEO_RATIOS = ['16:9', '1:1', '9:16'] as const;
 
-/** Extract the first plausible JSON object from a raw LLM answer. */
+/** Extract the first plausible JSON object from a raw LLM answer.
+ *  TRUNCATION-TOLERANT — the free gateway model sometimes prefixes prose
+ *  ("Here is my decision:") or cuts the JSON mid-way; when the strict parse
+ *  fails, the known keys are recovered by regex so a nearly-good answer is
+ *  still a usable decision (before: any prose prefix → unparsable → retries →
+ *  fail open → the turn fell back to plain chat). */
 function parseDecision(raw: string): AutoEngagementDecision | null {
   const content = String(raw ?? '').trim();
   const start = content.indexOf('{');
   const end = content.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(content.slice(start, end + 1));
-    const video = parsed?.video === true || parsed?.video === 'true';
-    const image = parsed?.image === true || parsed?.image === 'true';
-    const search = parsed?.search === true || parsed?.search === 'true';
-    const rawRatio = String(parsed?.aspectRatio ?? '').trim();
-    const aspectRatio = (VIDEO_RATIOS as readonly string[]).includes(rawRatio)
-      ? (rawRatio as AutoEngagementDecision['aspectRatio'])
-      : undefined;
-    const query = typeof parsed?.query === 'string' ? parsed.query.trim().slice(0, 200) : '';
-    return {
-      video,
-      animate: video && (parsed?.animate === true || parsed?.animate === 'true'),
-      aspectRatio: video ? aspectRatio : undefined,
-      image: !video && image, // video outranks image — never both
-      edit: !video && image && (parsed?.edit === true || parsed?.edit === 'true'),
-      search: !video && !image && search && !!query ? true : false,
-      query,
-    };
-  } catch {
-    return null;
+  if (start >= 0 && end > start) {
+    try {
+      return normalizeParsed(JSON.parse(content.slice(start, end + 1)));
+    } catch {
+      /* fall through to loose extraction */
+    }
   }
+  // Loose extraction — any "key": true/false pair for the three booleans is
+  // enough to route the turn; missing keys read as false.
+  if (!/"(?:video|image|search)"\s*:/i.test(content)) return null;
+  const bool = (key: string): boolean => {
+    const m = content.match(new RegExp(`"${key}"\\s*:\\s*"?(true|false)"?`, 'i'));
+    return m ? m[1].toLowerCase() === 'true' : false;
+  };
+  const loose: Record<string, unknown> = {
+    video: bool('video'),
+    image: bool('image'),
+    search: bool('search'),
+    animate: bool('animate'),
+    edit: bool('edit'),
+  };
+  const ratioMatch = content.match(/"aspectRatio"\s*:\s*"(16:9|1:1|9:16)"/i);
+  if (ratioMatch) loose.aspectRatio = ratioMatch[1];
+  const queryMatch = content.match(/"query"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (queryMatch) loose.query = queryMatch[1];
+  console.log('[auto-engage] loose key extraction recovered a truncated/prose answer');
+  return normalizeParsed(loose);
+}
+
+/** Normalized decision object from any parsed shape (strict or loose). */
+function normalizeParsed(parsed: any): AutoEngagementDecision | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const video = parsed.video === true || parsed.video === 'true';
+  const image = parsed.image === true || parsed.image === 'true';
+  const search = parsed.search === true || parsed.search === 'true';
+  const rawRatio = String(parsed.aspectRatio ?? '').trim();
+  const aspectRatio = (VIDEO_RATIOS as readonly string[]).includes(rawRatio)
+    ? (rawRatio as AutoEngagementDecision['aspectRatio'])
+    : undefined;
+  // NOTE — search no longer requires a non-empty query here: a weak model
+  // often answers {"search":true} and forgets the query, which used to drop
+  // the search entirely; decideAutoEngagement backfills the query from the
+  // target text instead.
+  const query = typeof parsed.query === 'string' ? parsed.query.trim().slice(0, 200) : '';
+  return {
+    video,
+    animate: video && (parsed.animate === true || parsed.animate === 'true'),
+    aspectRatio: video ? aspectRatio : undefined,
+    image: !video && image, // video outranks image — never both
+    edit: !video && image && (parsed.edit === true || parsed.edit === 'true'),
+    search: !video && !image && search,
+    query,
+  };
 }
 
 /**
@@ -286,7 +376,7 @@ export async function decideAutoEngagement(
           ],
           stream: false,
           temperature: 0,
-          max_tokens: 160,
+          max_tokens: 300,
           thinking: false,
           timeoutMs: Math.min(remaining, 5_000),
         });
@@ -333,6 +423,32 @@ export async function decideAutoEngagement(
       console.log('[auto-engage] gif net → video=true');
       result.video = true;
     }
+    // ---- ENGAGEMENT nets (image & video) — the production backstop for the
+    // ---- "les autos décident mal" report: an explicit creation phrasing
+    // ---- engages the right engine EVEN when the classifier call failed,
+    // ---- timed out (free-gateway queue) or answered conservatively. Until
+    // ---- now only the search and GIF paths had backstops — an image/video
+    // ---- request missed by the classifier fell through to a plain text
+    // ---- turn (often with the "je ne peux pas générer…" refusal).
+    // ---- Priority stays VIDEO > IMAGE; the nets never override an engine
+    // ---- the classifier already engaged, and the SVG/code guard above has
+    // ---- already vetoed code turns.
+    if (!result.video && !result.image && VIDEO_ENGAGE_RE.test(targetText)) {
+      console.log(
+        '[auto-engage] video engagement net → video=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
+      );
+      result.video = true;
+      result.image = false;
+      result.edit = false;
+    }
+    if (!result.video && !result.image && IMAGE_ENGAGE_RE.test(targetText)) {
+      console.log(
+        '[auto-engage] image engagement net → image=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
+      );
+      result.image = true;
+      result.video = false;
+      result.animate = false;
+    }
   }
 
   // ---- Lexical search net — fires AFTER the classifier: identity/ranking/
@@ -348,6 +464,15 @@ export async function decideAutoEngagement(
       '— query:',
       result.query
     );
+  }
+
+  // ---- Query backfill — search=true with an EMPTY query used to be dropped
+  // ---- entirely by the caller (decision.search && decision.query); a weak
+  // ---- model often forgets the query field, so the raw target text stands
+  // ---- in and the search survives.
+  if (result.search && !result.query) {
+    result.query = targetText.replace(/\s+/g, ' ').trim().slice(0, 150);
+    console.log('[auto-engage] search query backfilled from the target text');
   }
 
   return result;
