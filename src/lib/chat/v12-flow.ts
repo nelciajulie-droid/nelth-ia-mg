@@ -1390,7 +1390,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           // volatile-fact vocabulary → potential web search
           'actu(?:alit[eé]|s)?\\b|\\bnews?\\b|\\bactu\\b|aujourd|now|current|latest|derni[eè]re|recent|prix|price|m[eé]t[eé]o|weather|score|r[eé]sultat|cours|rate|pr[eé]sident|ministre|champion|pdg|ceo|sorti(?:e|s)?|released?',
           // generation vocabulary → potential image/video engagement
-          'image|photo|dessin|draw|paint|illustration|logo|affiche|poster|vid[eé]o|anime|animation|movie|clip|render|3d|mockup|banni[eè]re|avatar|gif',
+          'image|photo|dessin|draw|paint|illustration|logo|affiche|poster|vid[eé]o|anime|animation|movie|clip|render|3d|mockup|banni[eè]re|avatar|gif|imagine',
           // EXPLICIT search-command vocabulary → potential web search (fr + en).
           // The reported miss ("je dis recherche au web billy" → the assistant
           // answered it cannot browse the web): the phrase carried NO
@@ -1399,6 +1399,13 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           // to a plain chat answer. A search verb or a web-sphere noun is
           // itself the strongest search signal a message can carry.
           'recherch\\w*|\\bcherch\\w*\\b|\\bsearch\\w*\\b|\\bgoogle[rz]?\\b|\\bweb\\b|\\binternet\\b|\\ben\\s+ligne\\b|\\bonline\\b|\\brenseign\\w*\\b|\\bv[eé]rif(?:ie|ier|iez)\\b|\\bverif\\w*\\b|\\btrouv\\w*\\b|\\bfind\\b|\\blook\\s+(?:it|that|this)?\\s*up\\b|\\blook\\s+up\\b',
+          // Volatile-fact vocabulary, second wave (fr + en) — match results,
+          // weather phrasings, release dates, person status, currency: the
+          // question forms these ride ("qui a gagné hier", "météo de demain",
+          // "taux de change", "quand sort le prochain…") must never skip the
+          // decision machinery (the nets backstop them, but the classifier
+          // query is richer than the raw-text fallback).
+          'gagn\\w*|\\bmatch\\b|temp[eé]rature|pleuv\\w*|neigera|taux\\s+de\\s+change|horair\\w*|\\bprochain\\w*\\b|\\bdemain\\b|\\bhier\\b|\\bdisponible\\b|\\bsorti(?:e|s)?\\b|\\bconvertis\\b',
         ].join('|'),
         'i'
       );

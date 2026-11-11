@@ -30,19 +30,29 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
  *   • DETERMINISTIC ENGAGEMENT NETS for the plain image and video routings
  *     too (mirror of the GIF/search nets): when the classifier call fails,
  *     times out (free-gateway queues routinely exceed the 6.5s budget → fail
- *     open) or answers conservatively, an explicit creation verb + media
- *     noun ("dessine-moi un chat", "crée une vidéo de…", "fais-moi un logo")
- *     still engages the right engine — reported as the production bug
- *     "les autos décident mal" : the image/video paths had NO backstop,
- *     only the search and GIF did;
+ *     open) or answers conservatively, an explicit creation/draw/WANT verb +
+ *     media noun ("dessine-moi un chat", "crée une vidéo de…", "fais-moi un
+ *     logo", "je voudrais une photo de…", "veux un avatar"), a bare draw
+ *     verb, or an inherently-visual hypothetical ("à quoi ressemblerait…",
+ *     "montre-moi à quoi ressemble…") still engages the right engine —
+ *     reported as the production bug "les autos décident mal" : the
+ *     image/video paths had NO backstop, only the search and GIF did;
+ *   • FEW-SHOT examples in the classifier prompt — the free-gateway model
+ *     follows worked examples far better than rules alone; the examples pin
+ *     the two confusion zones (volatile-vs-stable facts, media-vs-code /
+ *     imagine-visual vs creative-writing) so its raw accuracy rises on
+ *     exactly the turns the nets cannot decide;
  *   • TRUNCATION-TOLERANT parsing: the free gateway model sometimes prefixes
  *     prose or cuts the JSON mid-way — the known keys are recovered by regex
  *     instead of discarding the whole answer;
- *   • the high-confidence lexical search net from auto-web-search.ts
+ *   • the high-confidence lexical VOLATILE-FACT net from auto-web-search.ts
  *     (identity/ranking/news questions force the search on regardless of a
- *     conservative classifier answer or a failed call), plus a query
- *     backfill — search=true with an empty query keeps the search alive on
- *     the raw target text instead of silently dropping it;
+ *     conservative classifier answer or a failed call), EXTENDED to the
+ *     other volatile-fact families the same failure mode hits: weather
+ *     forecasts, prices & currency conversion, match results/scores,
+ *     release dates & latest releases, person life/relationship status —
+ *     plus a query backfill — search=true with an empty query keeps the
+ *     search alive on the raw target text instead of silently dropping it;
  *   • EXPLICIT search-command net (production: "je dis recherche au web
  *     billy" → plain-chat refusal "Je ne peux pas effectuer de recherche
  *     web"): a literal search command ("recherche au web X", "google X",
@@ -50,7 +60,9 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
  *     web", "vérifie en ligne", imperative "cherche X") forces the search
  *     deterministically — the classifier gets NO veto, a failed/timed-out
  *     call loses nothing, and the command boilerplate is stripped from the
- *     query ("recherche au web billy" searches "billy");
+ *     query ("recherche au web billy" searches "billy"); the search-NOUN
+ *     tier also VETOES the media nets ("fais une recherche d'images" →
+ *     search, never a generation);
  *   • transcript isolation: only user/assistant turns ride the decision call —
  *     system prompts (capability blocks, misspell hints) never pollute it;
  *   • cheap call: no thinking, temperature 0, ~300 max tokens (headroom
@@ -168,34 +180,47 @@ const GIF_REQUEST_RE = /\b(?:gifs?|jifs?)\b/i;
 // GIF paths had lexical backstops, so an image/video request missed by the
 // classifier fell through to a plain text turn — the exact "les autos
 // décident toujours mal" report. The nets below engage the right engine on
-// UNAMBIGUOUS phrasings only: an explicit creation/draw verb + an explicit
-// media noun (or a bare draw verb). Nouns WITHOUT a creation verb ("j'ai vu
-// une image drôle", "recommande-moi un anime") never fire — the classifier
-// keeps those.
+// UNAMBIGUOUS phrasings only: an explicit creation/draw/want verb + an
+// explicit media noun (or a bare draw verb, or an inherently-visual
+// hypothetical). Nouns WITHOUT such a verb ("j'ai vu une image drôle",
+// "recommande-moi un anime") never fire — the classifier keeps those.
 // ---------------------------------------------------------------------------
 
 /** Image engagement net — explicit static-visual creation phrasing. */
-export const IMAGE_ENGAGE_RE = new RegExp(
+const IMAGE_ENGAGE_RE = new RegExp(
   [
     // bare imperative draw verbs (fr + common misspellings + en)
     '\\b(?:dessine(?:-moi)?|dessin(?:e|er|ez)|desine(?:-moi)?|draw|draws|paint|paints|peins?|peign)\\b',
-    // creation verb + explicit static-media noun (within 40 chars — "fais-moi
-    // un logo", "génère une image de…", "create a poster of…")
-    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|montre(?:-moi)?|show)\\b[^\\n]{0,40}?\\b(?:images?|photos?|photographie?s?|dessins?|illustrations?|logos?|ic[ôo]nes?|avatars?|affiches?|posters?|banni[èe]res?|fonds?\\s+d[’\']?[ée]cran|wallpapers?|visuels?|rendus?|renders?|mockups?|maquettes?|concept\\s+arts?|miniatures?|thumbnails?)\\b',
+    // creation/want verb + explicit static-media noun (within 40 chars —
+    // "fais-moi un logo", "génère une image de…", "je voudrais une photo
+    // de…", "create a poster of…"). "cré" carries an OPTIONAL suffix so the
+    // phonetic typo "cre une image" routes like "crée une image".
+    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)?|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|montre(?:-moi)?|show|donn(?:e|es|ez|-moi)?|veux|voudrais|aimerais|d[eé]sir(?:e|erait)?)\\b[^\\n]{0,40}?\\b(?:images?|photos?|photographie?s?|dessins?|illustrations?|logos?|ic[ôo]nes?|avatars?|affiches?|posters?|banni[èe]res?|fonds?\\s+d[’\']?[ée]cran|wallpapers?|visuels?|rendus?|renders?|mockups?|maquettes?|concept\\s+arts?|miniatures?|thumbnails?)\\b',
+    // inherently-visual hypotheticals — "montre-moi à quoi ressemble un
+    // blobfish", "imagine à quoi ressemblerait une ville flottante"; the
+    // bare conditional "à quoi ressemblerait X ?" is a visual-render request.
+    // NO \b before the accented "à" — JS \b only sees [A-Za-z0-9_], so
+    // \bà never matches (space→à is not a word boundary); a plain literal
+    // (or ^|\s anchor) is the correct boundary for accented French.
+    '\\b(?:montre(?:-moi)?|imagine(?:r|-moi)?|dessine(?:-moi)?)\\b[^\\n]{0,30}?[àa]\\s+quoi\\s+ressembl(?:e|erait|era|ait)\\b',
+    '(?:^|\\s)[àa]\\s+quoi\\s+ressemblerait\\b',
   ].join('|'),
   'i'
 );
 
 /** Video engagement net — explicit moving-artifact creation phrasing. */
-export const VIDEO_ENGAGE_RE = new RegExp(
+const VIDEO_ENGAGE_RE = new RegExp(
   [
-    // creation verb + explicit moving-media noun ("crée une vidéo", "fais un
-    // clip", "generate an animation")
-    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|produis(?:-moi)?|produce|producing)\\b[^\\n]{0,40}?\\b(?:vid[ée]os?|clips?|animations?|court[ -]?m[ée]trages?|reels?|stories?|tiktoks?|shorts?|film(?:s|ettes?)?|trailer?s?)\\b',
+    // creation/want verb + explicit moving-media noun ("crée une vidéo",
+    // "fais un clip", "je voudrais un court-métrage", "generate an
+    // animation", "une bande-annonce de…"). Same optional-suffix "cré".
+    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)?|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|produis(?:-moi)?|produce|producing|donn(?:e|es|ez|-moi)?|veux|voudrais|aimerais|d[eé]sir(?:e|erait)?)\\b[^\\n]{0,40}?\\b(?:vid[ée]os?|clips?|animations?|court[ -]?m[ée]trages?|reels?|stories?|tiktoks?|shorts?|film(?:s|ettes?)?|trailer?s?|bandes?[ -]?annonces?|gifs?)\\b',
     // explicit animate-an-existing-visual phrasings ("anime cette image",
-    // "fais bouger cette photo", "animate this image")
+    // "fais bouger cette photo", "animate this image") — BOTH word orders:
+    // "fais ça bouger" and the reversed "fais bouger ça" are correct French.
     '\\banime(?:r|z|-moi|\\s+(?:cette?|cet|ce|la|le|l[’\']|ça|ca|moi|image|photo|dessin))\\b|\\banimates?|animate\\b|\\banimated\\b',
     '\\b(?:fais|fait|mets|met)\\s+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
+    '\\b(?:fais|fait|mets|met)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b[^\\n]{0,20}?\\s(?:[çc]a|ceci|cela|cette?|la|le|l[’\'])\\b',
     '\\b(?:make|put)\\s+(?:it|this|that)\\s+(?:move|in\\s+motion)\\b',
   ].join('|'),
   'i'
@@ -212,6 +237,25 @@ const FORCE_SEARCH_PATTERNS: RegExp[] = [
   /(?:\b(?:le|la|les|l|un|une|d)\s+|d['’])(?:plus|moins)\s+(?:riche|puissant(?:e)?|c[eéè]l[eèé]bre|populaire|influent(?:e)?|grand(?:e)?|fort(?:e)?|beau|belle|intelligent(?:e)?|rapide|cher(?:e)?|pay[eé]|gros(?:se)?|g[eé]nial(?:e)?|demand[eé]|suivi(?:e)?|regard[eé]|aim[eé]|aim[eé]e|écout[eé]|lu(?:e)?|vendu(?:e)?|co[uû]t(?:er)?[eé]?)/i,
   // Explicit news/currency phrasings.
   /(?:actualit[eé]s?|\bactus?\b|quoi\s+de\s+neuf|derni[eè]re?s?\s+(?:news|nouvelles|infos?|information|r[eé]sultats?)|les\s+news\b|vient\s+(?:de\s+)?(?:se\s+)?(?:passer|arriver|d[eé]c[eé]der|mourir|sortir|sorti))/i,
+  // Weather forecasts — unambiguous forms only (bare "quel temps de cuisson"
+  // is a duration; the "quel temps" alternative REQUIRES a place/time/verb
+  // marker so it never matches).
+  /\b(?:m[eé]t[eé]o\b|quel\s+temps\b[^.?!]{0,40}\b(?:[àa]\s|au\s|en\s|demain|aujourd|fait|fera|il\b)|le\s+temps\s+qu['’]il\s+fera|va[-\s]t[-\s]il\s+pleuvoir|il\s+va\s+pleuvoir|pleuvra\b|neigera\b|weather\s+(?:in|at|for|today|tomorrow|tonight|this\s+week))/i,
+  // Prices & currency conversion — current market data is always volatile
+  // ("combien coûte l'iPhone 15", "le prix du riz", "1 euro en fcfa",
+  // "taux de change"). Duration senses ("combien de temps", "how much
+  // time", "c'est combien de temps") are explicitly excluded.
+  /(?:\bcombien\s+(?:[çc]a\s+)?co[uû]t(?:e|ent)\b|co[uû]t(?:e|ent)\s+combien\b|c['’]est\s+combien\b(?!\s+de\s+temps)|\bquel(?:le)?s?\s+(?:est|sont)\b[^.?!]{0,40}\bprix\b|\bprix\s+(?:de|du|des|d['’])[^.?!]{0,30}\b(?:essence|riz|p[eé]trole|gaz|ciment|pain|sucre|billet|ticket|pass|abonnement|t[eé]l[eé]phone|iphone|ordinateur|voiture|moto|maison|dollar|euro|fcfa)\b|\bprix\b[^.?!]{0,30}\b(?:aujourd|actuel|ce\s+mois|en\s+20\d\d)\b|\btaux\s+de\s+change\b|\b(?:euros?|dollars?|fcfa|francs?|nairas?|yens?)\s+en\s+(?:euros?|dollars?|fcfa|francs?|nairas?|yens?)\b|\bhow\s+much\b(?!\s+time))/i,
+  // Match/game results & scores — yesterday's game is not in training data.
+  /(?:\bqui\s+a\s+gagn[eé]\b|\ba\s+gagn[eé]\s+(?:le\s+|la\s+|les\s+|un[e]?\s+)?(?:match|finale|coupe|championnat|ligue|[ée]lection|concours|d[eé]bat|combat|tournoi)\b|gagn[eé]\s+(?:hier|ce\s+matin|hier\s+soir|ce\s+soir|aujourd|\bce\s+week-end\b)|\ble\s+score\b|r[eé]sultats?\s+(?:du\s+|de\s+|des\s+)?(?:match|jeu|concours|finale|[ée]lection)\b|\bwho\s+won\b|\bwho\s+is\s+winning\b)/i,
+  // Release dates & upcoming/latest releases ("quand sort le prochain
+  // album de X", "date de sortie", "le dernier épisode de la série").
+  /(?:\bquand\s+(?:est-ce\s+que\s+)?(?:[çc]a\s+)?(?:sort|sortira|va\s+sortir|est\s+sorti|sont\s+sortis)\b|[çc]a\s+sort\s+quand\b|\bsort\s+quand\b|\bdate\s+de\s+sortie\b|\brelease\s+date\b|\bsortie\s+(?:du|de\s+la|des)\s+(?:film|album|jeu|s[ée]rie|[ée]pisode|mod[eè]le|t[eé]l[eé]phone)\b|\bprochain(?:e|s)?\s+(?:album|film|[ée]pisode|saison|tome|opus|jeu|livre|single|clip|mod[eè]le|t[eé]l[eé]phone|iphone|version|update|samsung|playstation|xbox)\b|\bderni[eè]re?s?\s+(?:album|film|[ée]pisode|saison|tome|opus|jeu|livre|single|clip|version|iphone|samsung)\b)/i,
+  // Current status of a real person (alive/dead/married/what happened) —
+  // people die and relationships change; training data goes stale silently
+  // and a wrong "il est vivant" costs the user's trust. "que?\b" covers both
+  // "est-ce que le pape est vivant" and "est-ce qu'il est mort".
+  /(?:\best[-\s]ce\s+que?\b[^.?!]{0,60}\b(?:mort|morte|d[eé]c[eé]d[eé]|vivant|vivante|en\s+vie|mari[eé]e?|divorc[eé]e?|libre)\b|\best-(?:il|elle)\s+(?:mort|morte|d[eé]c[eé]d[eé]|vivant|vivante|en\s+vie)\b|\b(?:il|elle)\s+(?:est\s+)?(?:mort|morte|d[eé]c[eé]d[eé])\s*\?|\btoujours\s+(?:en\s+vie|vivant|vivante|mari[eé]e?|ensemble|en\s+couple|divorc[eé]e?)\b|\bwhat\s+happened\s+to\b|\bqu['’]est[-\s]ce\s+qui\s+(?:s['’]\s*)?est\s+(?:pass[eé]|arriv[eé])\s+(?:[àa]\s+|avec\s))/i,
 ];
 
 /** Light phonetic normalization for the net ONLY (matching, never displayed). */
@@ -245,6 +289,18 @@ function forcedSearchMatch(text: string): boolean {
 // classifier cannot veto it, a dropped classifier call cannot lose it.
 // ---------------------------------------------------------------------------
 
+/** Tier C — an explicit search-NOUN request ("fais une recherche sur X",
+ *  "faites des recherches", "peux-tu faire une recherche", "do a search").
+ *  Standalone because it also VETOES the media engagement nets downstream:
+ *  in "fais une recherche d'images de chats" the IMAGE net would otherwise
+ *  see "fais … images" and generate instead of searching — the search noun
+ *  is the object of the verb, so the search wins. Bare "fais"/"faites"
+ *  imperatives only — the past participle "fait" is deliberately absent so
+ *  "j'ai fait une recherche" (the user reporting their own research) does
+ *  not force a search. */
+const SEARCH_TIER_C =
+  '\\b(?:fais(?:-moi|-en|-le|-la|-un|-une)?|faites|faire|peux-tu|peut-on|pouvez-vous|veux-tu|make|making|do|doing|can|could|would|will)\\b[^\\n]{0,40}?\\b(?:une?\\s+|des\\s+|quelques\\s+|some\\s+|a\\s+)?(?:recherches?|research|search)\\b';
+
 const SEARCH_COMMAND_RE = new RegExp(
   [
     // A) a search verb AND a bare web-sphere noun, ANY order, close together
@@ -258,13 +314,8 @@ const SEARCH_COMMAND_RE = new RegExp(
     //    "googler le prix de l'essence". A bare "google" command is never
     //    anything but a web search.
     '\\bgoo?gle[rz]?\\b',
-    // C) explicit search-noun request, web word or not — "fais une
-    //    recherche sur X", "faites des recherches", "peux-tu faire une
-    //    recherche", "do a search", "do some research". Bare "fais" (tu)
-    //    and "faites" (vous) imperatives ONLY — the past participle "fait"
-    //    is deliberately absent so "j'ai fait une recherche" (the user
-    //    reporting THEIR OWN research) does not force a search.
-    '\\b(?:fais(?:-moi|-en|-le|-la|-un|-une)?|faites|faire|peux-tu|peut-on|pouvez-vous|veux-tu|make|making|do|doing|can|could|would|will)\\b[^\\n]{0,40}?\\b(?:une?\\s+|des\\s+|quelques\\s+|some\\s+|a\\s+)?(?:recherches?|research|search)\\b',
+    // C) → SEARCH_TIER_C (see above — also the media-net veto).
+    SEARCH_TIER_C,
     // D) imperative search verb at MESSAGE START (politeness/modal prefix
     //    allowed) — "cherche billy", "recherche-moi ça", "search for X",
     //    "look it up", "peux-tu chercher…". Start-anchoring keeps
@@ -277,6 +328,9 @@ const SEARCH_COMMAND_RE = new RegExp(
   ].join('|'),
   'i'
 );
+
+/** Standalone tier-C probe (the media-net veto — see SEARCH_TIER_C above). */
+const SEARCH_NOUN_REQUEST_RE = new RegExp(SEARCH_TIER_C, 'i');
 
 /** Tokens stripped when the explicit-command net builds its query — "recherche
  *  au web billy" must SEARCH "billy", not its own command sentence. Only
@@ -333,13 +387,32 @@ VIDEO — video=true ONLY when the user clearly wants a MOVING artifact: a video
 animate=true ONLY when video=true AND it animates an image ALREADY PRESENT (attached to this message or generated earlier in the conversation): "anime cette image", "fais-la bouger", "mets cette photo en vidéo", "make it move". animate=false for every video created from scratch (pure text→video).
 aspectRatio — when video=true AND animate=false, pick the ratio giving the BEST result for THIS video, exactly one of "16:9" (landscape, cinematic, wide scenes, vehicles, city, several elements), "9:16" (vertical, phone-screen, reel/story/TikTok content, standing/dancing person), "1:1" (square, single centered subject, product on plain background, logo-like loop). An EXPLICIT user format keyword ALWAYS wins: vertical/portrait/story/reel/TikTok/short → "9:16"; carré/square → "1:1"; horizontal/paysage/landscape → "16:9". When video=false or animate=true, set "16:9" (ignored anyway).
 
-IMAGE — image=true ONLY when video=false AND the user clearly wants a STATIC visual produced: a drawing, painting, illustration, picture/photo-style render, logo, icon, avatar, wallpaper/background image, banner, poster, thumbnail, meme, sticker, 3D render, concept art, character design. Typical phrasings: "dessine-moi…", "génère/crée une image de…", "fais-moi un logo…", "imagine à quoi ressemblerait…", "montre-moi … en image", "draw me…", "show me what … would look like". ALSO image=true for ITERATION on an image the assistant previously generated ("fais-le en bleu", "même chose mais de nuit", "une autre version", "enlève le chapeau") — in that case ALSO set edit=true. edit=true ONLY when image=true AND it modifies or reiterates a visual ALREADY PRESENT; edit=false for every fresh creation.
+IMAGE — image=true ONLY when video=false AND the user clearly wants a STATIC visual produced: a drawing, painting, illustration, picture/photo-style render, logo, icon, avatar, wallpaper/background image, banner, poster, thumbnail, meme, sticker, 3D render, concept art, character design. Typical phrasings: "dessine-moi…", "génère/crée une image de…", "fais-moi un logo…", "je voudrais une photo de…", "montre-moi … en image", "draw me…", "show me what … would look like". ALSO image=true for "imagine + a CONCRETE VISUAL THING" ("imagine un dragon", "imagine une ville flottante", "à quoi ressemblerait un lion en costume") — but "imagine une histoire / un poème / un récit / un scénario / une chanson" is CREATIVE WRITING → all false. ALSO image=true for ITERATION on an image the assistant previously generated ("fais-le en bleu", "même chose mais de nuit", "une autre version", "enlève le chapeau") — in that case ALSO set edit=true. edit=true ONLY when image=true AND it modifies or reiterates a visual ALREADY PRESENT; edit=false for every fresh creation.
 
 CODE / SVG IS NEVER MEDIA — image=false AND video=false when the user asks for a WEB or SOFTWARE artifact: landing page, website, web page, site vitrine, app, application, dashboard, portfolio, blog, online store, game, API, script, HTML/CSS/JS/React/Python code — even with style adjectives like "ultra moderne" (those describe CODE quality). Also false for ANY SVG or vector-graphics request ("crée un SVG d'un chien", "dessine-moi le SVG", "convertis cette image en SVG"): an SVG is XML markup the assistant writes in its answer — this rule OVERRIDES any draw verb. EXCEPTION — explicit draw verbs win over code nouns for RASTER output: "dessine une maquette de landing page", "montre-moi un visuel du site" → image=true (the user wants a visual render). The exception NEVER covers SVG.
 
-SEARCH — search=true ONLY when image=false AND video=false AND the answer depends on facts that change or the assistant cannot reliably know: CURRENT HOLDERS of a role/title ("qui est le président", "le PDG de Tesla", "le champion en titre" — time-sensitive EVEN WITHOUT "actuellement"); RANKINGS/SUPERLATIVES ("l'homme le plus puissant", "la star la plus célèbre", "l'entreprise la plus riche"); current situation of real people/stars/companies/teams; news & current events; volatile data (weather, scores, prices, schedules, recent releases); obscure facts. ALWAYS search=true — whatever the topic, even a STABLE one — when the user EXPLICITLY commands a search: "recherche (au/sur le) web", "cherche X", "cherche sur internet", "google X", "googler", "fais une recherche sur X", "faites des recherches", "vérifie en ligne", "search the web", "look it up", "find information about X". The user literally asking for a search can never be answered from memory — an explicit search command is the highest-confidence search signal that exists. search=false for greetings, small talk, math/logic, coding help, creative writing, translation, STABLE knowledge (history, science, definitions), or when the answer is ALREADY present in the conversation history. query: an optimized keyword search query (max ~10 words) in the LANGUAGE of the user's message, CORRECTLY spelled (silently fix their mistakes), essential keywords only, no full sentence — and WITHOUT the command boilerplate ("recherche au web billy" queries "billy", not the command sentence). Empty string when search=false.
+SEARCH — search=true ONLY when image=false AND video=false AND the answer depends on facts that change or the assistant cannot reliably know: CURRENT HOLDERS of a role/title ("qui est le président", "le PDG de Tesla", "le champion en titre" — time-sensitive EVEN WITHOUT "actuellement"); RANKINGS/SUPERLATIVES ("l'homme le plus puissant", "la star la plus célèbre", "l'entreprise la plus riche"); current situation of real people/stars/companies/teams; news & current events; WEATHER anywhere ("quel temps à Douala", "il va pleuvoir demain"); MATCH RESULTS & SCORES ("qui a gagné le match", "le score de la finale", "who won yesterday"); PRICES & MONEY ("combien coûte l'iPhone 15", "le prix de l'essence", "1 euro en fcfa", "taux de change", "how much is it"); RELEASES ("quand sort le prochain album de X", "date de sortie du film", "le dernier épisode de la série"); LIFE/RELATIONSHIP STATUS of real people ("est-ce que X est mort", "est-il toujours en vie", "what happened to X"); volatile data (schedules, recent releases); obscure facts. ALWAYS search=true — whatever the topic, even a STABLE one — when the user EXPLICITLY commands a search: "recherche (au/sur le) web", "cherche X", "cherche sur internet", "google X", "googler", "fais une recherche sur X", "faites des recherches", "vérifie en ligne", "search the web", "look it up", "find information about X". The user literally asking for a search can never be answered from memory — an explicit search command is the highest-confidence search signal that exists. search=false for greetings, small talk, math/logic, coding help, creative writing, translation, STABLE knowledge (history, science, definitions, "quelle est la capitale du Cameroun"), how-to questions, or when the answer is ALREADY present in the conversation history. query: an optimized keyword search query (max ~10 words) in the LANGUAGE of the user's message, CORRECTLY spelled (silently fix their mistakes), essential keywords only, no full sentence — and WITHOUT the command boilerplate ("recherche au web billy" queries "billy", not the command sentence). Empty string when search=false.
 
-PRIORITY — exactly ONE engine per turn: video outranks image (a GIF/clip/animation request is video, NEVER image), image outranks search, and a media turn never searches (search=false when image or video is true). When genuinely uncertain, prefer everything false: wrongly generating media or a search interrupts a normal conversation far more than missing one does. Only choose true when you are CONFIDENT.`;
+PRIORITY — exactly ONE engine per turn: video outranks image (a GIF/clip/animation request is video, NEVER image), image outranks search, and a media turn never searches (search=false when image or video is true). When genuinely uncertain, prefer everything false: wrongly generating media or a search interrupts a normal conversation far more than missing one does. Only choose true when you are CONFIDENT.
+
+EXAMPLES — study the boundaries, then decide the LATEST message on its own:
+"recherche au web billy" → search=true, query "billy"
+"google le prix de l'essence au Cameroun" → search=true, query "prix essence Cameroun"
+"qui a gagné le match hier soir ?" → search=true, query "résultat match hier soir"
+"quel temps il fera demain à Douala ?" → search=true, query "météo Douala demain"
+"quand sort le prochain album de Beyoncé ?" → search=true, query "nouvel album Beyoncé date sortie"
+"est-ce que le pape est vivant ?" → search=true, query "pape santé"
+"1 euro en fcfa ?" → search=true, query "taux de change euro fcfa"
+"quelle est la capitale du Cameroun ?" → search=false (stable knowledge)
+"comment faire un gâteau ?" → search=false (how-to, stable)
+"dessine-moi un chat astronaute" → image=true, edit=false
+"imagine un dragon cracheur de feu" → image=true (concrete visual thing)
+"imagine une histoire de dragon" → all false (creative writing)
+"fais-le en bleu" (the previous assistant turn generated an image) → image=true, edit=true
+"génère un GIF de chat qui danse" → video=true
+"crée une vidéo verticale de danse" → video=true, aspectRatio "9:16"
+"crée une landing page ultra moderne" → all false (CODE)
+"bonjour, ça va ?" → all false`;
 
 // ---------------------------------------------------------------------------
 // Decision call
@@ -502,7 +575,18 @@ export async function decideAutoEngagement(
   const svg = SVG_REQUEST_RE.test(targetText);
   const imageWords = IMAGE_WORD_RE.test(targetText);
   const videoWords = VIDEO_WORD_RE.test(targetText);
-  if (svg || (CODE_DELIVERABLE_RE.test(targetText) && !imageWords && !videoWords)) {
+  // "jeu vidéo" / "game" are CODE nouns (the assistant WRITES a game) — the
+  // bare word "vidéo" they contain must not exempt the phrase from the code
+  // guard ("crée un jeu vidéo de course" was hijacked into the video engine
+  // because videoWords matched "vidéo" and skipped the guard). The exemption
+  // survives only when a REAL moving-artifact signal (gif/clip/anim/reel…)
+  // rides along ("anime ce jeu vidéo en gif") — those stay media turns.
+  const jeuVideo = /\bjeux?\s+vid[ée]o\b/i.test(targetText);
+  const otherVideoSignal =
+    /\b(?:gifs?|jifs?|clips?|animations?|anim\w*|reels?|stories?|tiktoks?|court[ -]?m[ée]trages?|bandes?[ -]?annonces?|trailer?s?)\b/i.test(
+      targetText
+    );
+  if (svg || (CODE_DELIVERABLE_RE.test(targetText) && !imageWords && (!videoWords || (jeuVideo && !otherVideoSignal)))) {
     console.log('[auto-engage] svg/code guard → image=false, video=false');
     result.image = false;
     result.edit = false;
@@ -511,59 +595,78 @@ export async function decideAutoEngagement(
   } else {
     if (videoWords && !imageWords) result.image = false; // video engine owns it
     if (imageWords && !videoWords) result.video = false; // image engine owns it
-    // GIF lexical net — a bare "gif" request deterministically routes to the
-    // video engine (a GIF is animated); the animate flag stays as parsed so
-    // "convertis cette image en gif" keeps its image→video animate source.
-    if (!result.video && !result.image && GIF_REQUEST_RE.test(targetText)) {
-      console.log('[auto-engage] gif net → video=true');
-      result.video = true;
-    }
-    // ---- ENGAGEMENT nets (image & video) — the production backstop for the
-    // ---- "les autos décident mal" report: an explicit creation phrasing
-    // ---- engages the right engine EVEN when the classifier call failed,
-    // ---- timed out (free-gateway queue) or answered conservatively. Until
-    // ---- now only the search and GIF paths had backstops — an image/video
-    // ---- request missed by the classifier fell through to a plain text
-    // ---- turn (often with the "je ne peux pas générer…" refusal).
-    // ---- Priority stays VIDEO > IMAGE; the nets never override an engine
-    // ---- the classifier already engaged, and the SVG/code guard above has
-    // ---- already vetoed code turns.
-    if (!result.video && !result.image && VIDEO_ENGAGE_RE.test(targetText)) {
-      console.log(
-        '[auto-engage] video engagement net → video=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
-      );
-      result.video = true;
+    // Explicit search-command veto — a LITERAL search command ("recherche au
+    // web X", "google X", "fais une recherche d'images de chats", "cherche X
+    // sur le net") can never be answered by a generation: the veto zeroes the
+    // media flags the classifier may itself have set (reproduced: the
+    // classifier answered image=true on "fais une recherche d'images") AND
+    // keeps the media engagement nets off — the search net below owns the
+    // turn. The user asked for a recherche; they get a recherche.
+    const searchCommand = SEARCH_COMMAND_RE.test(targetText);
+    if (searchCommand) {
+      console.log('[auto-engage] explicit search command → media engagement vetoed');
       result.image = false;
       result.edit = false;
-    }
-    if (!result.video && !result.image && IMAGE_ENGAGE_RE.test(targetText)) {
-      console.log(
-        '[auto-engage] image engagement net → image=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
-      );
-      result.image = true;
       result.video = false;
       result.animate = false;
     }
+    if (!searchCommand) {
+      // GIF lexical net — a bare "gif" request deterministically routes to the
+      // video engine (a GIF is animated); the animate flag stays as parsed so
+      // "convertis cette image en gif" keeps its image→video animate source.
+      if (!result.video && !result.image && GIF_REQUEST_RE.test(targetText)) {
+        console.log('[auto-engage] gif net → video=true');
+        result.video = true;
+      }
+      // ---- ENGAGEMENT nets (image & video) — the production backstop for the
+      // ---- "les autos décident mal" report: an explicit creation phrasing
+      // ---- engages the right engine EVEN when the classifier call failed,
+      // ---- timed out (free-gateway queue) or answered conservatively. Until
+      // ---- now only the search and GIF paths had backstops — an image/video
+      // ---- request missed by the classifier fell through to a plain text
+      // ---- turn (often with the "je ne peux pas générer…" refusal).
+      // ---- Priority stays VIDEO > IMAGE; the nets never override an engine
+      // ---- the classifier already engaged, and the SVG/code guard above has
+      // ---- already vetoed code turns.
+      if (!result.video && !result.image && VIDEO_ENGAGE_RE.test(targetText)) {
+        console.log(
+          '[auto-engage] video engagement net → video=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
+        );
+        result.video = true;
+        result.image = false;
+        result.edit = false;
+      }
+      if (!result.video && !result.image && IMAGE_ENGAGE_RE.test(targetText)) {
+        console.log(
+          '[auto-engage] image engagement net → image=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
+        );
+        result.image = true;
+        result.video = false;
+        result.animate = false;
+      }
+    }
   }
 
-  // ---- Lexical search nets — fire AFTER the classifier: identity/ranking/
-  // ---- news questions force the search even when the model answered false
-  // ---- or the call failed entirely (a wasted search costs seconds; a stale
-  // ---- "le président est X" costs the user's trust). The EXPLICIT-command
+  // ---- Lexical search nets — fire AFTER the classifier: volatile-fact
+  // ---- questions (identity holders, rankings, news, weather, prices,
+  // ---- match results, releases, person status, currency) force the search
+  // ---- even when the model answered false or the call failed entirely (a
+  // ---- wasted search costs seconds; a stale "le président est X" or
+  // ---- hallucinated price costs the user's trust). The EXPLICIT-command
   // ---- net adds the strongest signal of all: a literal search command
   // ---- ("recherche au web X", "google X", "fais une recherche") can NEVER
   // ---- be answered from memory — the classifier gets no veto over it.
   if (!result.search && !result.image && !result.video) {
     const commandHit = SEARCH_COMMAND_RE.test(targetText);
-    const identityHit = forcedSearchMatch(targetText);
-    if (commandHit || identityHit) {
+    const volatileHit = forcedSearchMatch(targetText);
+    if (commandHit || volatileHit) {
       result.search = true;
       result.query =
         decision?.query?.trim() ||
         (commandHit ? stripSearchBoilerplate(targetText) : targetText.replace(/\s+/g, ' ').trim().slice(0, 150));
       console.log(
         '[auto-engage] lexical net forced search' + (decision ? ' (model said false)' : ' (model decision unavailable)'),
-        commandHit ? '— explicit command — query:' : '— identity/ranking/news — query:',
+        commandHit ? '— explicit command — query:' : '— volatile facts — query:',
         result.query
       );
     }
@@ -580,3 +683,23 @@ export async function decideAutoEngagement(
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Audit surface — every deterministic net + helper exposed in ONE aggregate
+// for the offline test harness (bun can import this module top-level: the
+// only import is kilo-llm, whose own imports are dynamic). Single source of
+// truth: the harness can never drift from the production regexes.
+// ---------------------------------------------------------------------------
+export const AUTO_NETS = {
+  IMAGE_ENGAGE_RE,
+  VIDEO_ENGAGE_RE,
+  GIF_REQUEST_RE,
+  SEARCH_COMMAND_RE,
+  SEARCH_NOUN_REQUEST_RE,
+  CODE_DELIVERABLE_RE,
+  SVG_REQUEST_RE,
+  IMAGE_WORD_RE,
+  VIDEO_WORD_RE,
+  forcedSearchMatch,
+  stripSearchBoilerplate,
+};

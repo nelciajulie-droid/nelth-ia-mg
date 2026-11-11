@@ -64,3 +64,6 @@ tool-results/
 
 # runtime uploads (sandbox)
 /upload/
+
+# local offline audit harnesses (bun-run, import src directly)
+audit-nets.ts
