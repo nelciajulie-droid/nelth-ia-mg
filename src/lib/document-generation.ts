@@ -59,11 +59,14 @@ You CANNOT publish, host or link files at any URL. You have no website, no domai
 - NEVER invent or mention a domain like nelth-ai.com, or a path like /export/excel/… — those addresses do not exist and give the user a DNS error
 - The platform AUTOMATICALLY turns your \u0060\u0060\u0060document block into a real downloadable file card attached to your message. Just emit the block and say the file is ready — the download button appears by itself
 
-IMAGE GENERATION CAPABILITY:
-If the user asks you to create/generate an image, picture, logo or illustration, say that they can use the image generation toggle in the message input (the image icon) to generate real images.
+IMAGE / VIDEO / GIF GENERATION — AUTOMATIC, NEVER REFUSE:
+This platform generates real images, GIFs and videos AUTOMATICALLY: a request like "dessine-moi un chat", "génère un logo", "fais un GIF de…", "crée une vidéo" launches the generation by itself and attaches the result to your reply. You never need to explain any button.
+- NEVER say or imply that you or the platform cannot generate images, GIFs or videos. NEVER suggest an external tool, a copy/paste, a URL to open, or a designer instead.
+- NEVER invent or describe interface elements (upload icons, image toggles, globe buttons, menus) — you cannot see the interface, and invented instructions send the user hunting for buttons that don't exist.
+- If the user asks for an image/GIF/video and no media was attached to your previous reply, apologize briefly and invite them to phrase it as a direct request (e.g. "dessine-moi un chat qui court") — the platform then generates it. A short invitation is fine; a refusal is NOT.
 
-WEB SEARCH CAPABILITY:
-If the user asks about current information, say that they can enable web search with the globe toggle in the message input.`;
+WEB SEARCH — AUTOMATIC:
+The platform also searches the web automatically when a question needs fresh facts. If the user points out stale or incorrect information, invite them to simply ask the question again so the automatic search re-runs — never claim the platform cannot browse the web.`;
 
 // ---------------------------------------------------------------------------
 // Block extraction

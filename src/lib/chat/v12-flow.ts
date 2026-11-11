@@ -1356,12 +1356,16 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     }
   } else if (!isSdModel && !isContinuation) {
     // ---- Auto engagement: the model decides, the user doesn't have to. ----
-    // The three autos (video + image + web search) decide IN PARALLEL — the
-    // added latency of each extra auto is ~zero. Priority when several claim
-    // the turn: VIDEO > IMAGE > search (neither a video nor an image turn
-    // streams an LLM answer, so search context would be entirely wasted).
-    // The video decision runs even with the image toggle ON: a textual
-    // "crée une vidéo…" outranks a sticky UI toggle.
+    // ONE combined classifier call (auto-engage.ts) decides video + image +
+    // search together — it REPLACED three parallel decision calls (auto-image
+    // / auto-video / auto-web-search) whose simultaneous bursts drew 429s
+    // from the keyless engine (reproduced: 2 of 3 calls killed → the
+    // engagement silently failed open → the model then answered plain text,
+    // sometimes with the "je ne peux pas générer…" hallucination). Priority
+    // when several claim the turn: VIDEO > IMAGE > search (neither a video
+    // nor an image turn streams an LLM answer, so search context would be
+    // entirely wasted). The video fields still run even with the image toggle
+    // ON: a textual "crée une vidéo…" outranks a sticky UI toggle.
     const { configGet } = await import('@/lib/config');
     const imageAuto = await configGet<boolean>('image_generation.auto', true);
     const imageEnabled = await configGet<boolean>('image_generation.enable', true);
@@ -1386,7 +1390,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           // volatile-fact vocabulary → potential web search
           'actu(?:alit[eé]|s)?\\b|\\bnews?\\b|\\bactu\\b|aujourd|now|current|latest|derni[eè]re|recent|prix|price|m[eé]t[eé]o|weather|score|r[eé]sultat|cours|rate|pr[eé]sident|ministre|champion|pdg|ceo|sorti(?:e|s)?|released?',
           // generation vocabulary → potential image/video engagement
-          'image|photo|dessin|draw|paint|illustration|logo|affiche|poster|vid[eé]o|anime|animation|movie|clip|render|3d|mockup|banni[eè]re|avatar',
+          'image|photo|dessin|draw|paint|illustration|logo|affiche|poster|vid[eé]o|anime|animation|movie|clip|render|3d|mockup|banni[eè]re|avatar|gif',
         ].join('|'),
         'i'
       );
@@ -1395,66 +1399,56 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       if (!needsAutoDecision) {
         console.log('[v12-flow] auto decisions SKIPPED (trivial turn pre-gate) — streaming immediately');
       } else {
-      // HARD budget on the whole decision phase: these non-streaming calls
-      // gate the user-visible first token (the "Réflexion" shimmer). The
-      // decision functions already carry their own 6s deadline; this outer
-      // race is the belt-and-suspenders guarantee that NO hang (engine bug,
-      // stuck socket…) ever delays the answer beyond 8s — decisions simply
-      // default off and the turn streams.
+      // HARD budget on the whole decision phase: this non-streaming call
+      // gates the user-visible first token (the "Réflexion" shimmer). The
+      // router already carries its own 6.5s deadline; this outer race is the
+      // belt-and-suspenders guarantee that NO hang (engine bug, stuck
+      // socket…) ever delays the answer beyond 8s — the decision simply
+      // defaults off and the turn streams.
       const decisionsT0 = Date.now();
       // Arm the budget timer lazily and CLEAR it once the race settles — a
       // lingering armed timer would hold the serverless invocation open for
       // the full 8s even after a fast decision round.
       let decisionsTimer: ReturnType<typeof setTimeout> | undefined;
       const decisionsTimeout = () =>
-        new Promise<[null, null, null]>((resolve) => {
+        new Promise<null>((resolve) => {
           decisionsTimer = setTimeout(() => {
             console.warn(
-              `[v12-flow] auto decisions exceeded the 8s budget ${phaseMs('decisions-budget')} — defaulting all off`
+              `[v12-flow] auto decision exceeded the 8s budget ${phaseMs('decisions-budget')} — defaulting all off`
             );
-            resolve([null, null, null]);
+            resolve(null);
           }, 8_000);
         });
-      const decisionsWork = Promise.all([
-        imageAuto && imageEnabled && !imageToggleOn
-          ? import('@/lib/chat/auto-image').then((m) => m.decideAutoImageGeneration(llmMessages))
-          : Promise.resolve(null),
-        searchAuto && !imageToggleOn && (await webSearchAllowed())
-          ? import('@/lib/chat/auto-web-search').then((m) => m.decideAutoWebSearch(llmMessages))
-          : Promise.resolve(null),
-        videoAuto && videoEnabled
-          ? import('@/lib/chat/auto-video').then((m) => m.decideAutoVideoGeneration(llmMessages))
-          : Promise.resolve(null),
-      ]).catch(() => [null, null, null] as [null, null, null]);
-      let imageDecision: any = null;
-      let searchDecision: any = null;
-      let videoDecision: any = null;
+      // Single combined call — the enablement flags (admin config + image
+      // toggle) only gate how the RESULT is consumed below, so one call
+      // serves every combination of the three autos.
+      const imageAutoOn = imageAuto && imageEnabled && !imageToggleOn;
+      const searchAutoOn = searchAuto && !imageToggleOn && (await webSearchAllowed());
+      const videoAutoOn = videoAuto && videoEnabled;
+      const decisionsWork =
+        imageAutoOn || searchAutoOn || videoAutoOn
+          ? import('@/lib/chat/auto-engage').then((m) => m.decideAutoEngagement(llmMessages))
+          : Promise.resolve(null);
+      let decision: any = null;
       try {
-        [imageDecision, searchDecision, videoDecision] = await Promise.race([
-          decisionsWork,
-          decisionsTimeout(),
-        ]);
+        decision = await Promise.race([decisionsWork, decisionsTimeout()]);
       } finally {
         if (decisionsTimer) clearTimeout(decisionsTimer);
       }
       console.log(
-        `[v12-flow] auto decisions took ${Date.now() - decisionsT0}ms`,
-        '— video:',
-        videoDecision ? JSON.stringify(videoDecision) : 'null',
-        '| image:',
-        imageDecision ? JSON.stringify(imageDecision) : 'null',
-        '| search:',
-        searchDecision ? JSON.stringify(searchDecision) : 'null'
+        `[v12-flow] auto decision took ${Date.now() - decisionsT0}ms`,
+        '—',
+        decision ? JSON.stringify(decision) : 'null (budget exceeded or no auto enabled)'
       );
-      autoVideo = videoDecision?.video === true;
-      autoVideoAnimate = autoVideo && videoDecision?.animate === true;
-      autoVideoRatio = videoDecision?.aspectRatio;
-      autoImage = !autoVideo && imageDecision?.image === true;
-      autoImageEdit = autoImage && imageDecision?.edit === true;
-      if (!autoImage && !autoVideo && searchDecision?.search && searchDecision.query) {
+      autoVideo = videoAutoOn && decision?.video === true;
+      autoVideoAnimate = autoVideo && decision?.animate === true;
+      autoVideoRatio = decision?.aspectRatio;
+      autoImage = !autoVideo && imageAutoOn && decision?.image === true;
+      autoImageEdit = autoImage && decision?.edit === true;
+      if (!autoImage && !autoVideo && searchAutoOn && decision?.search && decision.query) {
         // Same status label as the explicit toggle — the user shouldn't be
         // able to tell an auto engagement apart from a manual one.
-        await performWebSearch(searchDecision.query, 'Recherche web en cours');
+        await performWebSearch(decision.query, 'Recherche web en cours');
       }
       }
     }
