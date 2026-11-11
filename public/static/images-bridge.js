@@ -40,7 +40,9 @@
   const HASH = '#/images';
   // Versionnée : garantit que les navigateurs laissent tomber l'ancien bundle
   // après une mise à jour (les artefacts sont committés dans public/).
-  const BUILD = '20270106a3';
+  // 20261111a1 — fix tremblement du composeur au défilement : ancre de
+  // défilement désactivée (.images-scroll) + hystérésis du compactage.
+  const BUILD = '20261111a1';
   const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
   const CSS_URL = '/static/images/app.css?v=' + BUILD;
 

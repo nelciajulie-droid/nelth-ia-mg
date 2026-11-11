@@ -184,9 +184,14 @@ export function ImagesApp() {
   const editReferenceItem = editReferenceId ? (itemsById.get(editReferenceId) ?? null) : null;
 
   // ---- Défilement : positions conservées entre les vues ----
+  // Hystérésis (entrée > 96, sortie < 40) : le compactage retire ~270px de
+  // hauteur au bloc sticky (titre replié + composeur compacté). Avec un seuil
+  // unique, un même scrollTop oscillait autour de 96 → scrolled clignotait
+  // vrai/faux → tremblement du composeur. La bande morte casse ce cycle.
   const onStudioScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    setScrolled(e.currentTarget.scrollTop > 96);
-    studioScrollPos.current = e.currentTarget.scrollTop;
+    const top = e.currentTarget.scrollTop;
+    setScrolled((prev) => (prev ? top > 40 : top > 96));
+    studioScrollPos.current = top;
   };
   const onWorkspaceScroll = (e: React.UIEvent<HTMLDivElement>) => {
     wsScrollPos.current = e.currentTarget.scrollTop;

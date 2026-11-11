@@ -141,7 +141,15 @@
 }
 
 /* Thin neutral scrollbars (galerie + panneaux). */
+/* overflow-anchor DÉSACTIVÉ (cause racine du tremblement du composeur) :
+   quand le bloc sticky du studio se compacte (titre max-h-0 + composeur
+   compact), l'ancre de défilement native du navigateur compensait en
+   ramenant scrollTop sous le seuil → l'en-tête se redéployait → nouvel
+   ajustement → oscillation infinie tant que le seuil restait franchissable
+   (zone médiane). Sans ancre, le compactage n'est plus « remboursé » par le
+   navigateur : un seul basculement, aucun tremblement. */
 .images-scroll {
+  overflow-anchor: none;
   scrollbar-width: thin;
   scrollbar-color: var(--images-scroll-thumb) transparent;
 }
