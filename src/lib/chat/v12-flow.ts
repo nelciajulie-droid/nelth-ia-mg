@@ -1391,6 +1391,14 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           'actu(?:alit[eé]|s)?\\b|\\bnews?\\b|\\bactu\\b|aujourd|now|current|latest|derni[eè]re|recent|prix|price|m[eé]t[eé]o|weather|score|r[eé]sultat|cours|rate|pr[eé]sident|ministre|champion|pdg|ceo|sorti(?:e|s)?|released?',
           // generation vocabulary → potential image/video engagement
           'image|photo|dessin|draw|paint|illustration|logo|affiche|poster|vid[eé]o|anime|animation|movie|clip|render|3d|mockup|banni[eè]re|avatar|gif',
+          // EXPLICIT search-command vocabulary → potential web search (fr + en).
+          // The reported miss ("je dis recherche au web billy" → the assistant
+          // answered it cannot browse the web): the phrase carried NO
+          // interrogative, NO volatile-fact keyword and NO media noun — the
+          // pre-gate skipped the whole decision machinery and the turn fell
+          // to a plain chat answer. A search verb or a web-sphere noun is
+          // itself the strongest search signal a message can carry.
+          'recherch\\w*|\\bcherch\\w*\\b|\\bsearch\\w*\\b|\\bgoogle[rz]?\\b|\\bweb\\b|\\binternet\\b|\\ben\\s+ligne\\b|\\bonline\\b|\\brenseign\\w*\\b|\\bv[eé]rif(?:ie|ier|iez)\\b|\\bverif\\w*\\b|\\btrouv\\w*\\b|\\bfind\\b|\\blook\\s+(?:it|that|this)?\\s*up\\b|\\blook\\s+up\\b',
         ].join('|'),
         'i'
       );

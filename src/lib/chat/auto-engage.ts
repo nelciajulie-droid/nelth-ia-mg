@@ -43,6 +43,14 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
  *     conservative classifier answer or a failed call), plus a query
  *     backfill — search=true with an empty query keeps the search alive on
  *     the raw target text instead of silently dropping it;
+ *   • EXPLICIT search-command net (production: "je dis recherche au web
+ *     billy" → plain-chat refusal "Je ne peux pas effectuer de recherche
+ *     web"): a literal search command ("recherche au web X", "google X",
+ *     "fais une recherche sur X", "cherche X sur internet", "search the
+ *     web", "vérifie en ligne", imperative "cherche X") forces the search
+ *     deterministically — the classifier gets NO veto, a failed/timed-out
+ *     call loses nothing, and the command boilerplate is stripped from the
+ *     query ("recherche au web billy" searches "billy");
  *   • transcript isolation: only user/assistant turns ride the decision call —
  *     system prompts (capability blocks, misspell hints) never pollute it;
  *   • cheap call: no thinking, temperature 0, ~300 max tokens (headroom
@@ -224,6 +232,93 @@ function forcedSearchMatch(text: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// EXPLICIT search-command net — the strongest routing signal the platform
+// gets. The reported production miss: "je dis recherche au web billy" → the
+// assistant answered "Je ne peux pas effectuer de recherche web en temps
+// réel". That message carried NO interrogative and NO volatile-fact keyword,
+// so the v12 pre-gate skipped the whole machinery; and even when the
+// classifier DID run, a conservative answer ("prefer everything false") or
+// a failed/timed-out free-gateway call left no backstop — the identity/
+// ranking/news nets above matched nothing, and a plain chat turn can never
+// produce search results. When the user LITERALLY commands a search, the
+// search engages deterministically (same philosophy as the GIF net): the
+// classifier cannot veto it, a dropped classifier call cannot lose it.
+// ---------------------------------------------------------------------------
+
+const SEARCH_COMMAND_RE = new RegExp(
+  [
+    // A) a search verb AND a bare web-sphere noun, ANY order, close together
+    //    — the literal "web search" command ("recherche au web billy",
+    //    "cherche sur internet", "vérifie en ligne", "search the web",
+    //    "renseigne-toi sur le net"). "web" is matched as a BARE word so
+    //    "website/webpage" (code deliverables) never count as web-sphere.
+    '\\b(?:recherch\\w*|cherch\\w*|search(?:ing|er)?|v[eé]rif\\w*|verif\\w*|renseign\\w*|trouv\\w*|find\\w*|look\\w*|consult\\w*)\\b[^\\n]{0,60}?\\b(?:web|internets?|net|en\\s+ligne|en\\s+direct|online|google)\\b',
+    '\\b(?:web|internets?|net|en\\s+ligne|en\\s+direct|online|google)\\b[^\\n]{0,60}?\\b(?:recherch\\w*|cherch\\w*|search(?:ing|er)?|v[eé]rif\\w*|verif\\w*|renseign\\w*|trouv\\w*|find\\w*|look\\w*)\\b',
+    // B) the googling verb — "google billy", "google-le", "google it",
+    //    "googler le prix de l'essence". A bare "google" command is never
+    //    anything but a web search.
+    '\\bgoo?gle[rz]?\\b',
+    // C) explicit search-noun request, web word or not — "fais une
+    //    recherche sur X", "faites des recherches", "peux-tu faire une
+    //    recherche", "do a search", "do some research". Bare "fais" (tu)
+    //    and "faites" (vous) imperatives ONLY — the past participle "fait"
+    //    is deliberately absent so "j'ai fait une recherche" (the user
+    //    reporting THEIR OWN research) does not force a search.
+    '\\b(?:fais(?:-moi|-en|-le|-la|-un|-une)?|faites|faire|peux-tu|peut-on|pouvez-vous|veux-tu|make|making|do|doing|can|could|would|will)\\b[^\\n]{0,40}?\\b(?:une?\\s+|des\\s+|quelques\\s+|some\\s+|a\\s+)?(?:recherches?|research|search)\\b',
+    // D) imperative search verb at MESSAGE START (politeness/modal prefix
+    //    allowed) — "cherche billy", "recherche-moi ça", "search for X",
+    //    "look it up", "peux-tu chercher…". Start-anchoring keeps
+    //    declarative false positives out ("je cherche un cadeau" → the
+    //    classifier keeps that one). "trouve/find" are deliberately NOT
+    //    here: a bare "trouve l'erreur dans mon code" is a CODE turn —
+    //    they only engage tier A (paired with a web word, "trouve X sur
+    //    le web") or the classifier.
+    '^\\s*(?:stp|please|s[\'’]il\\s+te\\s+pla[îi]t|peux-tu|peut-on|pouvez-vous|pourrais-tu|pourriez-vous|est-ce\\s+que\\s+(?:tu|vous|on)\\s+(?:peux|peut|pouvez|peuvent)|tu\\s+peux|vous\\s+pouvez|tu\\s+pourrais|vous\\s+pourriez|can\\s+you|could\\s+you|would\\s+you|will\\s+you)?\\s*(?:me\\s+|nous\\s+|moi\\s+|us\\s+)?(?:aller\\s+|essa(?:y|ie)r\\s+de\\s+|try\\s+to\\s+)?(?:me\\s+|nous\\s+)?(?:cherche(?:r|-moi|-nous)?|recherche(?:r|-moi|-nous)?|search|look\\s+(?:up|it\\s+up|that\\s+up|this\\s+up|him\\s+up|her\\s+up|them\\s+up)|renseigne(?:r|-toi)?|v[eé]rifi(?:e|er)(?:-moi)?|googl(?:e|er|ez)(?:-moi)?)\\b',
+  ].join('|'),
+  'i'
+);
+
+/** Tokens stripped when the explicit-command net builds its query — "recherche
+ *  au web billy" must SEARCH "billy", not its own command sentence. Only
+ *  function words, search verbs and web-sphere nouns are dropped; content
+ *  words always survive. Lowercased for the search engine; when nothing
+ *  survives the strip the raw text stands in. */
+const SEARCH_COMMAND_STOPWORDS = new Set([
+  // search verbs & imperatives (fr + en)
+  'recherche', 'recherches', 'rechercher', 'cherche', 'cherches', 'chercher', 'cherchez',
+  'search', 'searching', 'searcher', 'googler', 'google', 'trouve', 'trouves', 'trouver', 'trouvez',
+  'find', 'finds', 'finding', 'look', 'looking', 'renseigne', 'renseigner',
+  'verifie', 'vérifie', 'verifier', 'vérifier', 'verifies', 'verify', 'check',
+  'fais', 'faites', 'faire', 'make', 'making', 'go', 'va', 'vas', 'allez', 'essaie', 'essaye',
+  // web-sphere nouns
+  'web', 'internets', 'internet', 'net', 'ligne', 'online', 'direct',
+  // articles / prepositions / politeness (fr + en)
+  'au', 'aux', 'dans', 'sur', 'le', 'la', 'les', 'un', 'une', 'des', 'du', 'de', 'd',
+  'pour', 'moi', 'nous', 'me', 'us', 'the', 'on', 'in', 'of', 'et', 'à', 'a', 'que',
+  'tu', 'vous', 'peux', 'peut', 'pouvez', 'please', 'stp', 'plait', 'plaît', 'te',
+  'ça', 'ca', 'ce', 'cet', 'cette', 'it', 'that', 'this', 'up', 'est-ce', 'quoi',
+  'fait', 'for', 'to', 'and', 'or', 'about', 'with', 'into', 'can', 'could', 'would',
+  'will', 'do', 'does', 'you', 'toi', 'vas-y', 'hey', 'salut',
+]);
+
+function stripSearchBoilerplate(text: string): string {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const kept = raw
+    .toLowerCase()
+    // elision/hyphen glue → plain tokens ("cherche-moi" → "cherche moi",
+    // "l'essence" keeps its l' glued — accents normalized only for lookup)
+    .replace(/[\u2019'’]/g, ' ')
+    .split(/[\s\-\u2013\u2014,.!?;:()]+/)
+    .filter((tok) => tok.length > 0)
+    // content words only: stop words out, single/double pure-alpha fillers
+    // out ("de", "à", "l", "d", "qu"), digits and longer words always kept
+    .filter((tok) => !SEARCH_COMMAND_STOPWORDS.has(tok) && !(tok.length <= 2 && /^[a-z]+$/.test(tok)));
+  const query = kept.join(' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+  return query.length >= 3 ? query : raw.slice(0, 150);
+}
+
+// ---------------------------------------------------------------------------
 // Combined classifier prompt (merged from the three per-tool prompts)
 // ---------------------------------------------------------------------------
 
@@ -242,7 +337,7 @@ IMAGE — image=true ONLY when video=false AND the user clearly wants a STATIC v
 
 CODE / SVG IS NEVER MEDIA — image=false AND video=false when the user asks for a WEB or SOFTWARE artifact: landing page, website, web page, site vitrine, app, application, dashboard, portfolio, blog, online store, game, API, script, HTML/CSS/JS/React/Python code — even with style adjectives like "ultra moderne" (those describe CODE quality). Also false for ANY SVG or vector-graphics request ("crée un SVG d'un chien", "dessine-moi le SVG", "convertis cette image en SVG"): an SVG is XML markup the assistant writes in its answer — this rule OVERRIDES any draw verb. EXCEPTION — explicit draw verbs win over code nouns for RASTER output: "dessine une maquette de landing page", "montre-moi un visuel du site" → image=true (the user wants a visual render). The exception NEVER covers SVG.
 
-SEARCH — search=true ONLY when image=false AND video=false AND the answer depends on facts that change or the assistant cannot reliably know: CURRENT HOLDERS of a role/title ("qui est le président", "le PDG de Tesla", "le champion en titre" — time-sensitive EVEN WITHOUT "actuellement"); RANKINGS/SUPERLATIVES ("l'homme le plus puissant", "la star la plus célèbre", "l'entreprise la plus riche"); current situation of real people/stars/companies/teams; news & current events; volatile data (weather, scores, prices, schedules, recent releases); obscure facts. search=false for greetings, small talk, math/logic, coding help, creative writing, translation, STABLE knowledge (history, science, definitions), or when the answer is ALREADY present in the conversation history. query: an optimized keyword search query (max ~10 words) in the LANGUAGE of the user's message, CORRECTLY spelled (silently fix their mistakes), essential keywords only, no full sentence. Empty string when search=false.
+SEARCH — search=true ONLY when image=false AND video=false AND the answer depends on facts that change or the assistant cannot reliably know: CURRENT HOLDERS of a role/title ("qui est le président", "le PDG de Tesla", "le champion en titre" — time-sensitive EVEN WITHOUT "actuellement"); RANKINGS/SUPERLATIVES ("l'homme le plus puissant", "la star la plus célèbre", "l'entreprise la plus riche"); current situation of real people/stars/companies/teams; news & current events; volatile data (weather, scores, prices, schedules, recent releases); obscure facts. ALWAYS search=true — whatever the topic, even a STABLE one — when the user EXPLICITLY commands a search: "recherche (au/sur le) web", "cherche X", "cherche sur internet", "google X", "googler", "fais une recherche sur X", "faites des recherches", "vérifie en ligne", "search the web", "look it up", "find information about X". The user literally asking for a search can never be answered from memory — an explicit search command is the highest-confidence search signal that exists. search=false for greetings, small talk, math/logic, coding help, creative writing, translation, STABLE knowledge (history, science, definitions), or when the answer is ALREADY present in the conversation history. query: an optimized keyword search query (max ~10 words) in the LANGUAGE of the user's message, CORRECTLY spelled (silently fix their mistakes), essential keywords only, no full sentence — and WITHOUT the command boilerplate ("recherche au web billy" queries "billy", not the command sentence). Empty string when search=false.
 
 PRIORITY — exactly ONE engine per turn: video outranks image (a GIF/clip/animation request is video, NEVER image), image outranks search, and a media turn never searches (search=false when image or video is true). When genuinely uncertain, prefer everything false: wrongly generating media or a search interrupts a normal conversation far more than missing one does. Only choose true when you are CONFIDENT.`;
 
@@ -451,19 +546,27 @@ export async function decideAutoEngagement(
     }
   }
 
-  // ---- Lexical search net — fires AFTER the classifier: identity/ranking/
+  // ---- Lexical search nets — fire AFTER the classifier: identity/ranking/
   // ---- news questions force the search even when the model answered false
   // ---- or the call failed entirely (a wasted search costs seconds; a stale
-  // ---- "le président est X" costs the user's trust).
-  if (!result.search && !result.image && !result.video && forcedSearchMatch(targetText)) {
-    const rawQuery = targetText.replace(/\s+/g, ' ').trim().slice(0, 150);
-    result.search = true;
-    result.query = decision?.query?.trim() || rawQuery;
-    console.log(
-      '[auto-engage] lexical net forced search' + (decision ? ' (model said false)' : ' (model decision unavailable)'),
-      '— query:',
-      result.query
-    );
+  // ---- "le président est X" costs the user's trust). The EXPLICIT-command
+  // ---- net adds the strongest signal of all: a literal search command
+  // ---- ("recherche au web X", "google X", "fais une recherche") can NEVER
+  // ---- be answered from memory — the classifier gets no veto over it.
+  if (!result.search && !result.image && !result.video) {
+    const commandHit = SEARCH_COMMAND_RE.test(targetText);
+    const identityHit = forcedSearchMatch(targetText);
+    if (commandHit || identityHit) {
+      result.search = true;
+      result.query =
+        decision?.query?.trim() ||
+        (commandHit ? stripSearchBoilerplate(targetText) : targetText.replace(/\s+/g, ' ').trim().slice(0, 150));
+      console.log(
+        '[auto-engage] lexical net forced search' + (decision ? ' (model said false)' : ' (model decision unavailable)'),
+        commandHit ? '— explicit command — query:' : '— identity/ranking/news — query:',
+        result.query
+      );
+    }
   }
 
   // ---- Query backfill — search=true with an EMPTY query used to be dropped
