@@ -16,6 +16,9 @@
  *     V3/GIF : les N variations d'une action partagent UNE SEULE requête
  *     Nelthai — le compte voyage dans le prompt (« N IMAGES ») et les
  *     images rendues se répartissent sur les lignes (runNelthaiGroup).
+ *     V2 t2i et vidéo t2v : idem via le paramètre NATIF « variations » de
+ *     la passerelle vibes — une seule action pour toute la génération
+ *     (runVibesImageGroup / runVideoGroup), plus d'envoi une-par-une.
  *   • Persistence — bytes through the existing files pipeline (file_id →
  *     /api/v1/files/{id}/content), metadata in the image_item table.
  */
@@ -514,8 +517,10 @@ async function runVibesImageGeneration(
     });
     imageUrl = edited.imageUrl;
   } else {
-    // Texte→image : un seul appel single-variation par item (le studio file
-    // N items pour N variations — le fan-out vit dans vibesGenerateImages).
+    // Texte→image : repli individuel (ligne orpheline d'un groupe, édit…).
+    // Le chemin normal d'une génération multi-variations est le GROUPE
+    // (runVibesImageGroup) — le paramètre natif « variations » de la
+    // passerelle couvre toute l'action en une seule fois.
     await setItemMeta(item.id, { phase: 'sending' });
     const results = await vibes.vibesGenerateImages({
       prompt: effectivePrompt,
@@ -527,7 +532,20 @@ async function runVibesImageGeneration(
     imageUrl = results[0].url;
   }
 
-  // Nettoyage watermark + logo (repli : téléchargement direct des octets).
+  await persistVibesImage(user, item, plan, imageUrl);
+}
+
+/**
+ * Nettoyage watermark + logo (repli : téléchargement direct des octets)
+ * puis persistance — partagé par le chemin individuel V2 et le groupe.
+ */
+async function persistVibesImage(
+  user: ApiUser,
+  item: ImagineItem,
+  plan: GenerationPlan,
+  imageUrl: string
+): Promise<void> {
+  const vibes = await import('@/lib/imagine/vibes');
   await setItemMeta(item.id, { phase: 'image' });
   let bytes: Buffer;
   let contentType: string;
@@ -545,6 +563,85 @@ async function runVibesImageGeneration(
     provider: 'vibes',
     model: 'nelth-v2',
   });
+}
+
+/**
+ * V2 t2i — génération de GROUPE : la passerelle vibes expose un paramètre
+ * natif « variations » (vibesGenerateImages) — UNE SEULE action service
+ * couvre toutes les lignes d'une même génération, au lieu d'un appel par
+ * ligne. Le client gère lui-même le fan-out gateway-safe (plusieurs appels
+ * parallèles de 1 variation — le gateway images time-out au-delà de 1) et
+ * rend jusqu'à N URLs ; la i-ème URL → i-ème ligne.
+ *
+ * Repli robuste — le pire cas égale l'ancien comportement : moins d'images
+ * que demandé → lignes orphelines en génération individuelle ; échec total
+ * → repli intégral une-par-une (miroir de runNelthaiGroup). L'i2i V2 est
+ * verrouillé à 1 variation → jamais ici.
+ */
+async function runVibesImageGroup(
+  user: ApiUser,
+  entries: GenerationBatchEntry[]
+): Promise<void> {
+  const items = entries.map((entry) => entry.item);
+  const plan = entries[0].plan;
+  const requested = Math.max(1, Math.min(entries[0].requested ?? items.length, 4));
+
+  const heartbeats = items.map((item) =>
+    setInterval(() => {
+      void patchItemRow(item.id, {}).catch(() => undefined);
+    }, HEARTBEAT_MS)
+  );
+
+  try {
+    const vibes = await import('@/lib/imagine/vibes');
+    // V2 : l'aspect_ratio est un VRAI paramètre gateway — jamais de hint de
+    // composition dans le prompt (parité exacte avec le chemin individuel).
+    const effectivePrompt = buildEffectivePrompt(plan, 'none');
+    const broadcastPhase = (phase: string) => {
+      for (const item of items) {
+        void setItemMeta(item.id, { phase }).catch(() => undefined);
+      }
+    };
+
+    console.log(
+      `[imagine] groupe V2 : 1 action vibes (variations=${requested}) pour ${items.length} ligne(s)`
+    );
+
+    broadcastPhase('sending');
+    const results = await vibes.vibesGenerateImages({
+      prompt: effectivePrompt,
+      aspectRatio: plan.aspectRatio,
+      variations: requested,
+    });
+    if (!results.length) throw new Error('La génération a échoué.');
+    broadcastPhase('generating');
+
+    for (let index = 0; index < items.length; index++) {
+      const result: { url: string } | undefined = results[index];
+      if (result) {
+        try {
+          await persistVibesImage(user, items[index], plan, result.url);
+        } catch (err) {
+          await failItem(items[index], plan, err);
+        }
+      } else {
+        // Ligne orpheline (le moteur a rendu moins d'images que demandé) →
+        // génération individuelle, comme avant.
+        console.log(
+          `[imagine] groupe V2 : ${results.length}/${requested} image(s) rendues — ligne ${index + 1} en génération individuelle`
+        );
+        await runOneGeneration(user, items[index], plan);
+      }
+    }
+  } catch {
+    // Action de groupe morte → repli intégral une-par-une.
+    console.warn('[imagine] groupe V2 : action unique échouée — repli individuel par ligne');
+    for (const entry of entries) {
+      await runOneGeneration(user, entry.item, entry.plan);
+    }
+  } finally {
+    for (const heartbeat of heartbeats) clearInterval(heartbeat);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -581,9 +678,9 @@ async function runNelthaiImageGeneration(
  * Directive de compte V3/GIF — la quantité demandée voyage DANS le prompt :
  * « 3 IMAGES » pour 3 variations, « 1 IMAGE » pour une seule. Le moteur
  * Nelthai rend alors les N images d'un SEUL job (image_urls[]) au lieu de
- * N requêtes envoyées une à une. V2 et vidéo restent hors de ce chemin :
- * leurs passerelles ne prennent pas la commande en prompt (fan-out par
- * ligne inchangé).
+ * N requêtes envoyées une à une. V2 et vidéo n'ont pas besoin de directive :
+ * leurs passerelles vibes exposent un paramètre NATIF « variations », pris
+ * en charge par leurs propres groupes (runVibesImageGroup / runVideoGroup).
  */
 function nelthaiCountDirective(count: number): string {
   return count > 1
@@ -734,6 +831,84 @@ async function runVideoGeneration(
   });
 }
 
+/**
+ * Vidéo t2v — génération de GROUPE : la passerelle vibes expose un paramètre
+ * natif « variations » — UNE SEULE soumission de batch couvre toutes les
+ * lignes d'une même génération (le batch rend N vidéos dans content[]) au
+ * lieu de N soumissions une-par-une. La i-ème vidéo → i-ème ligne.
+ *
+ * Repli robuste — le pire cas égale l'ancien comportement : moins de vidéos
+ * que demandé → lignes orphelines en génération individuelle ; échec total
+ * → repli intégral une-par-une (miroir de runNelthaiGroup). L'i2v est
+ * verrouillé à 1 variation → jamais ici (le ratio suit l'image source).
+ */
+async function runVideoGroup(
+  user: ApiUser,
+  entries: GenerationBatchEntry[]
+): Promise<void> {
+  const items = entries.map((entry) => entry.item);
+  const plan = entries[0].plan;
+  const requested = Math.max(1, Math.min(entries[0].requested ?? items.length, 4));
+
+  const heartbeats = items.map((item) =>
+    setInterval(() => {
+      void patchItemRow(item.id, {}).catch(() => undefined);
+    }, HEARTBEAT_MS)
+  );
+
+  try {
+    const { generateVideos } = await import('@/lib/video-generation');
+    const resolution = normalizeVibesResolution(plan.resolution);
+    const phaseOf = (phase: string): string =>
+      phase === 'sending' ? 'sending' : phase === 'rendering' ? 'generating' : 'image';
+    const broadcastPhase = (phase: string) => {
+      for (const item of items) {
+        void setItemMeta(item.id, { phase: phaseOf(phase) }).catch(() => undefined);
+      }
+    };
+
+    console.log(
+      `[imagine] groupe vidéo : 1 soumission unique (variations=${requested}) pour ${items.length} ligne(s)`
+    );
+
+    // Parité exacte avec le chemin individuel : prompt BRUT (le ratio et la
+    // résolution sont de VRAIS paramètres gateway, jamais de hint prompt).
+    const videos = await generateVideos(plan.prompt, requested, {
+      aspectRatio: normalizeVibesAspectRatio(plan.aspectRatio),
+      resolution,
+      onPhase: broadcastPhase,
+    });
+
+    for (let index = 0; index < items.length; index++) {
+      const video: { bytes: Buffer; contentType: string } | undefined = videos[index];
+      if (video) {
+        try {
+          await persistGeneratedMedia(user, items[index], plan, video.bytes, video.contentType, {
+            provider: 'vibes',
+            model: 'nelth-v2-video',
+          });
+        } catch (err) {
+          await failItem(items[index], plan, err);
+        }
+      } else {
+        console.log(
+          `[imagine] groupe vidéo : ${videos.length}/${requested} vidéo(s) rendues — ligne ${index + 1} en génération individuelle`
+        );
+        await runOneGeneration(user, items[index], plan);
+      }
+    }
+  } catch {
+    console.warn(
+      '[imagine] groupe vidéo : soumission unique échouée — repli individuel par ligne'
+    );
+    for (const entry of entries) {
+      await runOneGeneration(user, entry.item, entry.plan);
+    }
+  } finally {
+    for (const heartbeat of heartbeats) clearInterval(heartbeat);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Legacy — moteur actif (aucun modèle explicite : OpenAI configuré ou
 // Nelthai intégré). Comportement historique du studio et du chat.
@@ -776,10 +951,13 @@ export interface GenerationBatchEntry {
   item: ImagineItem;
   plan: GenerationPlan;
   /**
-   * Nombre d'images demandées par CETTE action de génération (V3/GIF : la
-   * quantité voyage dans le prompt — « N IMAGES » — pour UNE requête unique
-   * au lieu de N requêtes une-par-une). Absent pour édit/variations : une
-   * ligne = une image, pas de directive de compte sur ces chemins.
+   * Nombre de médias demandés par CETTE action de génération — c'est le
+   * ticket d'entrée des GROUPES : V3/GIF → la quantité voyage dans le prompt
+   * (« N IMAGES », runNelthaiGroup) ; V2 t2i et vidéo t2v → paramètre NATIF
+   * « variations » de la passerelle vibes (runVibesImageGroup /
+   * runVideoGroup). Une seule requête/soumission pour toute l'action au lieu
+   * de N envois une-par-une. Absent pour édit/variations : une ligne = une
+   * image, pas de compte sur ces chemins.
    */
   requested?: number;
 }
@@ -793,9 +971,11 @@ export interface GenerationBatchEntry {
  *   kind=image, model=v3  → nelthai (t2i, i2i multi-sources)
  *   aucun modèle          → moteur actif (legacy, comportement inchangé)
  *
- * Les GÉNÉRATIONS V3/GIF avec plusieurs variations passent par
- * runNelthaiGroup (une requête unique pour toute l'action) — ce routeur
- * individuelle ne sert que de repli (ligne orpheline, édit, variation).
+ * Les GÉNÉRATIONS multi-variations passent par leur groupe dédié (une
+ * requête/soumission unique pour toute l'action : runNelthaiGroup pour
+ * V3/GIF, runVibesImageGroup / runVideoGroup pour le paramètre natif
+ * vibes) — ce routeur individuel ne sert que de repli (ligne orpheline,
+ * édit, variation, i2i/i2v).
  *
  * A HEARTBEAT bumps the row's updated_at every 20s while this worker runs —
  * the stale reaper can then NEVER interrupt a live generation (however
@@ -909,27 +1089,36 @@ const WORKER_CONCURRENCY = 2;
  * through next/server `after()` so the POST returns immediately and the UI
  * polls the rows. Concurrency is capped to stay gentle with the gateway.
  *
- * V3/GIF (générations avec compte) : les lignes d'une même action partagent
- * UN SEUL job Nelthai — le compte voyage dans le prompt (« N IMAGES »), les
- * images rendues se répartissent sur les lignes (voir runNelthaiGroup). Les
- * autres chemins (V2, vidéo, legacy, édit/variations) restent une requête
- * par ligne avec la concurrence historique.
+ * Une action de génération multi-variations = UN SEUL envoi côté passerelle,
+ * quel que soit le modèle : V3/GIF → le compte voyage dans le prompt
+ * (« N IMAGES », runNelthaiGroup) ; V2 t2i et vidéo t2v → paramètre NATIF
+ * « variations » de la passerelle vibes (runVibesImageGroup / runVideoGroup).
+ * Les chemins verrouillés à 1 (i2i V2, i2v), le legacy et l'édit/variations
+ * restent une requête par ligne avec la concurrence historique.
  */
 export async function runGenerationBatch(
   user: ApiUser,
   batch: Array<{ item: ImagineItem; plan: GenerationPlan; requested?: number }>
 ): Promise<void> {
-  // Partition : groupes V3/GIF (même plan = même action de génération) vs
+  // Partition : groupes d'une même action (même plan = mêmes paramètres) vs
   // le reste (item par item).
   const groups = new Map<GenerationPlan, GenerationBatchEntry[]>();
   const singles: GenerationBatchEntry[] = [];
   for (const entry of batch) {
     const kind = entry.plan.kind ?? 'image';
+    const hasSources = (entry.plan.sourceImages?.length ?? 0) > 0;
     const groupable =
-      kind !== 'video' &&
-      (kind === 'gif' || entry.plan.model === 'v3') &&
       typeof entry.requested === 'number' &&
-      entry.requested >= 1;
+      entry.requested >= 1 &&
+      (
+        // V3/GIF (t2i et i2i) — compte dans le prompt (984127a).
+        (kind !== 'video' && (kind === 'gif' || entry.plan.model === 'v3')) ||
+        // Vidéo t2v — paramètre natif « variations » (i2v verrouillé à 1,
+        // jamais groupé : le ratio suit l'image source).
+        (kind === 'video' && !hasSources) ||
+        // V2 t2i — paramètre natif « variations » (i2i V2 verrouillé à 1).
+        (kind === 'image' && entry.plan.model === 'v2' && !hasSources)
+      );
     if (groupable) {
       const group = groups.get(entry.plan) ?? [];
       group.push(entry);
@@ -941,7 +1130,15 @@ export async function runGenerationBatch(
 
   const runners: Array<Promise<void>> = [];
   for (const group of groups.values()) {
-    runners.push(runNelthaiGroup(user, group));
+    const plan = group[0].plan;
+    const kind = plan.kind ?? 'image';
+    if (kind === 'video') {
+      runners.push(runVideoGroup(user, group));
+    } else if (kind === 'image' && plan.model === 'v2') {
+      runners.push(runVibesImageGroup(user, group));
+    } else {
+      runners.push(runNelthaiGroup(user, group));
+    }
   }
 
   const queue = [...singles];
@@ -1053,7 +1250,9 @@ export async function queueGenerateItems(
  * `requested` = le nombre de lignes créées par l'action — c'est le compte
  * effectif après les verrous serveur (queueGenerateItems ne crée que les
  * lignes autorisées : i2i V2 et i2v → 1). Il voyage avec l'entrée pour que
- * le worker V3/GIF construise la directive « N IMAGES » de la requête unique. */
+ * le worker construise l'envoi unique de l'action : directive « N IMAGES »
+ * dans le prompt pour V3/GIF, paramètre natif « variations » pour V2 t2i et
+ * vidéo t2v. */
 export function buildBatchPlan(
   items: ImagineItem[],
   input: GenerationPlan

@@ -282,6 +282,96 @@ export async function generateVideo(
   );
 }
 
+/**
+ * Generate up to `count` videos from ONE vibes submission → raw MP4 bytes.
+ *
+ * The studio video path folds the requested count into the gateway's NATIVE
+ * `variations` parameter (no prompt marker needed) so a SINGLE batch renders
+ * every variation at once (the batch's content[] holds one videoUrl per
+ * variation) instead of N back-to-back one-video submissions.
+ *
+ * Same submission-retry semantics as generateVideo (a fast blip restarts the
+ * submit; a batch already running is never re-rolled — only its polling
+ * continues). Returns every video that could be downloaded (1..count) —
+ * possibly FEWER than requested when the gateway produced fewer; callers
+ * decide how to cover the gap.
+ */
+export async function generateVideos(
+  prompt: string,
+  count: number,
+  options: GenerateVideoOptions = {}
+): Promise<GeneratedVideo[]> {
+  if (!prompt || !prompt.trim()) {
+    throw new Error('Prompt is required for video generation');
+  }
+  // Image→video (animate) takes no count parameter and is locked to a single
+  // variation by the studio — degrade to the singular path untouched.
+  if (options.sourceImage) {
+    return [await generateVideo(prompt, options)];
+  }
+  const wanted = Math.max(1, Math.min(Math.round(count) || 1, 4));
+
+  let lastFailure: unknown = null;
+
+  for (let attempt = 0; attempt < MAX_SUBMIT_ATTEMPTS; attempt++) {
+    const submitStartedAt = Date.now();
+    try {
+      options.onPhase?.('sending');
+      const { batchId } = await vibesGenerateVideo({
+        prompt: prompt.trim(),
+        aspectRatio: options.aspectRatio,
+        resolution: options.resolution,
+        variations: wanted,
+      });
+
+      options.onPhase?.('rendering');
+      const urls = await waitForVibesVideo(batchId);
+
+      options.onPhase?.('finalizing');
+      // CDN URLs expire fast — download as many as possible, in order; one
+      // failed download does not void the rest of the batch.
+      const videos: GeneratedVideo[] = [];
+      let lastErr: unknown = new Error('The video service produced no downloadable video');
+      for (const url of urls) {
+        if (videos.length >= wanted) break;
+        try {
+          videos.push(await downloadVibesVideo(url));
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (videos.length) return videos;
+      lastFailure = lastErr;
+    } catch (e) {
+      lastFailure = e;
+      if (e instanceof Error && e.message.startsWith('Video generation')) {
+        console.error('[video-generation] batch failed:', e.message);
+        break;
+      }
+      const fast = Date.now() - submitStartedAt < FAST_SUBMIT_FAIL_MS;
+      if (!fast) {
+        console.error('[video-generation] submit failed (slow — no retry):', e);
+        break;
+      }
+      console.warn(`[video-generation] fast submit blip (attempt ${attempt + 1}) — retrying`);
+      if (attempt < MAX_SUBMIT_ATTEMPTS - 1) {
+        try {
+          options.onRetry?.(attempt + 1, MAX_SUBMIT_ATTEMPTS);
+        } catch {
+          /* UI callback must never break the retry chain */
+        }
+      }
+    }
+  }
+  console.error(
+    '[video-generation] all attempts failed:',
+    lastFailure instanceof Error ? lastFailure.message : String(lastFailure)
+  );
+  throw new Error(
+    'La génération de vidéo a échoué après plusieurs tentatives. Le service de vidéos est probablement momentanément indisponible ou a refusé ce sujet. Essayez de reformuler votre demande (décrivez la scène, le mouvement, le style) puis relancez.'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Persistence through the files upload pipeline
 // ---------------------------------------------------------------------------

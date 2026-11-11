@@ -54,7 +54,11 @@
   // de l'overlay (position fixe, ancrés au bouton) : le menu Format
   // n'est plus jamais rogné au bord droit de la zone défilante des
   // chips (fenêtre tronquée 1:1|4:3|9:16 + zone de défilement fantôme).
-  const BUILD = '20261112a3';
+  // 20261112a4 — backend : V2 t2i et vidéo t2v rejoignent V3/GIF dans
+  // l'envoi unique multi-variations (paramètre NATIF « variations » de la
+  // passerelle vibes — une seule action/soumission pour toute la
+  // génération, plus d'envoi une-par-une ; canari de déploiement).
+  const BUILD = '20261112a4';
   const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
   const CSS_URL = '/static/images/app.css?v=' + BUILD;
 
