@@ -23,8 +23,11 @@
   window.__nelthImagesBridge = true;
 
   const HASH = '#/images';
-  const SCRIPT_URL = '/static/images/main.js';
-  const CSS_URL = '/static/images/app.css';
+  // Versionnée : garantit que les navigateurs laissent tomber l'ancien bundle
+  // après une mise à jour (les artefacts sont committés dans public/).
+  const BUILD = '20261111c1';
+  const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
+  const CSS_URL = '/static/images/app.css?v=' + BUILD;
 
   // Lucide « image » (trait 2px, arrondi) — même gabarit que les autres
   // icônes du rail ; la classe de l'icône d'origine est conservée.

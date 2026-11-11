@@ -1,8 +1,16 @@
 @import "tailwindcss";
 
 @source "./**/*.{ts,tsx}";
+/* La carte de génération du CHAT (AiImageCard) est réutilisée telle quelle par
+   le workspace Images — ses classes utilitaires doivent être compilées ici. */
+@source "../components/app/AiImageCard.tsx";
 @source not "../../public/**";
 @source not "../../.next/**";
+
+/* Mode sombre — le bundle autonome suit le thème du SPA hôte (html.dark),
+   exactement comme l'app Next.js (globals.css). Requis par la carte du chat
+   réutilisée (dark:border-zinc-800, dark:bg-zinc-900…) et ses utilitaires. */
+@custom-variant dark (&:is(.dark *));
 
 /* ==========================================================================
    Nelth-IA Images — design system à jetons (thème du SPA hôte).

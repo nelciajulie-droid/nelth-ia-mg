@@ -77,26 +77,36 @@ export interface GenerateInput {
 }
 
 export async function generate(input: GenerateInput): Promise<ImagineItem[]> {
-  const { items } = await api<{ items: ImagineItem[] }>('/generate', {
+  const body = await api<{ items?: ImagineItem[] }>('/generate', {
     method: 'POST',
     body: JSON.stringify(input),
   });
+  const items = Array.isArray(body?.items) ? body.items : [];
+  if (!items.length) {
+    throw new ImagesApiError(502, 'Réponse inattendue du serveur — aucune image mise en file.');
+  }
   return items;
 }
 
 export async function editItem(itemId: string, prompt: string): Promise<ImagineItem> {
-  const { item } = await api<{ item: ImagineItem }>('/edit', {
+  const { item } = await api<{ item?: ImagineItem }>('/edit', {
     method: 'POST',
     body: JSON.stringify({ itemId, prompt }),
   });
+  if (!item?.id) {
+    throw new ImagesApiError(502, 'Réponse inattendue du serveur — édition non mise en file.');
+  }
   return item;
 }
 
 export async function variationItem(itemId: string): Promise<ImagineItem> {
-  const { item } = await api<{ item: ImagineItem }>('/variations', {
+  const { item } = await api<{ item?: ImagineItem }>('/variations', {
     method: 'POST',
     body: JSON.stringify({ itemId }),
   });
+  if (!item?.id) {
+    throw new ImagesApiError(502, 'Réponse inattendue du serveur — variation non mise en file.');
+  }
   return item;
 }
 
