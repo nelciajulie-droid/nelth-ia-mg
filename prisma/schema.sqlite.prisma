@@ -1,0 +1,842 @@
+// Open WebUI v0.12.5 — Prisma schema (Supabase Postgres) ported from the Python
+// SQLModel/SQLAlchemy table definitions in backend/open_webui/models/*.py.
+//
+// Single database: the hosted Supabase Postgres (session pooler) — used by
+// BOTH production (Vercel) and local development. There is no SQLite variant
+// anymore; the earlier dual-schema setup (schema.prisma sqlite +
+// schema.postgres.prisma) was removed. Porting conventions:
+//   • Table names (@@map) are EXACT — the DB is shared with the original Python app.
+//   • Column names are EXACT Python column names.
+//   • JSON columns (SQLAlchemy JSON/JSONField) → String (TEXT). App code owns
+//     JSON.stringify / JSON.parse.
+//   • time_ns columns (nanoseconds, ~1.7e18) stay Float (double precision).
+//   • user.date_of_birth is stored as 'YYYY-MM-DD' TEXT — Prisma DateTime
+//     cannot parse that format, so it is String.
+//   • No Prisma relations / FK constraints: the app does its own joins.
+//   • String ids have NO default — routers generate uuids.
+//   • Nullable-ness mirrors SQLAlchemy DDL exactly (nullable=False → required).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── users.py ────────────────────────────────────────────────────────────────
+
+model User {
+  id                       String  @id
+  email                    String? @unique
+  username                 String?
+  role                     String? @default("pending")
+  name                     String
+  profile_image_url        String?
+  profile_banner_image_url String?
+  bio                      String?
+  gender                   String?
+  date_of_birth            String? // SQLAlchemy Date, stored as 'YYYY-MM-DD' text
+  timezone                 String?
+  presence_state           String?
+  status_emoji             String?
+  status_message           String?
+  status_expires_at        Int?
+  info                     String? // JSON
+  variables                String? // JSON
+  settings                 String? // JSON
+  oauth                    String? // JSON
+  scim                     String? // JSON
+  last_active_at           Int?
+  updated_at               Int?
+  created_at               Int?
+
+  @@map("user")
+}
+
+model ApiKey {
+  id           String  @id
+  user_id      String
+  key          String  @unique
+  data         String? // JSON
+  expires_at   Int?
+  last_used_at Int?
+  created_at   Int
+  updated_at   Int
+
+  @@map("api_key")
+}
+
+// ─── auths.py ────────────────────────────────────────────────────────────────
+
+model Auth {
+  id            String   @id // mirrors User.id
+  email         String?
+  password      String?
+  active        Boolean?
+  mfa           String? // JSON
+  session_stamp String?
+
+  @@map("auth")
+}
+
+// ─── chats.py ────────────────────────────────────────────────────────────────
+
+model Chat {
+  id                 String   @id
+  user_id            String?
+  title              String?
+  chat               String? // JSON
+  created_at         Int?
+  updated_at         Int?
+  share_id           String?  @unique
+  archived           Boolean? @default(false)
+  pinned             Boolean? @default(false)
+  meta               String?  @default("{}") // JSON
+  variables          String? // JSON
+  folder_id          String?
+  tasks              String? // JSON
+  summary            String?
+  current_message_id String?
+  last_read_at       Int?
+  timer_at           Float? // time_ns
+
+  @@index([user_id])
+  @@index([created_at])
+  @@index([updated_at])
+  @@index([folder_id], map: "folder_id_idx")
+  @@index([user_id, pinned], map: "user_id_pinned_idx")
+  @@index([user_id, archived], map: "user_id_archived_idx")
+  @@index([updated_at, user_id], map: "updated_at_user_id_idx")
+  @@index([folder_id, user_id], map: "folder_id_user_id_idx")
+  // original is a DESC index on (user_id, updated_at, id)
+  @@index([user_id, updated_at, id], map: "user_id_updated_at_id_idx")
+  // originals are PARTIAL indexes (WHERE timer_at IS NOT NULL) — Prisma cannot express that
+  @@index([timer_at], map: "timer_at_idx")
+  @@index([user_id, timer_at], map: "user_id_timer_at_idx")
+  @@index([user_id, folder_id, archived, updated_at, last_read_at, id], map: "user_id_folder_unread_idx")
+  @@map("chat")
+}
+
+model ChatFile {
+  id         String  @id
+  user_id    String
+  chat_id    String
+  message_id String?
+  file_id    String
+  created_at Int
+  updated_at Int
+
+  @@unique([chat_id, file_id], map: "uq_chat_file_chat_file")
+  @@map("chat_file")
+}
+
+// ─── chat_messages.py ─────────────────────────────────────────────────────────
+
+model ChatMessage {
+  id              String   @id
+  chat_id         String
+  user_id         String?
+  role            String
+  parent_id       String?
+  content         String? // JSON
+  output          String? // JSON
+  model_id        String?
+  files           String? // JSON
+  sources         String? // JSON
+  embeds          String? // JSON
+  meta            String? // JSON
+  done            Boolean? @default(true)
+  status_history  String? // JSON
+  error           String? // JSON
+  usage           String? // JSON
+  context_summary String?
+  created_at      Int?
+  updated_at      Int?
+
+  @@index([chat_id])
+  @@index([user_id])
+  @@index([model_id])
+  @@index([created_at])
+  @@index([chat_id, parent_id], map: "chat_message_chat_parent_idx")
+  @@index([model_id, created_at], map: "chat_message_model_created_idx")
+  @@index([user_id, created_at], map: "chat_message_user_created_idx")
+  @@index([chat_id, role, done], map: "chat_message_chat_role_done_idx")
+  @@map("chat_message")
+}
+
+// ─── shared_chats.py ──────────────────────────────────────────────────────────
+
+model SharedChat {
+  id         String  @id // share token (UUID) used in /s/{id} URL
+  chat_id    String
+  user_id    String
+  title      String?
+  chat       String? // JSON snapshot
+  created_at Int?
+  updated_at Int?
+
+  @@map("shared_chat")
+}
+
+// ─── messages.py ──────────────────────────────────────────────────────────────
+
+model Message {
+  id          String  @id
+  user_id     String?
+  app_id      String?
+  channel_id  String?
+  reply_to_id String?
+  parent_id   String?
+  is_pinned   Boolean @default(false)
+  pinned_at   Float? // time_ns
+  pinned_by   String?
+  content     String?
+  data        String? // JSON
+  meta        String? // JSON
+  created_at  Float? // time_ns
+  updated_at  Float? // time_ns
+
+  @@map("message")
+}
+
+model MessageReaction {
+  id         String  @id
+  user_id    String?
+  message_id String?
+  name       String?
+  created_at Float? // time_ns
+
+  @@map("message_reaction")
+}
+
+// ─── channels.py ──────────────────────────────────────────────────────────────
+
+model Channel {
+  id          String   @id
+  user_id     String?
+  type        String?
+  name        String?
+  description String?
+  is_private  Boolean?
+  data        String? // JSON
+  meta        String? // JSON
+  created_at  Float? // time_ns
+  updated_at  Float? // time_ns
+  updated_by  String?
+  archived_at Float? // time_ns
+  archived_by String?
+  deleted_at  Float? // time_ns
+  deleted_by  String?
+
+  @@map("channel")
+}
+
+model ChannelMember {
+  id                String  @id
+  channel_id        String
+  user_id           String?
+  app_id            String?
+  role              String?
+  status            String?
+  is_active         Boolean @default(true)
+  is_channel_muted  Boolean @default(false)
+  is_channel_pinned Boolean @default(false)
+  data              String? // JSON
+  meta              String? // JSON
+  invited_at        Float? // time_ns
+  invited_by        String?
+  joined_at         Float? // time_ns
+  left_at           Float? // time_ns
+  last_read_at      Float? // time_ns
+  created_at        Float? // time_ns
+  updated_at        Float? // time_ns
+
+  // original also has CHECK (user_id IS NULL) <> (app_id IS NULL) — not expressible in Prisma
+  @@unique([channel_id, app_id], map: "uq_channel_member_app")
+  @@map("channel_member")
+}
+
+model ChannelFile {
+  id         String  @id
+  user_id    String
+  channel_id String
+  message_id String?
+  file_id    String
+  created_at Int
+  updated_at Int
+
+  @@unique([channel_id, file_id], map: "uq_channel_file_channel_file")
+  @@map("channel_file")
+}
+
+model ChannelWebhook {
+  id                String  @id
+  channel_id        String
+  user_id           String
+  name              String
+  profile_image_url String?
+  token             String
+  last_used_at      Float? // time_ns
+  created_at        Float // time_ns
+  updated_at        Float // time_ns
+
+  @@map("channel_webhook")
+}
+
+// ─── files.py ─────────────────────────────────────────────────────────────────
+
+model File {
+  id         String  @id
+  user_id    String?
+  hash       String?
+  filename   String?
+  path       String?
+  data       String? // JSON
+  meta       String? // JSON
+  created_at Int?
+  updated_at Int?
+
+  @@index([user_id])
+  @@index([created_at])
+  @@map("file")
+}
+
+// ─── folders.py ───────────────────────────────────────────────────────────────
+
+model Folder {
+  id          String   @id
+  parent_id   String?
+  user_id     String?
+  name        String?
+  items       String? // JSON
+  meta        String? // JSON
+  data        String? // JSON
+  is_expanded Boolean? @default(false)
+  created_at  Int?
+  updated_at  Int?
+
+  @@map("folder")
+}
+
+// ─── notes.py ─────────────────────────────────────────────────────────────────
+
+model Note {
+  id         String  @id
+  user_id    String?
+  title      String?
+  data       String? // JSON
+  meta       String? // JSON
+  created_at Float? // time_ns
+  updated_at Float? // time_ns
+
+  @@map("note")
+}
+
+model PinnedNote {
+  id         String @id
+  user_id    String
+  note_id    String
+  created_at Float // time_ns
+
+  @@map("pinned_note")
+}
+
+// ─── tags.py ──────────────────────────────────────────────────────────────────
+
+model Tag {
+  id      String // composite PK with user_id (see @@id)
+  name    String?
+  user_id String
+  meta    String? // JSON
+
+  @@id([id, user_id]) // composite PK (SQLite PK constraint names unsupported in Prisma)
+  @@index([name])
+  @@index([user_id])
+  @@map("tag")
+}
+
+// ─── knowledge.py ─────────────────────────────────────────────────────────────
+
+model Knowledge {
+  id          String  @id
+  user_id     String?
+  name        String?
+  description String?
+  meta        String? // JSON
+  created_at  Int?
+  updated_at  Int?
+
+  @@map("knowledge")
+}
+
+model KnowledgeDirectory {
+  id           String  @id
+  knowledge_id String
+  parent_id    String?
+  name         String
+  user_id      String
+  created_at   Int
+  updated_at   Int
+
+  @@unique([knowledge_id, parent_id, name], map: "uq_knowledge_directory_knowledge_parent_name")
+  @@index([knowledge_id], map: "ix_knowledge_directory_knowledge_id")
+  @@index([parent_id], map: "ix_knowledge_directory_parent_id")
+  @@map("knowledge_directory")
+}
+
+model KnowledgeFile {
+  id           String  @id
+  knowledge_id String
+  file_id      String
+  directory_id String?
+  user_id      String
+  created_at   Int
+  updated_at   Int
+
+  @@unique([knowledge_id, file_id], map: "uq_knowledge_file_knowledge_file")
+  @@index([directory_id], map: "ix_knowledge_file_directory_id")
+  @@map("knowledge_file")
+}
+
+// ─── groups.py ────────────────────────────────────────────────────────────────
+
+model Group {
+  id              String  @id
+  parent_group_id String?
+  user_id         String?
+  name            String?
+  description     String?
+  data            String? // JSON
+  meta            String? // JSON
+  permissions     String? // JSON
+  created_at      Int?
+  updated_at      Int?
+
+  @@index([parent_group_id])
+  @@map("group")
+}
+
+model GroupMember {
+  id         String @id
+  group_id   String
+  user_id    String
+  created_at Int?
+  updated_at Int?
+
+  @@index([user_id, group_id], map: "ix_group_member_user_id_group_id")
+  @@map("group_member")
+}
+
+// ─── models.py ────────────────────────────────────────────────────────────────
+
+model Model {
+  id            String   @id
+  user_id       String?
+  base_model_id String?
+  name          String?
+  params        String? // JSON
+  meta          String? // JSON
+  version_id    String?
+  is_active     Boolean? @default(true)
+  updated_at    Int?
+  created_at    Int?
+
+  @@map("model")
+}
+
+// ─── functions.py ─────────────────────────────────────────────────────────────
+
+model Function {
+  id         String   @id
+  version_id String?
+  user_id    String?
+  name       String
+  type       String
+  content    String?
+  meta       String? // JSON
+  valves     String? // JSON
+  is_active  Boolean? @default(false)
+  is_global  Boolean?
+  updated_at Int?
+  created_at Int?
+
+  @@index([user_id])
+  @@index([is_global], map: "is_global_idx")
+  @@map("function")
+}
+
+// ─── tools.py ─────────────────────────────────────────────────────────────────
+
+model Tool {
+  id         String  @id
+  version_id String?
+  user_id    String?
+  name       String?
+  content    String?
+  specs      String? // JSON
+  meta       String? // JSON
+  valves     String? // JSON
+  updated_at Int
+  created_at Int?
+
+  @@index([user_id])
+  @@index([created_at])
+  @@map("tool")
+}
+
+// ─── skills.py ────────────────────────────────────────────────────────────────
+
+model Skill {
+  id          String   @id
+  user_id     String?
+  name        String?  @unique
+  description String?
+  content     String?
+  data        String? // JSON
+  version_id  String?
+  meta        String? // JSON
+  is_active   Boolean? @default(true)
+  updated_at  Int?
+  created_at  Int?
+
+  @@map("skill")
+}
+
+// ─── prompts.py ───────────────────────────────────────────────────────────────
+
+model Prompt {
+  id         String   @id
+  command    String?  @unique
+  user_id    String?
+  name       String?
+  content    String?
+  data       String? // JSON
+  meta       String? // JSON
+  tags       String? // JSON
+  is_active  Boolean? @default(true)
+  version_id String?
+  created_at Int?
+  updated_at Int?
+
+  @@index([user_id])
+  @@map("prompt")
+}
+
+// ─── memories.py ──────────────────────────────────────────────────────────────
+
+model Memory {
+  id         String  @id
+  user_id    String?
+  type       String? @default("context")
+  path       String?
+  content    String?
+  meta       String? // JSON
+  updated_at Int?
+  created_at Int?
+
+  @@index([user_id])
+  @@index([type])
+  @@index([id, user_id], map: "ix_memory_id_user_id")
+  @@map("memory")
+}
+
+// ─── feedbacks.py ─────────────────────────────────────────────────────────────
+
+model Feedback {
+  id         String  @id
+  user_id    String?
+  version    Int?    @default(0)
+  type       String?
+  data       String? // JSON
+  meta       String? // JSON
+  snapshot   String? // JSON
+  created_at Int?
+  updated_at Int?
+
+  @@map("feedback")
+}
+
+// ─── config.py ────────────────────────────────────────────────────────────────
+
+model Config {
+  key        String @id
+  value      String // JSON
+  updated_at Int?
+
+  @@map("config")
+}
+
+// ─── automations.py ───────────────────────────────────────────────────────────
+
+model Automation {
+  id          String  @id
+  user_id     String
+  folder_id   String?
+  name        String
+  data        String // JSON {prompt, model_id, rrule}
+  meta        String? // JSON
+  is_active   Boolean @default(true)
+  last_run_at Float? // time_ns
+  next_run_at Float? // time_ns
+  created_at  Float // time_ns
+  updated_at  Float // time_ns
+
+  @@index([next_run_at], map: "ix_automation_next_run")
+  @@index([user_id, folder_id], map: "ix_automation_user_folder")
+  @@map("automation")
+}
+
+model AutomationRun {
+  id            String  @id
+  automation_id String
+  chat_id       String?
+  status        String // success | error
+  error         String?
+  created_at    Float // time_ns
+
+  @@index([automation_id], map: "ix_automation_run_automation_id")
+  @@index([automation_id, created_at], map: "ix_automation_run_aid_created")
+  @@map("automation_run")
+}
+
+// ─── apps.py ──────────────────────────────────────────────────────────────────
+
+model App {
+  id         String  @id
+  slug       String  @unique
+  name       String
+  user_id    String?
+  is_active  Boolean @default(false)
+  data       String // JSON
+  api_key    String?
+  created_at Float // time_ns
+  updated_at Float // time_ns
+
+  @@map("app")
+}
+
+// ─── access_grants.py ─────────────────────────────────────────────────────────
+
+model AccessGrant {
+  id             String @id
+  resource_type  String // "knowledge" | "model" | "prompt" | "tool" | "note" | "channel" | "file" | "app"
+  resource_id    String
+  principal_type String // "user" | "group" | "anyone"
+  principal_id   String // user_id, group_id, or "*"
+  permission     String // "read" | "write"
+  created_at     Int
+
+  @@unique([resource_type, resource_id, principal_type, principal_id, permission], map: "uq_access_grant_grant")
+  @@map("access_grant")
+}
+
+// ─── oauth_sessions.py ────────────────────────────────────────────────────────
+
+model OAuthSession {
+  id         String @id
+  user_id    String
+  provider   String
+  token      String // JSON with access_token, id_token, refresh_token
+  expires_at Int
+  created_at Int
+  updated_at Int
+
+  @@index([user_id], map: "idx_oauth_session_user_id")
+  @@index([expires_at], map: "idx_oauth_session_expires_at")
+  @@index([user_id, provider], map: "idx_oauth_session_user_provider")
+  @@map("oauth_session")
+}
+
+// ─── connectors (@ app mention picker) ───────────────────────────────────────
+
+model ConnectorConnection {
+  id           String  @id
+  user_id      String
+  connector_id String // registry id: gmail | gdrive | gcal | slack | github | notion | outlook | onedrive
+  status       String // "connected" | "expired" | "revoked"
+  provider     String? // oauth provider family reused from the login OAuth env contract
+  account      String? // connected account label (email / login)
+  scopes       String? // JSON array of granted scopes
+  // OAuth tokens (per-user connections) — the @ picker's "Connecter" flow
+  // stores them here; tool execution reads them (lib/connectors/google.ts).
+  access_token      String? // short-lived bearer (token_expires_at)
+  refresh_token     String? // long-lived offline token (Google access_type=offline)
+  token_expires_at  Float? // epoch ms — access_token expiry
+  created_at   Float // time_ns
+  updated_at   Float // time_ns
+
+  @@unique([user_id, connector_id], map: "uq_connector_connection_user_connector")
+  @@index([user_id], map: "idx_connector_connection_user_id")
+  @@map("connector_connection")
+}
+
+// ─── calendar.py ──────────────────────────────────────────────────────────────
+
+model Calendar {
+  id         String  @id
+  user_id    String
+  name       String
+  color      String?
+  is_default Boolean @default(false)
+  data       String? // JSON
+  meta       String? // JSON
+  created_at Float // time_ns
+  updated_at Float // time_ns
+
+  @@index([user_id], map: "ix_calendar_user")
+  @@map("calendar")
+}
+
+model CalendarEvent {
+  id           String  @id
+  calendar_id  String
+  user_id      String
+  title        String
+  description  String?
+  start_at     Float // time_ns
+  end_at       Float? // time_ns
+  all_day      Boolean @default(false)
+  rrule        String?
+  color        String?
+  location     String?
+  data         String? // JSON
+  meta         String? // JSON
+  is_cancelled Boolean @default(false)
+  created_at   Float // time_ns
+  updated_at   Float // time_ns
+
+  @@index([calendar_id, start_at], map: "ix_calendar_event_calendar")
+  @@index([user_id, start_at], map: "ix_calendar_event_user_date")
+  @@map("calendar_event")
+}
+
+model CalendarEventAttendee {
+  id         String  @id
+  event_id   String
+  user_id    String
+  status     String  @default("pending")
+  meta       String? // JSON
+  created_at Float // time_ns
+  updated_at Float // time_ns
+
+  @@unique([event_id, user_id], map: "uq_event_attendee")
+  @@index([user_id, status], map: "ix_calendar_event_attendee_user")
+  @@map("calendar_event_attendee")
+}
+
+// ─── *_history.py ─────────────────────────────────────────────────────────────
+
+model FunctionHistory {
+  id             String  @id
+  function_id    String
+  parent_id      String?
+  snapshot       String // JSON
+  user_id        String
+  commit_message String?
+  created_at     Int
+
+  @@index([function_id])
+  @@map("function_history")
+}
+
+model ToolHistory {
+  id             String  @id
+  tool_id        String
+  parent_id      String?
+  snapshot       String // JSON
+  user_id        String
+  commit_message String?
+  created_at     Int
+
+  @@index([tool_id])
+  @@map("tool_history")
+}
+
+model SkillHistory {
+  id             String  @id
+  skill_id       String
+  parent_id      String?
+  snapshot       String // JSON
+  user_id        String
+  commit_message String?
+  created_at     Int
+
+  @@index([skill_id])
+  @@map("skill_history")
+}
+
+model PromptHistory {
+  id             String  @id
+  prompt_id      String
+  parent_id      String?
+  snapshot       String // JSON
+  user_id        String
+  commit_message String?
+  created_at     Int
+
+  @@index([prompt_id])
+  @@map("prompt_history")
+}
+
+model ModelHistory {
+  id             String  @id
+  model_id       String
+  parent_id      String?
+  snapshot       String // JSON
+  user_id        String
+  commit_message String?
+  created_at     Int
+
+  @@index([model_id])
+  @@map("model_history")
+}
+
+// ---------------------------------------------------------------------------
+// Serverless vector store (TS port addition): replaces ChromaDB for RAG.
+// Embeddings stored as JSON arrays; cosine similarity computed in JS.
+// ---------------------------------------------------------------------------
+model Chunk {
+  id              String  @id
+  collection_name String
+  knowledge_id    String?
+  file_id         String?
+  content         String
+  embedding       String
+  metadata        String  @default("{}")
+
+  @@index([collection_name])
+  @@index([file_id])
+  @@index([knowledge_id])
+  @@map("chunk")
+}
+
+// ─── imagine studio (Nelth-IA Images) ─────────────────────────────────────────
+// One row per studio image (generated / edited / variation / uploaded). The
+// bytes live in the existing files pipeline (file_id → /api/v1/files/{id}/content);
+// this table holds the metadata + lifecycle (status/phase) polled by the studio.
+model ImageItem {
+  id           String  @id
+  user_id      String
+  name         String?
+  prompt       String?
+  file_id      String?
+  provider     String?
+  model        String?
+  status       String? // generating | processing | completed | failed
+  aspect_ratio String?
+  width        Int?
+  height       Int?
+  favorite     Boolean @default(false)
+  source       String? // generate | edit | variation | upload
+  parent_id    String?
+  meta         String? // JSON {phase, style, error, …}
+  created_at   Int?
+  updated_at   Int?
+
+  @@index([user_id])
+  @@index([user_id, status])
+  @@index([created_at])
+  @@map("image_item")
+}
