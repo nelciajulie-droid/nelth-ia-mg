@@ -14,6 +14,21 @@
  *    Cliquer un autre item du SPA (SvelteKit pushState) referme
  *    l'overlay — seule la zone centrale change, jamais la sidebar.
  *
+ * NAVIGATION (config canonique unique — voir NAV ci-dessous) :
+ *  - Le SPA compilé rend DEUX variantes de sidebar, toutes deux susceptibles
+ *    de porter l'id générique « sidebar » : le RAIL replié (42 px, icônes) et
+ *    le TIROIR étendu (contient #pinned-menu-items-list). La résiliation des
+ *    cibles ne passe JAMAIS par cet id ambigu : le rail = l'élément #sidebar
+ *    SANS liste épinglée ; le tiroir = l'hôte de #pinned-menu-items-list.
+ *  - Chaque injection est GARDE par son conteneur (présence vérifiée DANS la
+ *    cible), les clones sont NETTOYÉS de leurs ids (jamais de doublon
+ *    documentaire) et re-marqués avec des ids stables. Une passe
+ *    d'assainissement retire à chaque tick tout clone obsolète ou déplacé :
+ *    impossible d'accumuler des entrées dupliquées (Notes / Espace de
+ *    travail / Images) d'un cycle replié↔étendu à l'autre.
+ *  - Sélecteurs structuraux (ids #sidebar-workspace-button, #workspace) —
+ *    insensibles à la locale (EN/FR) et au libellé aria traduit.
+ *
  * Assets: /static/images/main.js (bundle React) + /static/images/app.css.
  */
 
@@ -25,9 +40,26 @@
   const HASH = '#/images';
   // Versionnée : garantit que les navigateurs laissent tomber l'ancien bundle
   // après une mise à jour (les artefacts sont committés dans public/).
-  const BUILD = '20261111c1';
+  const BUILD = '20270106a3';
   const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
   const CSS_URL = '/static/images/app.css?v=' + BUILD;
+
+  // ------------------------------------------------------------------
+  // Config canonique de navigation — SOURCE UNIQUE de vérité.
+  // Une seule entrée « Images » ; ids stables et conteneurs canoniques.
+  // ------------------------------------------------------------------
+  const NAV = {
+    images: {
+      hash: HASH,
+      label: 'Images',
+      // Rail replié : le clone vit DANS le conteneur -gap-0.5 du rail.
+      rail: { wrapper: 'images-rail', anchor: 'sidebar-images-rail-button' },
+      // Tiroir étendu : le clone vit en SŒUR IMMÉDIATE de la liste épinglée
+      // (jamais À L'INTÉRIEUR → hors du SortableJS de la liste, et insensible
+      // aux réconciliations du each-block Svelte).
+      drawer: { wrapper: 'images-nav', anchor: 'sidebar-images-drawer-button' }
+    }
+  };
 
   // Lucide « image » (trait 2px, arrondi) — même gabarit que les autres
   // icônes du rail ; la classe de l'icône d'origine est conservée.
@@ -79,9 +111,52 @@
   }
 
   // ------------------------------------------------------------------
-  // Icônes « Images » dans la sidebar du SPA (rail + drawer).
+  // Résolution STRUCTURELLE des deux variantes de sidebar.
+  // L'id « sidebar » désigne le rail replié OU le tiroir étendu selon l'état :
+  // jamais un moyen fiable de les distinguer. Le tiroir porte TOUJOURS la
+  // liste épinglée (#pinned-menu-items-list) ; le rail jamais.
+  // ------------------------------------------------------------------
+  function drawerList() {
+    return document.getElementById('pinned-menu-items-list');
+  }
+  function railEl() {
+    const sb = document.getElementById('sidebar');
+    // Le rail : la variante #sidebar qui n'héberge PAS la liste épinglée.
+    // (Tiroir étendu → #sidebar EST le tiroir → le rail est démonté.)
+    return sb && !sb.contains(drawerList()) && sb.querySelector('a') ? sb : null;
+  }
+
+  // ------------------------------------------------------------------
+  // Assainissement : un clone n'existe qu'à sa place canonique.
+  // Toute instance obsolète (héritée d'un cycle corrompu, déplacée par une
+  // réconciliation Svelte, ou imbriquée dans un autre clone) est détruite —
+  // c'est ce qui garantit qu'aucune entrée de navigation ne se duplique
+  // jamais, même après des heures de replier/déplier.
+  // ------------------------------------------------------------------
+  function decontaminate() {
+    // Tiroir : exactement une sœur « images-nav » juste après la liste.
+    document.querySelectorAll('#' + NAV.images.drawer.wrapper).forEach((el) => {
+      const list = drawerList();
+      if (!list || el.previousElementSibling !== list) el.remove();
+    });
+    // Rail : exactement un « images-rail » À L'INTÉRIEUR du rail actif.
+    document.querySelectorAll('#' + NAV.images.rail.wrapper).forEach((el) => {
+      const rail = railEl();
+      if (!rail || !rail.contains(el)) el.remove();
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Icônes « Images » dans la sidebar du SPA (rail + tiroir).
   // Clonage de la structure Workspace → alignement exactement identique.
   // ------------------------------------------------------------------
+  function stripIds(root) {
+    // Aucun clone ne peut introduire de doublon d'id documentaire :
+    // les ids hérités du gabarit (sidebar-workspace-button…) disparaissent,
+    // seuls nos ids stables sont posés après.
+    root.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+  }
+
   function swapSvg(a, label) {
     const svg = a.querySelector('svg');
     if (svg) {
@@ -99,6 +174,31 @@
     a.setAttribute('draggable', 'false');
   }
 
+  function rewriteLabel(a, label) {
+    // Dernier nœud textuel non vide du lien → libellé visible « Images ».
+    const walker = document.createTreeWalker(a, NodeFilter.SHOW_TEXT);
+    let textNode = null;
+    let next;
+    while ((next = walker.nextNode())) {
+      if (next.nodeValue && next.nodeValue.trim()) textNode = next;
+    }
+    if (textNode) textNode.nodeValue = label;
+  }
+
+  // Sur mobile, la navigation du SPA referme le tiroir-overlay (réaction
+  // compilée au changement de route) — notre navigation en hash ne la déclenche
+  // pas : on REFERME donc explicitement le tiroir via le bouton compilé, pour
+  // préserver exactement le comportement « close on navigation » des autres
+  // entrées. Desktop : le tiroir reste ouvert (sidebar persistante, la zone
+  // centrale s'ajuste — cf. custom.css §4b).
+  function closeMobileDrawer() {
+    if (!window.matchMedia('(max-width: 767px)').matches) return;
+    const toggle =
+      document.getElementById('sidebar-toggle-button') ||
+      document.querySelector('div[role="navigation"] button[aria-label="Close Sidebar"]');
+    if (toggle) toggle.click();
+  }
+
   function hijackClick(a) {
     // rel="external" : SvelteKit n'intercepte PAS ce lien (son listener
     // capture-phase au niveau document voit le clic mais l'ignore) — la
@@ -112,79 +212,89 @@
         if (isImages()) return;
         openedByUs = true;
         location.hash = '/images'; // hashchange → sync() → open()
+        closeMobileDrawer();
       },
       true
     );
   }
 
+  function decorate(clone, anchorId, label) {
+    const a = clone.querySelector('a');
+    if (!a) return false;
+    a.id = anchorId;
+    a.setAttribute('href', HASH);
+    swapSvg(a, label);
+    rewriteLabel(a, label);
+    hijackClick(a);
+    return true;
+  }
+
+  // --- Rail replié : une rangée clonée, insérée après la rangée Workspace ---
+  function injectRailIcon() {
+    const rail = railEl();
+    if (!rail) return; // étendu → rail démonté : rien à faire
+    if (rail.querySelector('#' + NAV.images.rail.wrapper)) return; // déjà là
+
+    // Rangée d'ancrage : Workspace (ids stables du bundle, insensibles à la
+    // locale) puis repli aria/href.
+    const anchor =
+      rail.querySelector('#sidebar-workspace-button') ||
+      rail.querySelector('a[aria-label="Workspace"], a[aria-label="Espace de travail"]') ||
+      rail.querySelector('a[href="/workspace"]') ||
+      rail.querySelector('#sidebar-notes-button');
+    if (!anchor) return;
+
+    // Structure du rail : div(rangée, sans classe) > div.flex > a.
+    const flexRow = anchor.parentElement;
+    let outer = flexRow && flexRow.parentElement;
+    if (!outer || outer === anchor || !outer.contains(anchor)) outer = flexRow;
+
+    const clone = outer.cloneNode(true);
+    stripIds(clone);
+    clone.id = NAV.images.rail.wrapper;
+    if (!decorate(clone, NAV.images.rail.anchor, NAV.images.label)) return;
+    outer.after(clone);
+  }
+
+  // --- Tiroir étendu : un item cloné, SŒUR de la liste (jamais dedans) ---
+  function injectDrawerIcon() {
+    const list = drawerList();
+    if (!list) return; // tiroir démonté (mobile?) : rien à faire
+    if (list.nextElementSibling && list.nextElementSibling.id === NAV.images.drawer.wrapper) {
+      return; // déjà en place
+    }
+
+    // Item d'ancrage dans la liste épinglée : Workspace d'abord.
+    const ws =
+      list.querySelector('#workspace') ||
+      list.querySelector('#sidebar-workspace-button')?.closest('div') ||
+      list.querySelector('a[href="/workspace"]')?.closest('div') ||
+      list.querySelector('#sidebar-notes-button')?.closest('div');
+    if (!ws || !list.contains(ws)) return;
+
+    const clone = ws.cloneNode(true);
+    stripIds(clone);
+    clone.id = NAV.images.drawer.wrapper;
+    if (!decorate(clone, NAV.images.drawer.anchor, NAV.images.label)) return;
+    // Sœur immédiate de la liste : hors SortableJS (l'utilisateur peut
+    // réordonner les items épinglés sans jamais compter/réordonner notre
+    // entrée) et hors réconciliation du each-block Svelte.
+    list.after(clone);
+  }
+
   function injectSidebarIcons() {
     if (!document.body) return;
-
-    // --- Rail (barre verticale 42px) : wrapper complet cloné ---
-    const rail = document.getElementById('sidebar');
-    if (rail && !document.getElementById('images-rail')) {
-      const anchor = rail.querySelector(
-        'a[aria-label="Workspace"], a[aria-label="Espace de travail"], a[href="/workspace"]'
-      );
-      if (anchor) {
-        // Structure : div(wrapper) > div.flex > a
-        const flexRow = anchor.parentElement;
-        const outer = flexRow ? flexRow.parentElement : null;
-        if (outer && outer !== anchor && outer.contains(anchor)) {
-          const clone = outer.cloneNode(true);
-          clone.id = 'images-rail';
-          const a = clone.querySelector('a');
-          if (a) {
-            a.setAttribute('href', HASH);
-            swapSvg(a, 'Images');
-            hijackClick(a);
-            outer.after(clone);
-          }
-        } else if (flexRow && flexRow !== anchor) {
-          // Filet de sécurité structure différente : insérer après la ligne.
-          const clone = flexRow.cloneNode(true);
-          clone.id = 'images-rail';
-          const a = clone.querySelector('a');
-          if (a) {
-            a.setAttribute('href', HASH);
-            swapSvg(a, 'Images');
-            hijackClick(a);
-            flexRow.after(clone);
-          }
-        }
-      }
-    }
-
-    // --- Drawer (menu épinglé) : item complet cloné (#workspace) ---
-    const list = document.getElementById('pinned-menu-items-list');
-    if (list && !document.getElementById('images-nav')) {
-      const ws = list.querySelector('#workspace') || list.querySelector('a[href="/workspace"]')?.closest('div');
-      if (ws) {
-        const clone = ws.cloneNode(true);
-        clone.id = 'images-nav';
-        const a = clone.querySelector('a');
-        if (a) {
-          a.setAttribute('href', HASH);
-          swapSvg(a, 'Images');
-          // Libellé : dernier nœud textuel non vide → « Images »
-          const walker = document.createTreeWalker(a, NodeFilter.SHOW_TEXT);
-          let textNode = null;
-          let next;
-          while ((next = walker.nextNode())) {
-            if (next.nodeValue && next.nodeValue.trim()) textNode = next;
-          }
-          if (textNode) textNode.nodeValue = 'Images';
-          hijackClick(a);
-          ws.after(clone);
-        }
-      }
-    }
+    decontaminate();
+    injectRailIcon();
+    injectDrawerIcon();
     syncActiveStyle();
   }
 
   function iconNodes() {
-    const railInner = document.querySelector('#images-rail a div');
-    const drawer = document.getElementById('images-nav');
+    const railInner = document.querySelector(
+      '#' + NAV.images.rail.wrapper + ' a div'
+    );
+    const drawer = document.getElementById(NAV.images.drawer.wrapper);
     return { railInner, drawer };
   }
   function syncActiveStyle() {
@@ -380,12 +490,56 @@
   // ------------------------------------------------------------------
   // Boot : injection (le SPA hydratant asynchronement, on sonde doucement)
   // + ouverture si deep-link #/images.
+  //
+  // Deux moteurs complémentaires :
+  //  1. MutationObserver ciblé — réagit AU FRAME PRÈS au montage/remontage
+  //     des variantes de sidebar (rail ↔ tiroir) : l'icône « Images » (et
+  //     l'assainissement des clones obsolètes) est immédiate après chaque
+  //     bascule, sans attendre le prochain tick. L'observateur n'écoute que
+  //     les mutations qui TOUCHENT un conteneur de sidebar (div[role=
+  //     navigation], #sidebar, #pinned-menu-items-list) — le reste du DOM
+  //     (messages, galerie) ne le réveille jamais.
+  //  2. Tick 2 s — filet de sécurité idempotent (hydratation asynchrone,
+  //     réconciliations Svelte inattendues, auto-réparation).
   // ------------------------------------------------------------------
   function tick() {
     injectSidebarIcons();
     if (isImages()) open(); // idempotent + auto-réparation
     else if (active) close();
   }
+
+  function sidebarMutation(m) {
+    if (m.type !== 'childList') return false;
+    const relevant = (el) =>
+      el instanceof HTMLElement &&
+      ((el.id && (el.id === 'sidebar' || el.id === 'pinned-menu-items-list' || el.id === 'sidebar-resizer')) ||
+        el.getAttribute('role') === 'navigation' ||
+        (el.id === 'images-rail' || el.id === 'images-nav'));
+    if (relevant(m.target)) return true;
+    return [...m.addedNodes, ...m.removedNodes].some(relevant);
+  }
+
+  let moScheduled = false;
+  function armSidebarObserver() {
+    const shell = document.querySelector('.app');
+    if (!shell) {
+      // le shell hydrate plus tard — retenter au prochain tick
+      setTimeout(armSidebarObserver, 1000);
+      return;
+    }
+    const mo = new MutationObserver((muts) => {
+      if (!muts.some(sidebarMutation)) return;
+      if (moScheduled) return;
+      moScheduled = true;
+      requestAnimationFrame(() => {
+        moScheduled = false;
+        injectSidebarIcons();
+      });
+    });
+    mo.observe(shell, { childList: true, subtree: true });
+  }
+  armSidebarObserver();
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => tick());
   } else {

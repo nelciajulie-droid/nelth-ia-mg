@@ -36,9 +36,15 @@
                 <script src="/static/google-bridge.js?v=2026111901" defer></script>
                 <!-- Images : navigation centre-seulement — le bridge garde la
                      sidebar du SPA montée en permanence et affiche l'espace
-                     Images dans la zone centrale (voir images-bridge.js). -->
-                <script src="/static/images-bridge.js?v=20261111c1" defer></script>
-                <link rel="stylesheet" href="/static/custom.css?v=20270104b1" crossorigin="use-credentials" />
+                     Images dans la zone centrale (voir images-bridge.js).
+                     v=20270106a1 — navigation canonique (rail/tiroir résolus
+                     structurellement, assainissement anti-doublons) + CSS du
+                     bundle cloisonné à #nelth-images-overlay. -->
+                <script src="/static/images-bridge.js?v=20270106a3" defer></script>
+                <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
+                     persistant (position:static md+) : plus aucun recouvrement
+                     de la zone centrale, cascade max-width immunisée. -->
+                <link rel="stylesheet" href="/static/custom.css?v=20270106a3" crossorigin="use-credentials" />
 
                 <script>
                         function resizeIframe(obj) {

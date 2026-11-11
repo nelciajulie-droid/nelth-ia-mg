@@ -183,6 +183,43 @@ body {
         min-width: 0;
 }
 
+/* The SvelteKit page host renders with display:contents, so the page
+ * containers (chat / notes / workspace) are direct flex items of the shell
+ * row; they must always be able to shrink under the sidebar width. */
+.app main.contents > * {
+        min-width: 0;
+}
+
+/* ── 4b. Persistent flex layout — desktop sidebar in flow ──────────────────
+ * ROOT-CAUSE FIX for the “sidebar overlaps the central workspace” bug.
+ *
+ * The compiled shell is already a persistent flex row:
+ *     .app > div.flex.flex-row → [ sidebar ][ resizer ][ main column ]
+ * but the EXPANDED sidebar drawer is compiled as `fixed top-0 left-0 z-50`
+ * and relies on a fragile max-width cascade on the main column
+ * (`md:max-w-[calc(100%-var(--sidebar-width))]`) to keep it out from
+ * underneath. That cascade loses whenever a later-loaded stylesheet
+ * re-declares `.max-w-full` inside the same utilities layer (exactly what
+ * the Nelth-IA Images bundle CSS does once opened): the main column then
+ * renders full-width and slides UNDER the fixed z-50 drawer — 245px of the
+ * workspace covered, the resizer handle buried.
+ *
+ * Restoring the drawer as a normal IN-FLOW flex item (flex-shrink:0, static)
+ * removes the dependency on that cascade entirely: expanding the sidebar
+ * mechanically narrows the main column (flex re-layout every frame of the
+ * drawer's 250ms width animation), collapsing widens it — no overlap at any
+ * intermediate width, ever. Mobile (<768px) keeps the compiled overlay
+ * drawer (fixed + backdrop + close-on-navigation) untouched.
+ *
+ * #sidebar[role=navigation] resolves to the collapsed rail (already static —
+ * no-op) or the expanded drawer (fixed → static). The hidden drawer variant
+ * carries no id and is unaffected. */
+@media (min-width: 768px) {
+        #sidebar[role="navigation"] {
+                position: static !important;
+        }
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * CHATGPT-INSPIRED COLOR SYSTEM — remap of the existing gray token ramp.
  *
