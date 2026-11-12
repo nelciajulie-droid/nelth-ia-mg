@@ -1,0 +1,325 @@
+@import "tailwindcss";
+
+@source "./**/*.{ts,tsx}";
+@source not "../../public/**";
+@source not "../../.next/**";
+
+/* Mode sombre — le bundle autonome suit le thème du SPA hôte (html.dark).
+   NB : le scoping du build coupe les sélecteurs « html.dark » hors overlay,
+   donc les jetons sombres vivent sur .docs-root[data-theme='dark'] (le thème
+   est reflété en JS par useHostTheme, MutationObserver sur html). Les
+   utilitaires dark: restent quant à eux compilés par la variante custom. */
+@custom-variant dark (&:is(.dark *));
+
+/* ==========================================================================
+   Nelth-AI Documents — design system à jetons (--docs-*).
+
+   Le workspace vit dans le panneau latéral (desktop ≥1024px, ~640px) ou
+   plein écran (mobile) : le chrome suit le thème du SPA hôte (zinc clair /
+   gray-900 #212121 sombre — même palette que public/static/custom.css).
+   Le PAPIER du document reste toujours blanc : « paper is paper », les
+   couleurs du modèle n'apparaissent que dans la page.
+
+   Accent chrome : teal #0F6B61 (clair) / #34D399 ajusté (sombre).
+   Aucun bleu / indigo.
+   ========================================================================== */
+
+:root {
+  /* Surfaces */
+  --docs-bg: #ffffff;               /* fond de zone */
+  --docs-surface: #ffffff;          /* popovers, menus, dialogues */
+  --docs-subtle: #fafafa;           /* fonds à peine décalés */
+  --docs-bg-translucent: rgba(255, 255, 255, 0.92); /* header / pills flottants */
+
+  /* Traits */
+  --docs-line: #e8e8e8;             /* hairlines */
+  --docs-line-strong: #c9c9c9;      /* séparateurs marqués */
+
+  /* Texte */
+  --docs-ink: #18181b;              /* texte principal */
+  --docs-muted: #71717a;            /* texte secondaire */
+  --docs-faint: #a1a1aa;            /* placeholders, icônes discrètes */
+  --docs-disabled: #d4d4d4;         /* contrôles désactivés */
+
+  /* Interactions */
+  --docs-chip: #f4f4f4;             /* fonds de chips, pills actives */
+  --docs-hover: #f5f5f5;            /* survol */
+  --docs-skeleton: #ececec;        /* squelettes */
+  --docs-glyph: #18181b;
+
+  /* Accent (teal — chrome : focus, sélection, états actifs uniquement) */
+  --docs-accent: #0f6b61;
+  --docs-accent-strong: #0c584f;
+  --docs-accent-soft: rgba(15, 107, 97, 0.1);
+  --docs-accent-outline: rgba(15, 107, 97, 0.4);
+  --docs-on-accent: #ffffff;
+
+  /* Boutons « encre » (inversés en sombre) */
+  --docs-btn-ink: #18181b;
+  --docs-btn-on-ink: #ffffff;
+
+  /* Danger */
+  --docs-danger: #b42318;
+  --docs-danger-bg: #fbf1f0;
+
+  /* Ombres */
+  --docs-shadow-btn: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --docs-shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.1);
+  --docs-shadow-toast: 0 6px 24px rgba(0, 0, 0, 0.14);
+
+  /* Papier A4 (toujours clair — même en thème sombre) */
+  --docs-paper-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 8px 24px rgba(0, 0, 0, 0.06);
+
+  /* Barres de défilement */
+  --docs-scroll-thumb: #e4e4e4;
+  --docs-scroll-thumb-hover: #d4d4d4;
+}
+
+/* ── Sombre : palette dark de l'hôte (html.dark) ── */
+.docs-root[data-theme='dark'] {
+  --docs-bg: #212121;
+  --docs-surface: #303030;
+  --docs-subtle: #282828;
+  --docs-bg-translucent: rgba(33, 33, 33, 0.92);
+
+  --docs-line: #3d3d3d;
+  --docs-line-strong: #4d4d4d;
+
+  --docs-ink: #ececec;
+  --docs-muted: #b4b4b4;
+  --docs-faint: #8f8f8f;
+  --docs-disabled: #676767;
+
+  --docs-chip: #3d3d3d;
+  --docs-hover: #3a3a3a;
+  --docs-skeleton: #353535;
+  --docs-glyph: #ececec;
+
+  --docs-accent: #34d399;
+  --docs-accent-strong: #10b981;
+  --docs-accent-soft: rgba(52, 211, 153, 0.12);
+  --docs-accent-outline: rgba(52, 211, 153, 0.45);
+  --docs-on-accent: #052e22;
+
+  --docs-btn-ink: #ececec;
+  --docs-btn-on-ink: #171717;
+
+  --docs-danger: #ef6a4d;
+  --docs-danger-bg: rgba(239, 106, 77, 0.12);
+
+  --docs-shadow-btn: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --docs-shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --docs-shadow-toast: 0 6px 24px rgba(0, 0, 0, 0.5);
+
+  /* Le papier reste blanc en sombre — ombre inchangée. */
+
+  --docs-scroll-thumb: #3d3d3d;
+  --docs-scroll-thumb-hover: #4d4d4d;
+}
+
+/* Racine du workspace : remplit son hôte (panneau docké ou plein écran). */
+.docs-root {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background: var(--docs-bg);
+  color: var(--docs-ink);
+}
+
+/* Barres de défilement fines et neutres (aperçu + panneaux + listes). */
+.docs-scroll {
+  overflow-anchor: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--docs-scroll-thumb) transparent;
+}
+.docs-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.docs-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.docs-scroll::-webkit-scrollbar-thumb {
+  background: var(--docs-scroll-thumb);
+  border-radius: 999px;
+}
+.docs-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--docs-scroll-thumb-hover);
+}
+
+/* La page A4 : papier toujours blanc, coins quasi droits (2px). */
+.docs-paper {
+  background: #ffffff;
+  border-radius: 2px;
+  box-shadow: var(--docs-paper-shadow);
+}
+
+/* Code en ligne dans le papier (rendu du markdown inline). */
+.docs-inline-code {
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas,
+    monospace;
+  font-size: 0.88em;
+  background: rgba(24, 24, 27, 0.06);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* Affordance « cliquer pour éditer » : halo discret au survol, accent au
+   focus. L'outline vit sur l'élément (pas de reflow au survol). */
+.docs-editable {
+  border-radius: 3px;
+  cursor: text;
+  transition: box-shadow 0.12s ease;
+}
+.docs-editable:hover {
+  box-shadow: 0 0 0 1.5px var(--docs-accent-outline);
+}
+.docs-editable:focus,
+.docs-editing {
+  outline: none;
+  box-shadow: 0 0 0 1.5px var(--docs-accent);
+}
+
+/* Bloc sélectionné (cible d'insertion de la barre d'outils). */
+.docs-block-selected {
+  box-shadow: 0 0 0 1px var(--docs-accent-outline);
+  border-radius: 3px;
+}
+
+/* Flash de ancre (clic dans le plan du document). */
+@keyframes docs-flash {
+  0% {
+    background: var(--docs-accent-soft);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.docs-flash {
+  animation: docs-flash 1.2s ease-out 1;
+}
+
+/* Skeleton shimmer (chargement). */
+@keyframes docs-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.docs-skeleton {
+  background: var(--docs-skeleton);
+  animation: docs-pulse 1.6s ease-in-out infinite;
+}
+
+/* Transitions d'apparition (menus, toasts, panneaux). */
+@keyframes docs-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes docs-pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.docs-fade {
+  animation: docs-fade-in 0.18s ease-out;
+}
+.docs-pop {
+  animation: docs-pop 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/* Barre de progression indéterminée (amélioration IA, 10-60 s). */
+.docs-progress {
+  position: relative;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--docs-chip);
+}
+.docs-progress::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--docs-accent), transparent);
+  animation: docs-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes docs-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Balayage de mise à jour (succès de l'amélioration IA). */
+.docs-sweep {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  overflow: hidden;
+  pointer-events: none;
+}
+.docs-sweep::after {
+  content: "";
+  position: absolute;
+  top: -20%;
+  bottom: -20%;
+  width: 34%;
+  transform: skewX(-18deg);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--docs-accent-soft),
+    transparent
+  );
+  animation: docs-sweep-move 1.1s ease-out 1 forwards;
+}
+@keyframes docs-sweep-move {
+  0% {
+    left: -45%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    left: 115%;
+    opacity: 0;
+  }
+}
+
+/* Respect de prefers-reduced-motion (CSS) — framer-motion suit via
+   MotionConfig reducedMotion="user". */
+@media (prefers-reduced-motion: reduce) {
+  .docs-skeleton,
+  .docs-progress::after,
+  .docs-sweep::after,
+  .docs-flash,
+  .docs-fade,
+  .docs-pop {
+    animation: none;
+  }
+  .docs-sweep {
+    display: none;
+  }
+  .docs-editable,
+  .docs-editable:focus,
+  .docs-editing {
+    transition: none;
+  }
+}
