@@ -324,6 +324,17 @@ export const routes: Route[] = [
     path: '',
     auth: 'user',
     handler: async (ctx: Ctx) => {
+      // MODE INVITÉ: file uploads locked for guests (ChatGPT parity —
+      // logged-out visitors cannot attach documents or images).
+      {
+        const { isGuestUser } = await import('@/lib/guests');
+        if (isGuestUser(ctx.user)) {
+          ctx.error(
+            403,
+            'Le téléversement de fichiers est réservé aux comptes gratuits. Créez un compte pour joindre des documents et des images.'
+          );
+        }
+      }
       const form = await ctx.req.formData().catch(() => null);
       if (!form) return ctx.error(400, 'Error uploading file');
       const fileField = form.get('file');

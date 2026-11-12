@@ -350,6 +350,13 @@ export const routes: Route[] = [
     path: 'generations',
     auth: 'user',
     handler: async (ctx) => {
+      // MODE INVITÉ: image generation locked for guests (ChatGPT parity).
+      {
+        const { isGuestUser } = await import('@/lib/guests');
+        if (isGuestUser(ctx.user)) {
+          err(403, 'La génération d’images est réservée aux comptes gratuits. Créez un compte pour l’activer.');
+        }
+      }
       const config = await getImageConfig();
       if (!config.ENABLE_IMAGE_GENERATION) {
         err(403, ERROR_MESSAGES.ACCESS_PROHIBITED);
@@ -465,6 +472,13 @@ export const routes: Route[] = [
     path: 'edit',
     auth: 'user',
     handler: async (ctx) => {
+      // MODE INVITÉ: image editing locked for guests (ChatGPT parity).
+      {
+        const { isGuestUser } = await import('@/lib/guests');
+        if (isGuestUser(ctx.user)) {
+          err(403, 'L’édition d’images est réservée aux comptes gratuits. Créez un compte pour l’activer.');
+        }
+      }
       const config = await getImageConfig();
       if (!config.ENABLE_IMAGE_EDIT) {
         err(403, ERROR_MESSAGES.ACCESS_PROHIBITED);

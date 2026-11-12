@@ -123,9 +123,11 @@
                      bloc html masqué dans le chat ; cartes sous la réponse. -->
                 <script src="/static/documents-bridge.js?v=20261114a4" defer></script>
                 <!-- Mode Invité : boutons « Se connecter / S'inscrire » en haut à
-                     droite pour les sessions invitées (affichage ChatGPT), plus
-                     la gestion du stash invité. Voir guest-bridge.js. -->
-                <script src="/static/guest-bridge.js?v=20261113a3" defer></script>
+                     droite pour les sessions invitées (affichage ChatGPT), pastille
+                     « N messages restants », bannière limite + verrous UI (Images,
+                     paperclip). Voir guest-bridge.js — les verrous RÉELS sont
+                     côté serveur (v12-flow.ts / models-registry.ts / config). -->
+                <script src="/static/guest-bridge.js?v=20270107a2" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->

@@ -682,6 +682,17 @@ export const routes: Route[] = [
     path: 'process/url',
     auth: 'user',
     handler: async (ctx: Ctx) => {
+      // MODE INVITÉ: attaching web pages / files by URL is locked for guests
+      // (ChatGPT parity — no attachments for logged-out visitors).
+      {
+        const { isGuestUser } = await import('@/lib/guests');
+        if (isGuestUser(ctx.user)) {
+          ctx.error(
+            403,
+            'L’ajout de pages web est réservé aux comptes gratuits. Créez un compte pour joindre des contenus externes.'
+          );
+        }
+      }
       const form = await ctx.body<{ url?: string; collection_name?: string | null }>();
       if (!form?.url) return ctx.error(422, 'url is required');
       const user = ctx.user!;
@@ -1031,6 +1042,17 @@ export const routes: Route[] = [
 // ---------------------------------------------------------------------------
 
 async function handleProcessWeb(ctx: Ctx): Promise<Response> {
+  // MODE INVITÉ: web/YouTube attachment processing is locked for guests
+  // (ChatGPT parity) — covers POST /process/web and /process/youtube.
+  {
+    const { isGuestUser } = await import('@/lib/guests');
+    if (isGuestUser(ctx.user)) {
+      ctx.error(
+        403,
+        'L’ajout de contenus web est réservé aux comptes gratuits. Créez un compte pour joindre des pages ou des vidéos.'
+      );
+    }
+  }
   const form = await ctx.body<{ url?: string; collection_name?: string | null }>();
   if (!form?.url) return ctx.error(422, 'url is required');
   const user = ctx.user!;

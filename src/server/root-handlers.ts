@@ -4,6 +4,7 @@ import { VERSION, env, DEFAULT_USER_PERMISSIONS } from '@/lib/constants';
 import { configGet } from '@/lib/config';
 import { getPermissions } from '@/lib/access-control';
 import { publicOAuthProviders } from './routers/oauth';
+import { isGuestUser } from '@/lib/guests';
 
 /**
  * App-level endpoints defined directly on the FastAPI app in main.py
@@ -125,6 +126,30 @@ export async function handleGetAppConfig(ctx: Ctx): Promise<Response> {
 
   if (user && (user.role === 'admin' || user.role === 'user')) {
     config.permissions = await getPermissions(user.id, DEFAULT_USER_PERMISSIONS);
+  }
+
+  // MODE INVITÉ (ChatGPT parity): guests are authenticated but RESTRICTED —
+  // the compiled SPA hides the matching UI affordances when these flags are
+  // false (web-search globe, image toggle, connectors/@ apps, memories,
+  // autocomplete). The chat pipeline enforces the same locks server-side
+  // (see v12-flow.ts), so flipping these flags is UX only, never security.
+  if (user && isGuestUser(user)) {
+    const features = (config.features ??= {}) as Record<string, unknown>;
+    Object.assign(features, {
+      enable_web_search: false,
+      enable_image_generation: false,
+      enable_memories: false,
+      enable_autocomplete_generation: false,
+      enable_direct_connections: false,
+      enable_direct_integrations: false,
+      enable_tool_servers: false,
+      enable_user_webhooks: false,
+      enable_community_sharing: false,
+      enable_notes: false,
+      enable_apps: false,
+      enable_google_drive_integration: false,
+      enable_onedrive_integration: false,
+    });
   }
 
   return jsonResponse(config);

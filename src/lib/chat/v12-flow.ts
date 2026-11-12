@@ -322,7 +322,22 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   // Legacy GLM model ids → Kilo gateway equivalents (the built-in z-ai
   // engine was removed; chats created with the old models keep working).
   const { normalizeKiloModelId } = await import('@/lib/kilo-llm');
-  const modelId: string = normalizeKiloModelId(form.model);
+  let modelId: string = normalizeKiloModelId(form.model);
+  // MODE INVITÉ (ChatGPT parity) — guests are pinned to the default chat
+  // model: the frontend selector shows a single entry for guests
+  // (getModelsForUser filters the list) and this server-side override closes
+  // the direct-API bypass (a guest posting model=<thinking/vision id> is
+  // answered by the default model anyway).
+  {
+    const { isGuestUser } = await import('@/lib/guests');
+    if (isGuestUser(user)) {
+      const { KILO_MODEL_ID } = await import('@/lib/kilo-llm');
+      if (modelId !== KILO_MODEL_ID) {
+        console.log(`[v12-flow] guest model pin: ${modelId} → ${KILO_MODEL_ID}`);
+        modelId = KILO_MODEL_ID;
+      }
+    }
+  }
   let messageIds: any[] | null = form.message_ids ?? null;
   if (Array.isArray(messageIds)) {
     delete form.id;
@@ -434,6 +449,30 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       revealTimerHandle = null;
     }
   };
+
+  // ---------------------------------------- 1ter. MODE INVITÉ — usage budget
+  // (ChatGPT parity): guests chat anonymously for a limited number of
+  // messages, then the sign-up wall replaces the model answer. READ-ONLY
+  // check here — the counter is incremented right before the model call so
+  // a REFUSED turn (locked feature) never burns a guest message. Continuation
+  // rounds are the SAME logical message (serverless time-budget cut).
+  if (!isContinuation) {
+    const { isGuestUser, getGuestUsage } = await import('@/lib/guests');
+    if (isGuestUser(user)) {
+      const usage = await getGuestUsage(user);
+      console.log(`[v12-flow] guest usage: ${usage.used}/${usage.limit}`);
+      if (usage.remaining <= 0) {
+        const message =
+          `Vous avez utilisé vos ${usage.limit} messages invités.\n\n` +
+          `Créez un compte gratuit pour continuer à discuter sans limites — et débloquer la génération d’images et de vidéos, la recherche web et tous les modèles.`;
+        if (sessionId && chatId) {
+          await emit({ type: 'chat:message:error', data: { error: { content: message }, done: true } });
+          return nullJson();
+        }
+        return json({ detail: message }, 429);
+      }
+    }
+  }
 
   // ------------------------------------------------- 2. Chat bookkeeping (DB)
   let historyMap: Record<string, any> | null = null;
@@ -757,6 +796,31 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
         llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}\n\n---\n\n${CAPABILITY_SYSTEM_PROMPT}` };
       } else {
         llmMessages.unshift({ role: 'system', content: CAPABILITY_SYSTEM_PROMPT });
+      }
+    }
+  }
+
+  // MODE INVITÉ note (ChatGPT parity): image/video generation and web search
+  // are LOCKED for guests (hard gates below), so natural requests
+  // ("dessine-moi…", "cherche le prix…") must not end in a hallucinated tool
+  // run or a flat refusal — the model explains warmly that a free account
+  // unlocks them, then still helps as much as possible in plain text.
+  {
+    const { isGuestUser } = await import('@/lib/guests');
+    if (isGuestUser(user)) {
+      const GUEST_MODE_NOTE = [
+        'GUEST MODE — The current user is an anonymous guest (not signed in).',
+        'Locked for guests: image generation, video generation, live web search and model selection.',
+        'If the user asks for any of those, never pretend to run them: briefly and warmly explain that these features unlock with a free account (sign-up button at the top right), then still help as much as possible in plain text — describe the image they wanted in words, or answer from your own knowledge.',
+        'Answer in the user’s language and keep the limitation mention to one short sentence.',
+      ].join('\n');
+      const hasGuestNote = llmMessages.some((m) => m.role === 'system' && m.content.includes('GUEST MODE —'));
+      if (!hasGuestNote) {
+        if (llmMessages.length && llmMessages[0].role === 'system') {
+          llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}\n\n---\n\n${GUEST_MODE_NOTE}` };
+        } else {
+          llmMessages.unshift({ role: 'system', content: GUEST_MODE_NOTE });
+        }
       }
     }
   }
@@ -1144,6 +1208,13 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
 
   const webSearchAllowed = async (): Promise<boolean> => {
+    // MODE INVITÉ: live web search is locked for guests (ChatGPT parity —
+    // logged-out visitors get direct model answers only). Blocks BOTH the
+    // explicit toggle (below) and the auto engagement (searchAutoOn).
+    {
+      const { isGuestUser } = await import('@/lib/guests');
+      if (isGuestUser(user)) return false;
+    }
     const { configGet } = await import('@/lib/config');
     const { hasPermission } = await import('@/lib/access-control');
     const { DEFAULT_USER_PERMISSIONS } = await import('@/lib/constants');
@@ -1440,8 +1511,14 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       const imageAutoOn = imageAuto && imageEnabled && !imageToggleOn;
       const searchAutoOn = searchAuto && !imageToggleOn && (await webSearchAllowed());
       const videoAutoOn = videoAuto && videoEnabled;
+      // MODE INVITÉ: skip the image/video engagement decisions entirely for
+      // guests — the features are locked, running the classifier would only
+      // add latency (searchAutoOn is already false via webSearchAllowed()).
+      const guestSession = (await import('@/lib/guests')).isGuestUser(user);
+      const imageAutoGuest = imageAutoOn && !guestSession;
+      const videoAutoGuest = videoAutoOn && !guestSession;
       const decisionsWork =
-        imageAutoOn || searchAutoOn || videoAutoOn
+        imageAutoGuest || searchAutoOn || videoAutoGuest
           ? import('@/lib/chat/auto-engage').then((m) => m.decideAutoEngagement(llmMessages))
           : Promise.resolve(null);
       let decision: any = null;
@@ -1455,10 +1532,10 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         '—',
         decision ? JSON.stringify(decision) : 'null (budget exceeded or no auto enabled)'
       );
-      autoVideo = videoAutoOn && decision?.video === true;
+      autoVideo = videoAutoGuest && decision?.video === true;
       autoVideoAnimate = autoVideo && decision?.animate === true;
       autoVideoRatio = decision?.aspectRatio;
-      autoImage = !autoVideo && imageAutoOn && decision?.image === true;
+      autoImage = !autoVideo && imageAutoGuest && decision?.image === true;
       autoImageEdit = autoImage && decision?.edit === true;
       if (!autoImage && !autoVideo && searchAutoOn && decision?.search && decision.query) {
         // Same status label as the explicit toggle — the user shouldn't be
@@ -1476,6 +1553,20 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   // / the decision flagged an animate turn on a previous visual).
   const wantsVideoGeneration = !isContinuation && autoVideo;
   if (wantsVideoGeneration) {
+    // MODE INVITÉ: video generation locked (defense-in-depth — autoVideo is
+    // already false for guests since the engagement decision is skipped).
+    {
+      const { isGuestUser } = await import('@/lib/guests');
+      if (isGuestUser(user)) {
+        const message =
+          'La génération de vidéos est réservée aux comptes gratuits. Créez un compte (bouton « S’inscrire » en haut à droite) pour l’activer.';
+        if (sessionId && chatId) {
+          await emit({ type: 'chat:message:error', data: { error: { content: message }, done: true } });
+          return nullJson();
+        }
+        return json({ detail: message }, 403);
+      }
+    }
     const { configGet } = await import('@/lib/config');
     const { ERROR_MESSAGES } = await import('@/lib/constants');
     const enabled = await configGet<boolean>('video_generation.enable', true);
@@ -1671,6 +1762,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   const wantsImageGeneration =
     !isContinuation && (form.features?.image_generation === true || isSdModel || autoImage);
   if (wantsImageGeneration) {
+    // MODE INVITÉ: image generation locked (ChatGPT parity) — the toggle is
+    // hidden in the UI and auto engagement is skipped; this closes the
+    // direct-API path (features.image_generation=true / SD model id).
+    {
+      const { isGuestUser } = await import('@/lib/guests');
+      if (isGuestUser(user)) {
+        const message =
+          'La génération d’images est réservée aux comptes gratuits. Créez un compte (bouton « S’inscrire » en haut à droite) pour l’activer.';
+        if (sessionId && chatId) {
+          await emit({ type: 'chat:message:error', data: { error: { content: message }, done: true } });
+          return nullJson();
+        }
+        return json({ detail: message }, 403);
+      }
+    }
     const { configGet } = await import('@/lib/config');
     const { ERROR_MESSAGES } = await import('@/lib/constants');
     const enabled = await configGet<boolean>('image_generation.enable', true);
@@ -2322,6 +2428,17 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
    *  anchor the measured span is ~0s → "Thought for less than a second"). */
   const upstreamStartedAt = Date.now();
   try {
+    // MODE INVITÉ — count the message HERE: the turn is now committed to
+    // the model. Every earlier exit (locked-feature rejections, validation)
+    // never reaches this point, so a refused request does not burn a guest
+    // message; continuations are the same logical message (not counted).
+    if (!isContinuation) {
+      const { isGuestUser, incrementGuestUsage } = await import('@/lib/guests');
+      if (isGuestUser(user)) {
+        const usage = await incrementGuestUsage(user);
+        console.log(`[v12-flow] guest message counted: ${usage.used}/${usage.limit}`);
+      }
+    }
     upstream = await callUpstreamTokenSafe(reqBody);
 
     // Provider flakiness guard (observed on the free dots-studio model with

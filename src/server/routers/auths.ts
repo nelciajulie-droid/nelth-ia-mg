@@ -1043,6 +1043,27 @@ export const routes: Route[] = [
     },
   },
 
+  // ------------------- GET /guest/usage -------------------
+  //
+  // MODE INVITÉ — usage meter for the guest UI (ChatGPT parity: logged-out
+  // visitors see how many messages they have left before the sign-up wall).
+  // Consumed by guest-bridge.js (top-bar pill + limit banner). The counter
+  // itself is incremented by the chat pipeline (v12-flow.ts).
+  {
+    method: 'GET',
+    path: 'guest/usage',
+    auth: 'user',
+    handler: async (ctx) => {
+      const user = ctx.user!;
+      const { isGuestUser, getGuestUsage } = await import('@/lib/guests');
+      if (!isGuestUser(user)) {
+        return ctx.json({ guest: false, used: 0, limit: 0, remaining: 0 });
+      }
+      const usage = await getGuestUsage(user);
+      return ctx.json({ guest: true, ...usage });
+    },
+  },
+
   // ------------------- POST /signout -------------------
   {
     method: 'POST',

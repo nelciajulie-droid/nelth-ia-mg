@@ -99,6 +99,42 @@ export async function getWorkspaceModels(user: ApiUser): Promise<ModelItem[]> {
  * Connection models come from lib/connections (subagent-owned).
  */
 export async function getModelsForUser(user: ApiUser): Promise<ModelItem[]> {
+  // MODE INVITÉ (ChatGPT parity): guests get the DEFAULT chat model only —
+  // the compiled frontend's model selector then shows a single entry (same
+  // as ChatGPT logged-out, where the model picker is locked to the default).
+  // Server-side v12-flow additionally pins guest completions to this model,
+  // closing the direct-API bypass.
+  {
+    const { isGuestUser } = await import('@/lib/guests');
+    if (isGuestUser(user)) {
+      const {
+        KILO_MODEL_ID,
+        KILO_MODEL_NAME,
+        KILO_MODEL_DESCRIPTION,
+        kiloAvailable,
+      } = await import('@/lib/kilo-llm');
+      if (!kiloAvailable()) return [];
+      const created = Math.floor(Date.now() / 1000);
+      const meta = {
+        id: KILO_MODEL_ID,
+        name: KILO_MODEL_NAME,
+        description: KILO_MODEL_DESCRIPTION,
+        tags: [{ name: 'llm' }, { name: 'kilo' }, { name: 'built-in' }],
+      };
+      return [
+        {
+          id: KILO_MODEL_ID,
+          name: KILO_MODEL_NAME,
+          object: 'model',
+          created,
+          owned_by: 'kilo_gateway',
+          info: { id: KILO_MODEL_ID, name: KILO_MODEL_NAME, meta, is_active: true, description: KILO_MODEL_DESCRIPTION },
+          meta,
+        },
+      ];
+    }
+  }
+
   const models: ModelItem[] = [];
 
   // OpenAI-compatible connections

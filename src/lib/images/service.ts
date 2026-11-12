@@ -203,6 +203,14 @@ export async function getImagineCapabilities(): Promise<ImagineCapabilities> {
 
 /** Feature gate shared by generate/edit/variations (chat parity). */
 export async function assertStudioPermission(user: ApiUser): Promise<void> {
+  // MODE INVITÉ (ChatGPT parity): the Images studio is locked for anonymous
+  // guests — image generation is a signed-in feature.
+  {
+    const { isGuestUser } = await import('@/lib/guests');
+    if (isGuestUser(user)) {
+      throw new Error('La génération d’images est réservée aux comptes gratuits. Créez un compte pour accéder au studio.');
+    }
+  }
   const enabled = await configGet<unknown>('image_generation.enable', true);
   if (enabled === false) {
     throw new Error('La génération d’images est désactivée par l’administrateur.');
