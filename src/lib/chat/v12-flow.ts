@@ -2824,6 +2824,16 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const cleanFiles = stripArtifactHtml(docResult.files);
     if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
     if (cleanFiles.length) data.files = cleanFiles;
+    // Output items in sync with the processed content (artifacts included) —
+    // the frontend's artifacts scanner prefers `output` text.
+    if (reasoningOutput.length) {
+      reasoningOutput = reasoningOutput.map((item: any) =>
+        item && item.type === 'text' && typeof item.content === 'string'
+          ? { ...item, content }
+          : item
+      );
+      if (data) data.output = reasoningOutput;
+    }
 
     await persistAssistant(
       content,
