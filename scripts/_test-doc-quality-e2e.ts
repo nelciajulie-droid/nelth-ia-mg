@@ -8,7 +8,7 @@
  * must lift its thin draft to expert level before the PDF is built.
  */
 
-const BASE = 'http://localhost:3000';
+const BASE = process.env.E2E_BASE || 'http://localhost:3000';
 const email = `doc-quality-e2e-${Date.now()}@nelth-ia-test.local`;
 
 let failures = 0;
