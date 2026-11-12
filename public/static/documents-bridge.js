@@ -52,7 +52,10 @@
   // SPA (bloc ```html + panneau Artifacts) ; la barre d'outils de l'artefact
   // (téléchargements + atelier) parle au pont par postMessage ; la carte
   // gagne « Modifier » et son action principale devient « Aperçu » natif.
-  const BUILD = '20261113a1';
+  // 20261113a2 — mobile (<768px) : « Aperçu » et la fin de tour basculent sur
+  //  l'atelier plein écran quand le panneau natif n'ouvre pas (auto-open et
+  //  bouton Preview peu fiables en layout mobile du SPA).
+  const BUILD = '20261113a2';
   const SCRIPT_URL = '/static/documents/main.js?v=' + BUILD;
   const CSS_URL = '/static/documents/app.css?v=' + BUILD;
 
@@ -188,10 +191,22 @@
 
   const msgElOf = (el) => (el ? el.closest('[id^="message-"]') : null);
 
+  /** Viewports étroits : le panneau d'artefacts natif du SPA y est peu fiable
+   *  (pas d'auto-open, bouton Preview parfois absent du layout mobile) →
+   *  l'atelier plein écran (tiroir + retour Android + safe-areas) prend le
+   *  relais — même contenu, même barre d'outils. */
+  const isNarrowViewport = () => window.matchMedia('(max-width: 767px)').matches;
+
   /** Ouvre le document dans le panneau d'artefacts natif ; repli atelier. */
   function previewDocument(docId, fromEl) {
-    if (openNativeArtifacts(msgElOf(fromEl))) return;
-    open(docId); // repli : workspace d'édition
+    if (!isNarrowViewport() && openNativeArtifacts(msgElOf(fromEl))) {
+      // le clic peut ne rien ouvrir (panneau indisponible) — vérifie puis repli.
+      setTimeout(() => {
+        if (!nativeArtifactsOpen()) open(docId);
+      }, 450);
+      return;
+    }
+    open(docId);
   }
 
   /** Hôte postMessage de la barre d'outils de l'artefact (iframe sandboxée,
@@ -628,22 +643,44 @@ html.ndocs-lock{overflow:hidden}
   /** Fin d'un tour de génération de document : ouvre le document dans le
    *  PANNEAU D'ARTEFACTS NATIF (même surface que l'aperçu de code) dès que
    *  le bloc html est tombé dans le message (l'événement done remplace le
-   *  contenu juste après les événements document). Repli : rien — les cartes
-   *  et le bouton « Preview » du bloc restent là. */
+   *  contenu juste après les événements document). Viewports étroits : si le
+   *  panneau natif n'ouvre toujours pas, l'atelier plein écran prend le
+   *  relais ; sinon les cartes et le bouton « Preview » restent là. */
   function scheduleNativeOpen(messageId) {
     if (!messageId || nativeOpenedFor.has(messageId)) return;
     nativeOpenedFor.add(messageId);
     const attempts = [500, 1400, 2600, 4200];
-    attempts.forEach((delay) => {
+    let docId = null;
+    attempts.forEach((delay, i) => {
       setTimeout(() => {
         try {
           if (nativeArtifactsOpen()) return;
           openNativeArtifacts(messageEl(messageId));
+          // Dernier essai écoulé sans panneau → mobile : l'atelier plein écran
+          // prend le relais (le panneau natif n'y auto-ouvre pas).
+          if (i === attempts.length - 1 && !nativeArtifactsOpen()) {
+            if (isNarrowViewport()) {
+              docId = docId || lastDocOfMessage(messageId);
+              if (docId) open(docId);
+            }
+          }
         } catch (e) {
           /* le SPA reste maître */
         }
       }, delay);
     });
+  }
+
+  /** Dernier document connu rattaché à un message (cartes déjà posées). */
+  function lastDocOfMessage(messageId) {
+    try {
+      const msgEl = messageEl(messageId);
+      if (!msgEl) return null;
+      const cards = msgEl.querySelectorAll('[data-ndocs-doc]');
+      return cards.length ? cards[cards.length - 1].getAttribute('data-ndocs-doc') : null;
+    } catch (e) {
+      return null;
+    }
   }
 
   function showGenerating(messageId, label) {
