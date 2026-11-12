@@ -27,6 +27,73 @@
                 <meta name="theme-color" content="#212121" />
                 <meta name="robots" content="noindex,nofollow" />
 
+                <!-- MODE INVITÉ (à la ChatGPT) — handshake AVANT le boot du SPA :
+                     un visiteur sans session obtient directement un compte
+                     anonyme jetable et atterrit dans le chat. La page /auth
+                     reste INTACTE (aucun bouton invité dessus) ; la reconnexion
+                     se fait via les boutons « Se connecter / S'inscrire »
+                     injectés en haut à droite par guest-bridge.js.
+                     Voir public/static/guest-bridge.js + /api/v1/auths/guest. -->
+                <script>
+                        (() => {
+                                const AUTH_SURFACE = /^\/(auth|oauth|forgot)(\/|$)/;
+                                const TIMEOUT_MS = 8000; // watchdog boot (30 s checkpoint) : cap confortable, froid serverless inclus
+                                let ready;
+                                try {
+                                        const path = window.location.pathname;
+                                        const hasToken = !!localStorage.getItem('token');
+                                        const stashed = sessionStorage.getItem('nelth-guest-stash');
+
+                                        if (AUTH_SURFACE.test(path) || hasToken) {
+                                                // Page d'auth PURE (aucun invité auto ici) ou session
+                                                // déjà présente (invité OU compte réel) → boot normal.
+                                                ready = Promise.resolve();
+                                        } else if (stashed) {
+                                                // Retour depuis /auth SANS connexion : on restaure la
+                                                // session invitée (et ses conversations) au lieu d'en
+                                                // recréer une neuve.
+                                                sessionStorage.removeItem('nelth-guest-stash');
+                                                localStorage.setItem('token', stashed);
+                                                ready = Promise.resolve();
+                                        } else {
+                                                // Nouveau visiteur → session invitée (compte anonyme
+                                                // jetable côté serveur). Échec/réseau lent → boot
+                                                // normal → page de connexion classique, jamais bloqué.
+                                                let cancelled = false;
+                                                const abort = new AbortController();
+                                                const timeout = new Promise((resolve) => {
+                                                        setTimeout(() => {
+                                                                cancelled = true;
+                                                                abort.abort();
+                                                                resolve();
+                                                        }, TIMEOUT_MS);
+                                                });
+                                                const signup = fetch('/api/v1/auths/guest', {
+                                                        method: 'POST',
+                                                        credentials: 'same-origin',
+                                                        headers: { 'content-type': 'application/json' },
+                                                        body: '{}',
+                                                        signal: abort.signal,
+                                                })
+                                                        .then((r) => (r.ok ? r.json() : null))
+                                                        .then((d) => {
+                                                                if (!cancelled && d && d.token) {
+                                                                        localStorage.setItem('token', d.token);
+                                                                        return true;
+                                                                }
+                                                                return false;
+                                                        })
+                                                        .catch(() => false);
+                                                ready = Promise.race([signup, timeout]);
+                                        }
+                                } catch (e) {
+                                        ready = Promise.resolve();
+                                }
+                                // Le boot du SPA (script en bas de page) attend cette promesse.
+                                window.__nelthGuestReady = ready;
+                        })();
+                </script>
+
                 <!-- Cache-busted (?v=) — guarantees every browser drops any stale
                      loader.js/custom.css from earlier iterations and always runs
                      the current citation-panel + app-picker + favicon code. -->
@@ -55,6 +122,10 @@
                      l'artefact (texte, structures, IA, enregistrement) ;
                      bloc html masqué dans le chat ; cartes sous la réponse. -->
                 <script src="/static/documents-bridge.js?v=20261114a4" defer></script>
+                <!-- Mode Invité : boutons « Se connecter / S'inscrire » en haut à
+                     droite pour les sessions invitées (affichage ChatGPT), plus
+                     la gestion du stash invité. Voir guest-bridge.js. -->
+                <script src="/static/guest-bridge.js?v=20261113a3" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->
@@ -221,7 +292,16 @@
                                                 import("/_app/immutable/entry/start.Bfx8fBLT.js"),
                                                 import("/_app/immutable/entry/app.jSN9ebxr.js")
                                         ]).then(([kit, app]) => {
-                                                kit.start(app, element);
+                                                const boot = () => kit.start(app, element);
+                                                // MODE INVITÉ : on attend le handshake de session
+                                                // invitée (max ~5 s, voir <head>) pour que le SPA
+                                                // démarre avec le token déjà en place — le visiteur
+                                                // atterrit directement dans le chat.
+                                                if (window.__nelthGuestReady && typeof window.__nelthGuestReady.then === 'function') {
+                                                        window.__nelthGuestReady.then(boot, boot);
+                                                } else {
+                                                        boot();
+                                                }
                                         }).catch((err) => {
                                                 // Module fetch/parse failed (flaky mobile network,
                                                 // browser too old for the compiled bundles) — hand

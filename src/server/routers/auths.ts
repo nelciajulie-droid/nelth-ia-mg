@@ -16,6 +16,7 @@ import { getPermissions, hasPermission } from '@/lib/access-control';
 import {
   Auths,
   AuthModel,
+  createSessionResponse,
   createSigninResponse,
   getMfaConfig,
   limitAccount,
@@ -56,6 +57,9 @@ const WEBUI_AUTH_TRUSTED_ROLE_HEADER = process.env.WEBUI_AUTH_TRUSTED_ROLE_HEADE
 const WEBUI_AUTH_SIGNOUT_REDIRECT_URL = process.env.WEBUI_AUTH_SIGNOUT_REDIRECT_URL || '';
 const ENABLE_INITIAL_ADMIN_SIGNUP = env.ENABLE_INITIAL_ADMIN_SIGNUP;
 const ENABLE_OAUTH_TOKEN_EXCHANGE = envBool('ENABLE_OAUTH_TOKEN_EXCHANGE', 'False');
+// Guest mode kill-switch (default ON — ChatGPT-like visitor sessions). Set
+// ENABLE_GUEST_MODE=False to force every visitor through the login page.
+const ENABLE_GUEST_MODE = envBool('ENABLE_GUEST_MODE', 'True');
 
 // Error messages missing from the frozen constants.ts (Python strings)
 const INCORRECT_PASSWORD = 'The password provided is incorrect. Please check for typos and try again.';
@@ -175,6 +179,11 @@ class RateLimiter {
 
 // 5 failed attempts per email per minute (per port contract; upstream uses 15/180s)
 const signinRateLimiter = new RateLimiter(5, 60);
+
+// 30 guest account creations per IP per hour — generous for shared NATs while
+// keeping programmatic flooding of the users table in check (same in-memory
+// rolling-window approach as the signin limiter above).
+const guestRateLimiter = new RateLimiter(30, 3600);
 
 // ---------------------------------------------------------------------------
 // Config helpers (Python Config.get_many semantics: DB row or DEFAULT_CONFIG
@@ -964,6 +973,73 @@ export const routes: Route[] = [
         if (e instanceof HttpError) throw e;
         return ctx.error(500, 'An internal error occurred during signup.');
       }
+    },
+  },
+
+  // ------------------- POST /guest -------------------
+  //
+  // Guest mode (ChatGPT-like): a visitor without any session gets a throwaway
+  // anonymous account + session directly from the app shell — the login page
+  // stays untouched (no guest button there). The account is a REAL user row
+  // (role from ui.default_user_role) so every downstream feature (chats,
+  // titles, files…) keeps working unchanged; it is simply marked as a guest
+  // (info.is_guest + @guests.nelth-ia.local email) so the frontend can badge
+  // it and ops scripts can purge old guests.
+  {
+    method: 'POST',
+    path: 'guest',
+    auth: 'none',
+    handler: async (ctx) => {
+      if (!ENABLE_GUEST_MODE) {
+        ctx.error(403, ERROR_MESSAGES.ACTION_PROHIBITED);
+      }
+
+      const ip =
+        ctx.req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+        ctx.req.headers.get('x-real-ip') ||
+        'unknown';
+      if (guestRateLimiter.isLimited(`ip:${ip}`)) {
+        ctx.error(429, ERROR_MESSAGES.RATE_LIMIT_EXCEEDED);
+      }
+
+      const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 10);
+      const email = `guest-${suffix}@guests.nelth-ia.local`;
+      // Guest accounts can never be signed into with credentials: the
+      // password column holds an opaque random MARKER instead of a bcrypt
+      // hash — verifyPassword() fails closed against it (bcrypt.compare
+      // against a non-hash → false). Skipping the KDF keeps provisioning
+      // fast (~1 DB round-trip) so the pre-boot guest handshake never
+      // outruns its cap, even on a cold serverless instance.
+      const passwordMarker = `guest:${crypto.randomUUID()}`;
+      const role = await configGet<string>('ui.default_user_role', env.DEFAULT_USER_ROLE);
+
+      let user = await Auths.insertNewAuth(email, passwordMarker, 'Invité', '/user.png', role);
+      if (!user) {
+        ctx.error(500, ERROR_MESSAGES.CREATE_USER_ERROR);
+      }
+
+      // Mark the account as a guest (readable from the admin user table and
+      // from /api/v1/users — not part of the session response, which stays
+      // upstream-compatible).
+      user =
+        (await Users.updateUserById(user.id, {
+          info: { is_guest: true, source: 'web-guest', created_at: nowSec() },
+        })) ?? user;
+
+      const auth = await Auths.getAuthById(user.id);
+      if (!auth) {
+        ctx.error(500, ERROR_MESSAGES.CREATE_USER_ERROR);
+      }
+
+      // Bounded guest session (30 days), independent of auth.jwt_expiry.
+      const GUEST_SESSION_TTL_SEC = 30 * 24 * 3600;
+      const result = await createSessionResponse(user, {
+        setCookie: true,
+        source: 'guest',
+        auth,
+        expiresDeltaSec: GUEST_SESSION_TTL_SEC,
+      });
+      return jsonWithCookies(result.data, result.cookies);
     },
   },
 

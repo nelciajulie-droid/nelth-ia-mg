@@ -745,6 +745,9 @@ export async function createSessionResponse(
     auth: AuthModel;
     mfaVerified?: boolean;
     authTime?: number | null;
+    /** Explicit session lifetime override (seconds; null = never). Guest
+     *  sessions use this to stay bounded regardless of auth.jwt_expiry. */
+    expiresDeltaSec?: number | null;
   }
 ): Promise<SessionResponse> {
   const source = opts.source ?? 'password';
@@ -756,7 +759,10 @@ export async function createSessionResponse(
   if (isMfaRequired(source, await getMfaConfig()) && !mfaVerified) {
     throw new HttpError(401, 'Authenticator verification is required.');
   }
-  const expiresDeltaSec = parseDuration(await configGet<string>('auth.jwt_expiry', '-1'));
+  const expiresDeltaSec =
+    opts.expiresDeltaSec !== undefined && opts.expiresDeltaSec !== null
+      ? opts.expiresDeltaSec
+      : parseDuration(await configGet<string>('auth.jwt_expiry', '-1'));
   const now = nowSec();
   const expiresAt = expiresDeltaSec ? now + Math.floor(expiresDeltaSec) : null;
   const token = createToken(
