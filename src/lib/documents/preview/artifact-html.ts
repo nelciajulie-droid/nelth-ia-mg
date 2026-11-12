@@ -3,7 +3,7 @@ import { buildPreview } from './preview-model';
 import { resolveTemplate, cssFonts, type DocumentTemplate } from '../templates';
 
 /**
- * DOCUMENT ARTIFACT — the code-preview artifact block (v3 — in-artifact studio).
+ * DOCUMENT ARTIFACT — the code-preview artifact block (v4 — fit + zoom + pages).
  *
  * The compiled SPA owns a premium artifact system: an ```html fenced block
  * inside an assistant message becomes a sandboxed iframe preview in the
@@ -16,7 +16,9 @@ import { resolveTemplate, cssFonts, type DocumentTemplate } from '../templates';
  *     footer « title — N / total ») — the same pagination model the PDF uses
  *   • 16:9 slide cards for presentations, sheet tables for spreadsheets
  *   • fit-to-width scaling that tracks the panel size (ResizeObserver) so the
- *     document renders correctly at ANY panel width — narrow included
+ *     document renders correctly at ANY panel width — narrow included — plus
+ *     ZOOM controls (− % +) and a live page indicator (n / N) that follows
+ *     scrolling (the tools the workshop used to carry, now in the preview)
  *   • « Modifier » toggles an edit mode IN the preview: every text surface
  *     becomes editable (paragraphs, headings, list items, table cells, quote
  *     authors, callouts, code, slide titles/bullets/notes, sheet cells),
@@ -27,8 +29,9 @@ import { resolveTemplate, cssFonts, type DocumentTemplate } from '../templates';
  *     the artifact re-renders itself from the updated SDR
  *   • the embedded SDR is only the bootstrap: opening/editing refreshes the
  *     document from the server so the preview always shows the saved truth
- *   • a slim floating toolbar (PDF/DOCX/XLSX/PPTX/CSV/MD/TXT + Modifier)
- *     performs multi-format downloads through the same postMessage bridge
+ *   • a slim floating toolbar (Télécharger → PDF/DOCX/XLSX/PPTX/CSV/MD/TXT,
+ *     zoom, pages, Modifier) performs multi-format downloads through the
+ *     same postMessage bridge
  *
  * Everything is escaped; the output never contains a ``` run (it would close
  * the host fence early — runs are broken with a zero-width word joiner) nor
@@ -266,7 +269,12 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
   margin:0;background:#e9eae8;padding:24px 16px 96px;}
 .ndoc-root *{box-sizing:border-box}
 .ndoc-fit{margin:0 auto;width:fit-content}
+/* width:max-content keeps the pages' layout box at their natural width even
+   when .ndoc-fit is shrunk by the scaler — WITHOUT it the flex column shrinks
+   to the panel width and center-overflowing pages get clipped on the LEFT
+   after transform-origin:top-left scaling (the "cut off document" bug). */
 .ndoc-doc{display:flex;flex-direction:column;align-items:center;gap:22px;transform-origin:top left}
+.ndoc-root[data-ndoc-mode="paper"] .ndoc-doc,.ndoc-root[data-ndoc-mode="slides"] .ndoc-doc{width:max-content}
 
 /* — pages — */
 .ndoc-pg{position:relative;width:595.28pt;height:841.89pt;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.10),0 12px 32px rgba(16,24,40,.13);border-radius:2px;overflow:hidden}
@@ -329,7 +337,7 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 .ndoc-sheet-scroll{overflow:auto;max-height:420px}
 .ndoc-sheet-scroll .ndoc-tbl th{position:sticky;top:0;z-index:1}
 
-/* — barre d'outils (vues + état édition + IA) — */
+/* — barre d'outils (zoom + pages + vues + état édition + IA) — */
 .ndoc-bar{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:40;
   display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 24px);
   padding:6px;border-radius:14px;background:rgba(24,26,25,.86);backdrop-filter:blur(10px);
@@ -337,11 +345,26 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 .ndoc-bar-brand{display:flex;align-items:center;gap:7px;padding:0 10px 0 8px;color:#e8ebea;font-size:11.5px;font-weight:600;letter-spacing:.01em;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
 .ndoc-bar-brand svg{flex-shrink:0}
 .ndoc-bar-sep{width:1px;height:18px;background:rgba(255,255,255,.18);margin:0 4px}
+/* zoom (− % +) — l'outil du studio, dans l'aperçu du code */
+.ndoc-zoom{display:flex;align-items:center;gap:1px}
+.ndoc-root[data-ndoc-mode="sheets"] .ndoc-zoom{display:none}
+.ndoc-zbtn{appearance:none;border:0;border-radius:8px;min-width:26px;height:26px;padding:0 6px;cursor:pointer;
+  background:transparent;color:#d9dddb;font-family:inherit;font-size:15px;font-weight:700;line-height:1}
+.ndoc-zbtn:hover{background:rgba(255,255,255,.14);color:#fff}
+.ndoc-zbtn:focus-visible{outline:2px solid #6ee7d7;outline-offset:1px}
+.ndoc-zval{min-width:46px;text-align:center;font-size:11px;font-weight:700;color:#e8ebea;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ndoc-pages{font-size:11px;font-weight:700;color:#b8bebc;font-variant-numeric:tabular-nums;padding:0 5px;white-space:nowrap}
+/* indicateur de page — suit le défilement */
 .ndoc-fmt{appearance:none;border:0;border-radius:9px;padding:6px 9px;background:transparent;color:#d9dddb;
-  font-family:inherit;font-size:11px;font-weight:700;letter-spacing:.05em;cursor:pointer;transition:background .15s ease,color .15s ease;text-transform:uppercase}
+  font-family:inherit;font-size:11px;font-weight:700;letter-spacing:.05em;cursor:pointer;transition:background .15s ease,color .15s ease;text-transform:uppercase;text-align:left}
 .ndoc-fmt:hover{background:rgba(255,255,255,.14);color:#fff}
 .ndoc-fmt:focus-visible{outline:2px solid #6ee7d7;outline-offset:1px}
 .ndoc-fmt[data-busy="1"]{opacity:.45;pointer-events:none}
+.ndoc-dl{appearance:none;border:0;border-radius:9px;padding:6px 11px;cursor:pointer;
+  background:transparent;color:#d9dddb;font-family:inherit;font-size:11.5px;font-weight:700;letter-spacing:.02em;
+  display:flex;align-items:center;gap:6px;white-space:nowrap;transition:background .15s ease,color .15s ease}
+.ndoc-dl:hover{background:rgba(255,255,255,.14);color:#fff}
+.ndoc-dl:focus-visible{outline:2px solid #6ee7d7;outline-offset:1px}
 .ndoc-edit{appearance:none;border:0;border-radius:9px;padding:6px 13px;cursor:pointer;
   background:var(--a);color:#fff;font-family:inherit;font-size:11.5px;font-weight:700;letter-spacing:.02em;
   transition:filter .15s ease;display:flex;align-items:center;gap:6px;white-space:nowrap}
@@ -361,6 +384,11 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 .ndoc-ia:hover{filter:brightness(1.12)}
 .ndoc-dirty{width:8px;height:8px;border-radius:99px;background:#f59e0b;margin-left:2px;flex-shrink:0}
 .ndoc-x{display:none}
+/* popup des formats de téléchargement (s'ouvre au-dessus de la barre) */
+.ndoc-fmts{position:fixed;right:14px;bottom:64px;z-index:41;display:flex;flex-direction:column;gap:2px;min-width:132px;
+  padding:6px;border-radius:14px;background:rgba(24,26,25,.92);backdrop-filter:blur(10px);
+  box-shadow:0 12px 34px rgba(0,0,0,.4);font-family:var(--fd)}
+.ndoc-fmts.ndoc-x{display:none}
 
 /* — panneau IA (instruction naturelle) — */
 .ndoc-iap{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:41;display:flex;gap:6px;align-items:center;
@@ -406,8 +434,8 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 @media print{
   .ndoc-root{background:#fff;padding:0}
   .ndoc-fit{width:auto}
-  .ndoc-doc{gap:0;transform:none!important}
-  .ndoc-bar,.ndoc-iap,.ndoc-toast,.ndoc-rail{display:none!important}
+  .ndoc-doc{gap:0;transform:none!important;width:auto!important}
+  .ndoc-bar,.ndoc-iap,.ndoc-toast,.ndoc-rail,.ndoc-fmts{display:none!important}
   .ndoc-pg{width:auto;height:auto;min-height:auto;box-shadow:none;border-radius:0;break-after:page}
   .ndoc-pg:last-of-type{break-after:auto}
   .ndoc-pg-body{height:auto;overflow:visible}
@@ -415,7 +443,15 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
   .ndoc-editing [data-ndoc-ed]{background:none!important;box-shadow:none!important}
   @page{size:A4;margin:0}
 }
-@media (max-width:640px){.ndoc-root{padding:14px 6px 84px}}
+/* Panneau étroit (side panel du SPA) : barre compacte sur UNE ligne —
+   la marque puis l'indicateur de pages se replient d'abord. */
+@media (max-width:560px){
+  .ndoc-root{padding:14px 6px 84px}
+  .ndoc-bar-brand{display:none}
+  .ndoc-dl span{display:none}
+  .ndoc-dl{padding:6px 9px}
+}
+@media (max-width:420px){.ndoc-pages{display:none}.ndoc-bar-sep{margin:0 2px}}
 @media (prefers-reduced-motion:reduce){.ndoc-root *,.ndoc-bar,.ndoc-iap,.ndoc-toast{transition:none!important}}
 @media (prefers-reduced-motion:reduce){.ndoc-toast .ndoc-spin{animation:none}}
 </style>`;
@@ -437,6 +473,9 @@ const HOST_SCRIPT = `<script>
   var busy = false;
   var snapshotSdr = null;
   var lastOpenCmd = 0;
+  // zoom de l'aperçu (1 = ajusté à la largeur du panneau) — l'outil du studio
+  var zoom = 1;
+  var ZOOM_MIN = 0.5, ZOOM_MAX = 3, ZOOM_STEP = 0.25;
 
   function $(sel, root){ return (root || document).querySelector(sel); }
   function $$(sel, root){ return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -729,18 +768,44 @@ const HOST_SCRIPT = `<script>
     } catch(e){}
     var avail = Math.max(160, rootEl.clientWidth - pad - 2);
     var natural = docEl.scrollWidth || (MODE === 'slides' ? 720 : 794);
-    var s = Math.min(1, avail / natural);
-    if (s < 0.999){
-      docEl.style.transformOrigin = 'top left';
-      docEl.style.transform = 'scale(' + s + ')';
-      fitEl.style.width = Math.round(natural * s) + 'px';
-      fitEl.style.height = Math.round(docEl.offsetHeight * s) + 'px';
-    } else {
-      docEl.style.transform = '';
-      fitEl.style.width = '';
-      fitEl.style.height = '';
-    }
+    var fitScale = Math.min(1, avail / natural);
+    var s = fitScale * zoom;
+    docEl.style.transformOrigin = 'top left';
+    docEl.style.transform = Math.abs(s - 1) < 0.001 ? '' : 'scale(' + s + ')';
+    fitEl.style.width = Math.round(natural * s) + 'px';
+    fitEl.style.height = Math.round(docEl.offsetHeight * s) + 'px';
+    var zv = $('[data-ndoc-zoomval]');
+    if (zv) zv.textContent = Math.round(zoom * 100) + ' %';
   }
+
+  // -------------------------------------------------- zoom + pages (studio)
+  function setZoom(z){
+    zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 20) / 20));
+    rescale();
+    updatePages();
+  }
+  /** Page la plus visible → indicateur « n / N » (suit le défilement). */
+  function updatePages(){
+    var el = $('[data-ndoc-pages]');
+    if (!el) return;
+    if (MODE !== 'paper'){ el.textContent = ''; el.classList.add('ndoc-x'); return; }
+    el.classList.remove('ndoc-x');
+    var pages = $$('.ndoc-pg');
+    if (!pages.length){ el.textContent = ''; return; }
+    var mid = window.innerHeight / 2, best = 0, bd = Infinity;
+    for (var i = 0; i < pages.length; i++){
+      var r = pages[i].getBoundingClientRect();
+      var d = Math.abs(r.top + r.height / 2 - mid);
+      if (d < bd){ bd = d; best = i; }
+    }
+    el.textContent = (best + 1) + ' / ' + pages.length;
+  }
+  var pageTick = false;
+  window.addEventListener('scroll', function(){
+    if (pageTick) return;
+    pageTick = true;
+    requestAnimationFrame(function(){ pageTick = false; updatePages(); });
+  }, true);
 
   // ---------------------------------------------------------- édition
   function clone(o){ return JSON.parse(JSON.stringify(o)); }
@@ -1099,39 +1164,55 @@ const HOST_SCRIPT = `<script>
   }
 
   // ---------------------------------------------------------- barre d'outils
-  var bar = $('.ndoc-bar');
-  if (bar){
-    bar.addEventListener('click', function(e){
-      var b = e.target.closest('button');
-      if (!b) return;
-      if (b.hasAttribute('data-fmt')){
-        b.setAttribute('data-busy', '1');
-        setTimeout(function(){ b.removeAttribute('data-busy'); }, 4000);
-        send('download', { format: b.getAttribute('data-fmt') });
-        return;
-      }
-      if (b.hasAttribute('data-ndoc-edit')){
-        if (!editing) refreshFromServer(true);
-        return;
-      }
-      if (b.hasAttribute('data-ndoc-save')){ save(); return; }
-      if (b.hasAttribute('data-ndoc-cancel')){
-        if (dirty && snapshotSdr != null){ renderDoc(clone(snapshotSdr)); }
-        exitEditMode();
-        return;
-      }
-      if (b.hasAttribute('data-ndoc-ia')){ openIa(); return; }
-    });
-    document.addEventListener('click', function(e){
-      var r = e.target.closest && e.target.closest('[data-ndoc-r]');
-      if (r) railAction(r.getAttribute('data-ndoc-r'), r);
-    });
+  function toggleFormats(force){
+    var p = $('[data-ndoc-fmts]');
+    if (!p) return;
+    var show = force == null ? p.classList.contains('ndoc-x') : force;
+    p.classList.toggle('ndoc-x', !show);
   }
+  document.addEventListener('click', function(e){
+    var b = e.target.closest && e.target.closest('button');
+    if (!b) {
+      // clic hors du popup des formats → le referme
+      var fp = $('[data-ndoc-fmts]');
+      if (fp && !fp.classList.contains('ndoc-x') && !(e.target.closest && e.target.closest('[data-ndoc-fmts], [data-ndoc-dl]'))) toggleFormats(false);
+      return;
+    }
+    if (b.hasAttribute('data-fmt')){
+      b.setAttribute('data-busy', '1');
+      setTimeout(function(){ b.removeAttribute('data-busy'); }, 4000);
+      send('download', { format: b.getAttribute('data-fmt') });
+      toggleFormats(false);
+      return;
+    }
+    if (b.hasAttribute('data-zoom-out')){ setZoom(zoom - ZOOM_STEP); return; }
+    if (b.hasAttribute('data-zoom-in')){ setZoom(zoom + ZOOM_STEP); return; }
+    if (b.hasAttribute('data-ndoc-dl')){ toggleFormats(); return; }
+    if (b.hasAttribute('data-ndoc-edit')){
+      if (!editing) refreshFromServer(true);
+      return;
+    }
+    if (b.hasAttribute('data-ndoc-save')){ save(); return; }
+    if (b.hasAttribute('data-ndoc-cancel')){
+      if (dirty && snapshotSdr != null){ renderDoc(clone(snapshotSdr)); }
+      exitEditMode();
+      return;
+    }
+    if (b.hasAttribute('data-ndoc-ia')){ openIa(); return; }
+  });
+  document.addEventListener('click', function(e){
+    var r = e.target.closest && e.target.closest('[data-ndoc-r]');
+    if (r) railAction(r.getAttribute('data-ndoc-r'), r);
+  });
   document.addEventListener('input', function(){
     if (editing && !busy) setDirty(true);
   });
   document.addEventListener('keydown', function(e){
-    if (e.key === 'Escape' && editing && !busy){ exitEditMode(); }
+    if (e.key === 'Escape'){
+      if (editing && !busy){ exitEditMode(); }
+      toggleFormats(false);
+      closeIa();
+    }
   });
 
   // ---------------------------------------------------------- boot
@@ -1139,9 +1220,11 @@ const HOST_SCRIPT = `<script>
     repaginate();
     rescale();
     renumber();
+    updatePages();
   }
   function start(){
     boot();
+    syncBar();
     if (window.ResizeObserver && $('.ndoc-root')){
       try { new ResizeObserver(function(){ rescale(); }).observe($('.ndoc-root')); } catch(e){}
     }
@@ -1207,24 +1290,39 @@ export function buildArtifactHtml(doc: DocumentDoc, opts: ArtifactOptions): stri
     (f) => `<button type="button" class="ndoc-fmt" data-fmt="${f.id}" title="Télécharger en ${f.label}">${f.label}</button>`
   ).join('');
 
+  const DL_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+
   const bar =
     `<nav class="ndoc-bar" aria-label="Actions du document">` +
     `<span class="ndoc-bar-brand" title="${esc(doc.title)}">${N_MARK}<span data-ndoc-brand>${esc(doc.title)}</span></span>` +
     `<span class="ndoc-bar-sep" aria-hidden="true"></span>` +
-    fmtButtons +
+    // — zoom (− % +) : l'outil du studio, dans l'aperçu du code —
+    `<span class="ndoc-zoom" role="group" aria-label="Zoom de l'aperçu">` +
+    `<button type="button" class="ndoc-zbtn" data-zoom-out title="Réduire (zoom −25 %)">−</button>` +
+    `<span class="ndoc-zval" data-ndoc-zoomval aria-live="polite">100 %</span>` +
+    `<button type="button" class="ndoc-zbtn" data-zoom-in title="Agrandir (zoom +25 %)">+</button>` +
+    `</span>` +
+    // — page courante (suit le défilement) —
+    `<span class="ndoc-pages ndoc-x" data-ndoc-pages aria-live="polite"></span>` +
+    `<span class="ndoc-bar-sep" aria-hidden="true"></span>` +
+    // — téléchargement multi-formats (popup) —
+    `<button type="button" class="ndoc-dl" data-ndoc-dl title="Télécharger — PDF, DOCX, XLSX, PPTX, CSV, MD, TXT" aria-haspopup="menu">${DL_ICON}<span>Télécharger</span></button>` +
     `<span class="ndoc-bar-sep" aria-hidden="true"></span>` +
     // — vue —
     `<button type="button" class="ndoc-edit" data-ndoc-edit data-ndoc-viewctl title="Modifier dans l'aperçu">` +
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>` +
     `<span>Modifier</span></button>` +
     // — édition —
-    `<button type="button" class="ndoc-cancel" data-ndoc-cancel data-ndoc-editctl ndoc-x title="Annuler les modifications">Annuler</button>` +
-    `<button type="button" class="ndoc-save" data-ndoc-save data-ndoc-editctl ndoc-x title="Enregistrer le document">` +
+    `<button type="button" class="ndoc-cancel ndoc-x" data-ndoc-cancel data-ndoc-editctl title="Annuler les modifications">Annuler</button>` +
+    `<button type="button" class="ndoc-save ndoc-x" data-ndoc-save data-ndoc-editctl title="Enregistrer le document">` +
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>` +
     `<span>Enregistrer</span></button>` +
-    `<button type="button" class="ndoc-ia" data-ndoc-ia data-ndoc-editctl ndoc-x title="Améliorer avec l'IA">✨ IA</button>` +
+    `<button type="button" class="ndoc-ia ndoc-x" data-ndoc-ia data-ndoc-editctl title="Améliorer avec l'IA">✨ IA</button>` +
     `<span class="ndoc-dirty ndoc-x" data-ndoc-dirty title="Modifications non enregistrées" aria-hidden="true"></span>` +
     `</nav>` +
+    // popup des formats (s'ouvre au-dessus de la barre, à droite)
+    `<div class="ndoc-fmts ndoc-x" data-ndoc-fmts role="menu" aria-label="Formats de téléchargement">${fmtButtons}</div>` +
     `<div class="ndoc-toast ndoc-x" data-ndoc-toast role="status" aria-live="polite"></div>`;
 
   const tplParams = {

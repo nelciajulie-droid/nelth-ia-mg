@@ -53,7 +53,11 @@
   // vivent DANS l'artefact aperçu code (édition, IA, enregistrement) ; la
   // carte passe SOUS la réponse ; le bloc html est masqué dans le chat ; le
   // pont proxie save/improve/fetch pour l'iframe sandboxée.
-  const BUILD = '20261114a1';
+  // 20261114a2 — JAMAIS de blanc sur la réponse : hideNativeFileCard s'arrête
+  // dès qu'un parent porte de la substance (markdown, code, .cm-line) ; le
+  // bloc html est masqué AUSSI pendant le streaming (rendu pre/code en plus
+  // du CodeMirror final).
+  const BUILD = '20261114a4';
 
   // ------------------------------------------------------------------ utils
 
@@ -537,7 +541,11 @@
 
   /** Masque l'affichage fichier natif du SPA pour CE fichier — sans jamais
    *  toucher un conteneur qui porterait de la substance (la réponse).
-   *  Couvre la carte fichier native (bouton), les liens et images. */
+   *  Couvre la carte fichier native (bouton), les liens et images.
+   *  v2 : un parent qui contient le MOINDRE texte de réponse (.markdown-prose,
+   *  pre, .cm-line, .language-html) est intouchable — c'est lui qui causait
+   *  le « blanc qui cache la réponse de l'IA » (ascension à l'aveugle). */
+  var SUBSTANCE_SEL = '.markdown-prose, pre, code, .cm-line, .language-html, [class*="markdown"]';
   function hideNativeFileCard(msgEl, doc) {
     if (!msgEl || !doc) return;
     try {
@@ -550,7 +558,7 @@
       }
       // Carte fichier native du SPA : bouton portant le nom du fichier.
       msgEl.querySelectorAll('button').forEach((b) => {
-        if (b.closest('.ndocs-card') || b.closest('.ndocs-gen')) return;
+        if (b.closest('.ndocs-card') || b.closest('.ndocs-gen') || b.closest('.ndoc-bar')) return;
         const t = (b.textContent || '').trim();
         if (name && t.indexOf(name) !== -1 && t.length < 160) targets.push(b);
       });
@@ -559,8 +567,10 @@
         for (let i = 0; i < 4; i++) {
           const p = target.parentElement;
           if (!p || p === msgEl) break;
+          // substance dans ce parent → il porte la réponse ou le code : STOP.
+          if (p.querySelector(SUBSTANCE_SEL)) break;
           const txt = (p.textContent || '').trim();
-          if (txt.length > 400 || p.querySelector('pre')) break; // la réponse reste visible
+          if (txt.length > 400) break;
           target = p;
         }
         if (target && target !== msgEl) target.classList.add('ndocs-hide');
@@ -594,18 +604,23 @@
 
   function hideDocCodeBlocks() {
     try {
-      // Le SPA rend les blocs de code via CodeMirror : l'enveloppe du CODE
-      // porte la classe language-html ; la BARRE (langage + Collapse/Save/
-      // Copy/Preview) vit dans le conteneur PARENT — on masque le bloc
-      // ENTIER. Le marqueur nelth-doc-artifact ouvre la première .cm-line
-      // dès le début du flux (masquage pendant le streaming compris).
-      const blocks = document.querySelectorAll('div[class~="language-html"]');
+      // Le SPA rend les blocs de code via CodeMirror une fois le tour fini
+      // (div.language-html + barre d'outils dans le parent) MAIS pendant le
+      // streaming, le rendu passe par pre/code classiques — on couvre les
+      // DEUX : le marqueur nelth-doc-artifact ouvre le flux dès le début,
+      // le code brut n'apparaît donc JAMAIS dans la conversation.
+      const blocks = document.querySelectorAll(
+        'div[class~="language-html"], pre[class~="language-html"], code[class~="language-html"]'
+      );
       for (let i = 0; i < blocks.length; i++) {
         const area = blocks[i];
         let host = area;
         for (let k = 0; k < 4; k++) {
           const p = host.parentElement;
           if (!p || (p.id && /^message-/.test(p.id))) break;
+          // ne JAMAIS remonter dans le conteneur de la réponse (markdown) —
+          // pendant le streaming la barre d'outils n'existe pas encore.
+          if (p.querySelector('.markdown-prose, [class*="markdown"]')) break;
           host = p;
           if (p.querySelector('button')) break; // conteneur avec la barre d'outils
         }
@@ -733,7 +748,17 @@
 
   /** Recharge le chat et dépose les cartes des documents persistés. */
   function renderChatDocuments(chatId) {
-    if (!chatId) return;
+    if (!chatId) {
+      // Nouvelle conversation depuis « / » : le POST part sans chat_id et
+      // l'URL ne bouge pas — après le tour, le chat LE PLUS RÉCENT de
+      // l'utilisateur EST cette conversation (mise à jour par le serveur) :
+      // on le résout puis on le scanne (la carte arrive en direct, sans
+      // attendre une navigation dans l'historique).
+      apiGet('/api/v1/chats/?page=1').then((list) => {
+        if (Array.isArray(list) && list.length) renderChatDocuments(list[0].id);
+      });
+      return;
+    }
     apiGet('/api/v1/chats/' + encodeURIComponent(chatId)).then((chat) => {
       if (!chat || !chat.chat) return;
       const messages = (chat.chat.history || {}).messages || {};
