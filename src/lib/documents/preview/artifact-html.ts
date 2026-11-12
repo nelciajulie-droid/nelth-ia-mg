@@ -444,9 +444,11 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
   @page{size:A4;margin:0}
 }
 /* Panneau étroit (side panel du SPA) : barre compacte sur UNE ligne —
-   la marque puis l'indicateur de pages se replient d'abord. */
+   la marque puis l'indicateur de pages se replient d'abord ; le bas de
+   page garde assez d'air pour que la barre (1-2 rangées enroulées) ne
+   recouvre jamais le texte du document. */
 @media (max-width:560px){
-  .ndoc-root{padding:14px 6px 84px}
+  .ndoc-root{padding:14px 6px 150px}
   .ndoc-bar-brand{display:none}
   .ndoc-dl span{display:none}
   .ndoc-dl{padding:6px 9px}
