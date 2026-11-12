@@ -7,11 +7,19 @@
  *  1. ARTEFACT APERÇU CODE (le SYSTÈME NATIF du SPA) : chaque document
  *     généré est livré comme bloc ```html dans le message — le panneau
  *     Artifacts du SPA l'affiche (bouton « Preview » du bloc, versions,
- *     plein écran, téléchargement html natif). La barre d'outils DANS
- *     l'artefact (téléchargements multi-formats + « Modifier ») parle au
- *     pont par postMessage (iframe sandboxée, origine opaque).
+ *     plein écran, téléchargement html natif). Le bloc html lui-même est
+ *     MASQUÉ dans la conversation (aucun code brut visible) : la carte
+ *     document placée SOUS la réponse le représente.
  *
- *  2. CARTES DOCUMENT dans la conversation — TROIS chemins complémentaires
+ *  2. OUTILS DE MODIFICATION DANS l'ARTIFACT : le bundle html embarque le
+ *     studio d'édition complet (textes, structures, IA, enregistrement).
+ *     Le pont n'est qu'un PROXY API : l'iframe sandboxée (origine opaque)
+ *     ne peut pas appeler l'API elle-même — postMessage « save / improve /
+ *     fetch » → PATCH / POST / GET authentifiés ici, réponses renvoyées à
+ *     l'iframe. « Modifier » sur la carte ouvre le panneau natif puis
+ *     ordonne l'entrée en édition à l'artifact (commande postMessage).
+ *
+ *  3. CARTES DOCUMENT dans la conversation — TROIS chemins complémentaires
  *     de découverte (le même rendu final converge vers attachDocCard) :
  *     a. TAP SSE (transport serverless) : window.__nelthEventTap (loader.js
  *        readEvents) voit `chat:message:document` + `status`
@@ -23,24 +31,17 @@
  *        (message.files avec document_id) deviennent des cartes premium.
  *     c. NAVIGATION / historique : le chat actif (/c/{id}) est suivi (hook
  *        pushState + popstate) et chaque conversation ouverte est scannée.
- *
- *  3. ATELIER D'ÉDITION (overlay React autonome — un élément AJOUTÉ, pas le
- *     canal d'aperçu) : « Modifier » sur la carte ou dans la barre d'outils
- *     de l'artefact l'ouvre.
- *     • Desktop ≥1024px : panneau ancré à droite (min(880px, 72vw)) —
- *       #chat-container anime sa marge droite (même mécanique que le
- *       panneau Sources de loader.js) : la conversation RESTE visible.
- *     • <1024px : tiroir plein écran + backdrop, safe-areas, back Android.
- *     • Le bundle React (/static/documents/main.js + app.css) est chargé en
- *       LAZY au PREMIER open() — jamais au démarrage de l'app.
- *     • Contrat : window.NelthDocuments { mount/unmount/open/close } côté
- *       bundle, window.__nelthDocsBridge { open/close/isOpen } côté bridge
- *       (le bouton retour du workspace appelle le bridge).
+ *     Les cartes vivent dans la COLONNE DE CONTENU du message (SOUS la
+ *     réponse) ; la génération animée aussi.
  *
  *  4. TÉLÉCHARGEMENT : la barre d'outils de l'artefact expose TOUS les
  *     formats via /api/v1/documents/{id}/export?format=… (postMessage →
  *     fetch authentifié) ; la carte propose le fichier d'origine
  *     /api/v1/files/{id}/content.
+ *
+ *  (L'ATELIER D'ÉDITION OVERLAY — l'ancien « nouvel artefact » — a été
+ *   SUPPRIMÉ : la modification vit désormais dans l'aperçu du code,
+ *   comme le reste du système.)
  */
 (() => {
   'use strict';
@@ -48,16 +49,11 @@
 
   // Versionnée : garantit que les navigateurs laissent tomber un ancien
   // bundle après une mise à jour (les artefacts sont committés dans public/).
-  // 20261113a1 — les documents passent par l'ARTEFACT APERÇU CODE natif du
-  // SPA (bloc ```html + panneau Artifacts) ; la barre d'outils de l'artefact
-  // (téléchargements + atelier) parle au pont par postMessage ; la carte
-  // gagne « Modifier » et son action principale devient « Aperçu » natif.
-  // 20261113a2 — mobile (<768px) : « Aperçu » et la fin de tour basculent sur
-  //  l'atelier plein écran quand le panneau natif n'ouvre pas (auto-open et
-  //  bouton Preview peu fiables en layout mobile du SPA).
-  const BUILD = '20261113a2';
-  const SCRIPT_URL = '/static/documents/main.js?v=' + BUILD;
-  const CSS_URL = '/static/documents/app.css?v=' + BUILD;
+  // 20261114a1 — l'atelier overlay est SUPPRIMÉ : les outils de modification
+  // vivent DANS l'artefact aperçu code (édition, IA, enregistrement) ; la
+  // carte passe SOUS la réponse ; le bloc html est masqué dans le chat ; le
+  // pont proxie save/improve/fetch pour l'iframe sandboxée.
+  const BUILD = '20261114a1';
 
   // ------------------------------------------------------------------ utils
 
@@ -162,9 +158,9 @@
   // Les documents générés empruntent le SYSTÈME D'ARTEFACTS NATIF du SPA :
   // un bloc ```html dans le message devient un aperçu dans le panneau
   // Artifacts (bouton « Preview » du bloc de code). Le pont se contente
-  // d'AJOUTER les éléments documents : barre d'outils de l'artefact
-  // (téléchargements multi-formats + atelier) via postMessage, cartes de
-  // chat, et ouverture du panneau natif à la fin d'un tour de génération.
+  // d'AJOUTER les éléments documents : proxy API pour l'iframe sandboxée,
+  // cartes de chat SOUS la réponse, masquage du code brut, et ouverture du
+  // panneau natif à la fin d'un tour de génération.
 
   /** Le panneau natif est-il ouvert ? (démonté quand fermé) */
   function nativeArtifactsOpen() {
@@ -172,7 +168,9 @@
   }
 
   /** Clique le bouton « Preview » du bloc html du message — ouvre le panneau
-   *  natif sur LA version de ce document. Retourne false si introuvable. */
+   *  natif sur LA version de ce document (le bouton reste cliquable même
+   *  quand le bloc est masqué : le handler Svelte vit sur l'élément).
+   *  Retourne false si introuvable. */
   function openNativeArtifacts(msgEl) {
     try {
       if (!msgEl) return false;
@@ -191,48 +189,71 @@
 
   const msgElOf = (el) => (el ? el.closest('[id^="message-"]') : null);
 
-  /** Viewports étroits : le panneau d'artefacts natif du SPA y est peu fiable
-   *  (pas d'auto-open, bouton Preview parfois absent du layout mobile) →
-   *  l'atelier plein écran (tiroir + retour Android + safe-areas) prend le
-   *  relais — même contenu, même barre d'outils. */
-  const isNarrowViewport = () => window.matchMedia('(max-width: 767px)').matches;
-
-  /** Ouvre le document dans le panneau d'artefacts natif ; repli atelier. */
-  function previewDocument(docId, fromEl) {
-    if (!isNarrowViewport() && openNativeArtifacts(msgElOf(fromEl))) {
-      // le clic peut ne rien ouvrir (panneau indisponible) — vérifie puis repli.
-      setTimeout(() => {
-        if (!nativeArtifactsOpen()) open(docId);
-      }, 450);
-      return;
+  /** Commande postMessage à l'artifact (l'iframe filtre par docId). */
+  function sendArtifactCommand(docId, action) {
+    try {
+      document.querySelectorAll('iframe').forEach((f) => {
+        try {
+          f.contentWindow.postMessage({ nelthDocCommand: { docId: docId, action: action } }, '*');
+        } catch (e) {
+          /* iframe partie */
+        }
+      });
+    } catch (e) {
+      /* un bug du pont ne doit JAMAIS casser l'app hôte */
     }
-    open(docId);
   }
 
-  /** Hôte postMessage de la barre d'outils de l'artefact (iframe sandboxée,
-   *  origine opaque → elle ne peut PAS appeler l'API elle-même). */
+  /** Ouvre le document dans le panneau d'artefacts NATIF ; réessaie
+   *  quelques fois (le message/le bouton peuvent arriver plus tard). Le
+   *  clic bascule aussi le panneau déjà ouvert sur LA version de ce doc. */
+  function previewDocument(docId, fromEl, command) {
+    const msgEl = msgElOf(fromEl);
+    let done = false;
+    const attempts = [80, 450, 1100, 2200, 3800];
+    attempts.forEach((delay) => {
+      setTimeout(() => {
+        if (done) return;
+        try {
+          openNativeArtifacts(msgEl);
+          if (nativeArtifactsOpen()) {
+            done = true;
+            if (command) setTimeout(() => sendArtifactCommand(docId, command), 400);
+          }
+        } catch (e) {
+          /* le SPA reste maître */
+        }
+      }, delay);
+    });
+  }
+
+  /** Proxy API pour la barre d'outils / le studio DANS l'artefact (iframe
+   *  sandboxée, origine opaque → elle ne peut PAS appeler l'API elle-même). */
   window.addEventListener('message', (e) => {
     try {
       const payload = e.data && e.data.nelthDocArtifact;
       if (!payload || typeof payload.docId !== 'string') return;
       const docId = payload.docId;
-      if (payload.action === 'edit') {
-        open(docId);
-        return;
-      }
+      const replyTo = (msg) => {
+        try {
+          e.source && e.source.postMessage(msg, '*');
+        } catch (err) {
+          /* iframe partie */
+        }
+      };
+      const apiErr = (r, body) => {
+        let detail = body && body.detail;
+        if (Array.isArray(detail) && detail.length && detail[0] && detail[0].msg) detail = detail[0].msg;
+        return typeof detail === 'string' && detail.trim() ? detail.trim() : 'Erreur ' + r.status;
+      };
+
       if (payload.action === 'image') {
         // Image locale protégée de l'artefact → relue en data-URL authentifiée.
         const url = String(payload.url || '');
         const seq = Number(payload.seq) || 0;
-        const reply = (dataUrl) => {
-          try {
-            e.source && e.source.postMessage({ nelthDocArtifactImage: { seq: seq, dataUrl: dataUrl || null } }, '*');
-          } catch (err) {
-            /* iframe partie */
-          }
-        };
+        const reply = (dataUrl) =>
+          replyTo({ nelthDocArtifactImage: { seq: seq, dataUrl: dataUrl || null } });
         if (!seq || !url.startsWith('/')) {
-          // chemins relatifs same-origin uniquement (jamais d'URL externe)
           reply(null);
           return;
         }
@@ -254,6 +275,7 @@
           .catch(() => reply(null));
         return;
       }
+
       if (payload.action === 'download') {
         const fmt = String(payload.format || '').toLowerCase();
         if (!/^(pdf|docx|xlsx|pptx|csv|md|txt)$/.test(fmt)) return;
@@ -268,6 +290,81 @@
             safe + '.' + fmt
           );
         });
+        return;
+      }
+
+      // ---- studio d'édition DANS l'aperçu : proxy authentifié ----
+      if (payload.action === 'save') {
+        const doc = payload.document;
+        if (!doc || typeof doc !== 'object') return;
+        fetch('/api/v1/documents/' + encodeURIComponent(docId), {
+          method: 'PATCH',
+          headers: Object.assign({ 'content-type': 'application/json' }, authHeaders()),
+          body: JSON.stringify({ document: doc, note: "Édition depuis l'aperçu" }),
+        })
+          .then((r) =>
+            r
+              .json()
+              .catch(() => null)
+              .then((body) => ({ ok: r.ok, status: r.status, body }))
+          )
+          .then(({ ok, status, body }) => {
+            docCache.delete(docId);
+            if (!ok || !body || !body.document) {
+              replyTo({ nelthDocSaved: { for: docId, ok: false, error: apiErr({ status }, body) } });
+              return;
+            }
+            replyTo({
+              nelthDocSaved: { for: docId, ok: true, saved_at: body.saved_at, document: body.document },
+            });
+          })
+          .catch(() => replyTo({ nelthDocSaved: { for: docId, ok: false, error: 'Réseau indisponible' } }));
+        return;
+      }
+
+      if (payload.action === 'improve') {
+        const instruction = String(payload.instruction || '').trim();
+        if (!instruction) return;
+        fetch('/api/v1/documents/' + encodeURIComponent(docId) + '/improve', {
+          method: 'POST',
+          headers: Object.assign({ 'content-type': 'application/json' }, authHeaders()),
+          body: JSON.stringify({ instruction }),
+        })
+          .then((r) =>
+            r
+              .json()
+              .catch(() => null)
+              .then((body) => ({ ok: r.ok, status: r.status, body }))
+          )
+          .then(({ ok, status, body }) => {
+            docCache.delete(docId);
+            if (!ok || !body || !body.document) {
+              replyTo({ nelthDocImproved: { for: docId, ok: false, error: apiErr({ status }, body) } });
+              return;
+            }
+            replyTo({ nelthDocImproved: { for: docId, ok: true, document: body.document } });
+          })
+          .catch(() => replyTo({ nelthDocImproved: { for: docId, ok: false, error: 'Réseau indisponible' } }));
+        return;
+      }
+
+      if (payload.action === 'fetch') {
+        // TOUJOURS frais (jamais docCache — il ne porte que des résumés) :
+        // l'aperçu doit refléter la dernière version enregistrée du document.
+        fetch('/api/v1/documents/' + encodeURIComponent(docId), { headers: authHeaders() })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)
+          .then((data) => {
+            if (data && data.document) {
+              docCache.set(docId, data);
+              replyTo({
+                nelthDocFetched: { for: docId, ok: true, document: data.document, thenEdit: !!payload.thenEdit },
+              });
+            } else {
+              replyTo({ nelthDocFetched: { for: docId, ok: false, thenEdit: !!payload.thenEdit } });
+            }
+          });
+        return;
       }
     } catch (err) {
       /* un bug du pont ne doit JAMAIS casser l'app hôte */
@@ -326,7 +423,7 @@
 .ndocs-chip{display:inline-flex;align-items:center;height:19px;padding:0 7px;border-radius:6px;
   font-size:10px;font-weight:700;letter-spacing:.04em;color:#fff;background:#0F6B61;text-transform:uppercase}
 .ndocs-dot{opacity:.5}
-.ndocs-actions{display:flex;gap:8px;margin-top:auto;align-items:center}
+.ndocs-actions{display:flex;gap:8px;margin-top:auto;align-items:center;flex-wrap:wrap}
 .ndocs-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:9px;
   border:1px solid #e0e0e0;background:#fff;color:#404040;font-size:12.5px;font-weight:600;cursor:pointer;
   transition:background .15s ease,border-color .15s ease,color .15s ease;font-family:inherit}
@@ -338,198 +435,8 @@
 .dark .ndocs-btn-primary{background:#0F6B61;border-color:#0F6B61;color:#fff}
 .ndocs-btn svg{width:13px;height:13px;flex-shrink:0}
 .ndocs-hide{display:none !important}
-
-/* ============================================================ WORKSPACE */
-:root{--ndocs-w:min(880px,72vw)}
-@media (max-width:1023px){:root{--ndocs-w:100%}}
-
-.ndocs-backdrop{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.45);opacity:0;
-  pointer-events:none;transition:opacity .25s ease}
-.ndocs-backdrop.ndocs-b-visible{opacity:1;pointer-events:auto}
-@media (min-width:1024px){.ndocs-backdrop{display:none}}
-
-.ndocs-panel{position:fixed;top:0;right:0;z-index:70;width:var(--ndocs-w);max-width:100%;
-  height:100vh;height:100dvh;display:flex;flex-direction:column;background:#ffffff;color:#0d0d0d;
-  border-left:1px solid #e5e5e5;box-shadow:-14px 0 44px rgba(0,0,0,.10);
-  transform:translateX(100%);visibility:hidden;
-  transition:transform .3s cubic-bezier(.32,.72,0,1),visibility 0s .3s}
-.ndocs-panel.ndocs-visible{transform:translateX(0);visibility:visible;
-  transition:transform .3s cubic-bezier(.32,.72,0,1),visibility 0s}
-.dark .ndocs-panel{background:#212121;color:#ececec;border-left:1px solid rgba(255,255,255,.09);
-  box-shadow:-14px 0 44px rgba(0,0,0,.4)}
-
-#chat-container{transition:margin-right .3s cubic-bezier(.32,.72,0,1),width .2s ease}
-@media (min-width:1024px){body.ndocs-open #chat-container{margin-right:var(--ndocs-w)}}
-
-.ndocs-mount{flex:1;min-height:0;position:relative}
-.ndocs-mount>*{position:absolute;inset:0}
-.ndocs-loading{position:absolute;inset:0;display:flex;flex-direction:column;gap:14px;
-  align-items:center;justify-content:center;color:#8f8f8f;font-size:13px}
-.ndocs-spin{width:22px;height:22px;border-radius:99px;border:2px solid #e0e0e0;
-  border-top-color:#0F6B61;animation:ndocs-rotate .8s linear infinite}
-.dark .ndocs-spin{border-color:#3d3d3d;border-top-color:#34d399}
-@keyframes ndocs-rotate{to{transform:rotate(360deg)}}
-
-@media (max-width:1023px){
-  .ndocs-panel{width:100%;border-left:none;box-shadow:0 0 60px rgba(0,0,0,.32)}
-}
-html.ndocs-lock{overflow:hidden}
-@media (prefers-reduced-motion:reduce){.ndocs-panel,.ndocs-backdrop,#chat-container{transition:none !important}}
 `;
   document.head.appendChild(style);
-
-  // ------------------------------------------------- panel + lazy workspace
-
-  let panel = null;
-  let mountHost = null;
-  let backdrop = null;
-  let workspaceLoading = null; // Promise<boolean>
-  let pendingDocId = null;
-  let historyPushed = false;
-  let lastActiveElement = null;
-
-  const overlayMq = window.matchMedia('(max-width: 1023px)');
-  const isOverlay = () => overlayMq.matches;
-
-  function ensurePanel() {
-    if (panel) return;
-    backdrop = document.createElement('div');
-    backdrop.className = 'ndocs-backdrop';
-    backdrop.setAttribute('aria-hidden', 'true');
-    backdrop.addEventListener('click', () => close());
-    document.body.appendChild(backdrop);
-
-    panel = document.createElement('aside');
-    panel.className = 'ndocs-panel';
-    panel.setAttribute('role', 'complementary');
-    panel.setAttribute('aria-label', 'Document');
-    const loading = document.createElement('div');
-    loading.className = 'ndocs-loading';
-    loading.innerHTML =
-      '<div class="ndocs-spin" aria-hidden="true"></div><span>Préparation du workspace…</span>';
-    mountHost = document.createElement('div');
-    mountHost.className = 'ndocs-mount';
-    mountHost.id = 'nelth-documents-overlay';
-    mountHost.appendChild(loading);
-    panel.appendChild(mountHost);
-    document.body.appendChild(panel);
-  }
-
-  /** Lazy-load du bundle React (une seule fois par page). */
-  function loadWorkspace() {
-    if (workspaceLoading) return workspaceLoading;
-    workspaceLoading = new Promise((resolve) => {
-      const css = document.createElement('link');
-      css.rel = 'stylesheet';
-      css.href = CSS_URL;
-      document.head.appendChild(css);
-
-      const script = document.createElement('script');
-      script.src = SCRIPT_URL;
-      script.async = true;
-      script.onload = () => {
-        const ready = () => {
-          if (window.NelthDocuments && mountHost) {
-            try {
-              window.NelthDocuments.mount(mountHost);
-              resolve(true);
-            } catch (e) {
-              console.error('[documents-bridge] mount failed', e);
-              resolve(false);
-            }
-            return true;
-          }
-          return false;
-        };
-        if (!ready()) {
-          let tries = 0;
-          const iv = setInterval(() => {
-            if (ready() || ++tries > 50) clearInterval(iv);
-          }, 100);
-        }
-      };
-      script.onerror = () => {
-        console.error('[documents-bridge] workspace script failed to load');
-        resolve(false);
-      };
-      document.head.appendChild(script);
-    });
-    return workspaceLoading;
-  }
-
-  function open(docId) {
-    if (!docId) return;
-    pendingDocId = docId;
-    ensurePanel();
-    document.body.classList.add('ndocs-open');
-    panel.classList.add('ndocs-visible');
-    if (isOverlay()) {
-      backdrop.classList.add('ndocs-b-visible');
-      document.documentElement.classList.add('ndocs-lock');
-      if (!historyPushed) {
-        history.pushState({ __nelthDocs: 1 }, '');
-        historyPushed = true;
-      }
-      lastActiveElement = document.activeElement instanceof Element ? document.activeElement : null;
-    }
-    const loading = mountHost.querySelector('.ndocs-loading');
-    if (loading) loading.style.display = '';
-    void loadWorkspace().then((ok) => {
-      if (!ok) return;
-      if (loading) loading.style.display = 'none';
-      if (pendingDocId && window.NelthDocuments) {
-        window.NelthDocuments.open(pendingDocId);
-      }
-    });
-  }
-
-  function close() {
-    if (!panel) return;
-    if (window.NelthDocuments) {
-      try {
-        window.NelthDocuments.close();
-      } catch (e) {
-        /* workspace déjà parti */
-      }
-    }
-    document.body.classList.remove('ndocs-open');
-    panel.classList.remove('ndocs-visible');
-    backdrop?.classList.remove('ndocs-b-visible');
-    document.documentElement.classList.remove('ndocs-lock');
-    if (historyPushed) {
-      historyPushed = false;
-      if (window.history.state && window.history.state.__nelthDocs) window.history.back();
-    }
-    if (lastActiveElement && lastActiveElement.isConnected) {
-      try {
-        lastActiveElement.focus({ preventScroll: true });
-      } catch (e) {
-        /* plus focusable */
-      }
-    }
-    lastActiveElement = null;
-    pendingDocId = null;
-  }
-
-  window.addEventListener('popstate', () => {
-    if (historyPushed) {
-      historyPushed = false;
-      close();
-    }
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel && panel.classList.contains('ndocs-visible')) {
-      close();
-    }
-  });
-
-  // API publique — le workspace l'utilise pour son bouton retour.
-  window.__nelthDocsBridge = {
-    open,
-    close,
-    isOpen: () => !!panel && panel.classList.contains('ndocs-visible'),
-  };
 
   // -------------------------------------------------------- cartes de chat
 
@@ -542,10 +449,30 @@ html.ndocs-lock{overflow:hidden}
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>',
   };
 
+  /** Colonne de CONTENU du message — les cartes y vivent SOUS la réponse
+   *  (l'élément racine du message est un rang flex : y appending aurait
+   *  placé la carte À DROITE de la réponse). */
+  function contentColumnOf(msgEl) {
+    if (!msgEl) return null;
+    try {
+      const col = msgEl.querySelector('.flex-auto.w-0');
+      if (col) return col;
+      const role = msgEl.querySelector('[class*="chat-user"],[class*="chat-assistant"],[class*="chat-system"]');
+      if (role) return role;
+      const prose = msgEl.querySelector('.markdown-prose,[class*="markdown"],.prose');
+      if (prose && prose.parentElement && prose.parentElement !== msgEl) return prose.parentElement;
+    } catch (e) {
+      /* DOM inattendu — repli racine */
+    }
+    return msgEl;
+  }
+
   /** Carte premium d'un document (métadonnée du file payload ou de l'API).
    *  Actions : « Aperçu » ouvre le document dans le PANNEAU D'ARTEFACTS
-   *  NATIF du SPA (même surface que l'aperçu de code) ; « Modifier » ouvre
-   *  l'atelier d'édition ; « Télécharger » récupère le fichier d'origine. */
+   *  NATIF du SPA (même surface que l'aperçu de code, rafraîchi du serveur) ;
+   *  « Modifier » ouvre le même panneau puis ordonne l'entrée en édition à
+   *  l'artifact (les outils de modification vivent DANS l'aperçu) ;
+   *  « Télécharger » récupère le fichier d'origine. */
   function buildCard(doc) {
     const card = document.createElement('div');
     card.className = 'ndocs-card ndocs-appear';
@@ -588,7 +515,7 @@ html.ndocs-lock{overflow:hidden}
     const fileUrl = doc.url || '/api/v1/files/' + encodeURIComponent(docId) + '/content';
     const previewIt = (e) => {
       e.stopPropagation();
-      previewDocument(docId, card);
+      previewDocument(docId, card, 'open');
     };
     card.addEventListener('click', previewIt);
     card.addEventListener('keydown', (e) => {
@@ -597,7 +524,8 @@ html.ndocs-lock{overflow:hidden}
     card.querySelector('.ndocs-btn-primary').addEventListener('click', previewIt);
     card.querySelector('.ndocs-btn-edit').addEventListener('click', (e) => {
       e.stopPropagation();
-      open(docId);
+      // même surface que l'aperçu de code — puis édition DANS l'artifact
+      previewDocument(docId, card, 'edit');
     });
     card.querySelector('.ndocs-btn:not(.ndocs-btn-primary):not(.ndocs-btn-edit)').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -607,19 +535,39 @@ html.ndocs-lock{overflow:hidden}
     return card;
   }
 
-  /** Masque l'affichage fichier natif du SPA pour CE fichier (si le build
-   *  du SPA en rend un — la carte premium est l'affichage). */
-  function hideNativeFileCard(msgEl, fileId) {
-    if (!msgEl) return;
-    const sel =
-      'a[href*="/api/v1/files/' + fileId + '"],[src*="/api/v1/files/' + fileId + '"]';
-    msgEl.querySelectorAll(sel).forEach((el) => {
-      let target = el;
-      for (let i = 0; i < 4 && target.parentElement && target.parentElement !== msgEl; i++) {
-        target = target.parentElement;
+  /** Masque l'affichage fichier natif du SPA pour CE fichier — sans jamais
+   *  toucher un conteneur qui porterait de la substance (la réponse).
+   *  Couvre la carte fichier native (bouton), les liens et images. */
+  function hideNativeFileCard(msgEl, doc) {
+    if (!msgEl || !doc) return;
+    try {
+      const fileId = String(doc.id || doc.file_id || '');
+      const name = String(doc.filename || doc.name || doc.title || '');
+      const targets = [];
+      if (fileId) {
+        const sel = 'a[href*="/api/v1/files/' + fileId + '"],[src*="/api/v1/files/' + fileId + '"]';
+        Array.prototype.push.apply(targets, msgEl.querySelectorAll(sel));
       }
-      target.classList.add('ndocs-hide');
-    });
+      // Carte fichier native du SPA : bouton portant le nom du fichier.
+      msgEl.querySelectorAll('button').forEach((b) => {
+        if (b.closest('.ndocs-card') || b.closest('.ndocs-gen')) return;
+        const t = (b.textContent || '').trim();
+        if (name && t.indexOf(name) !== -1 && t.length < 160) targets.push(b);
+      });
+      targets.forEach((el) => {
+        let target = el;
+        for (let i = 0; i < 4; i++) {
+          const p = target.parentElement;
+          if (!p || p === msgEl) break;
+          const txt = (p.textContent || '').trim();
+          if (txt.length > 400 || p.querySelector('pre')) break; // la réponse reste visible
+          target = p;
+        }
+        if (target && target !== msgEl) target.classList.add('ndocs-hide');
+      });
+    } catch (e) {
+      /* best effort */
+    }
   }
 
   /** Carte premium dans le message (idempotent, survit aux re-renders). */
@@ -627,12 +575,50 @@ html.ndocs-lock{overflow:hidden}
     const docId = String(doc.id || doc.file_id || '');
     if (!msgEl || !docId) return;
     const existing = msgEl.querySelector('[data-ndocs-doc="' + CSS.escape(docId) + '"]');
-    if (existing) return;
-    msgEl.appendChild(buildCard(doc));
-    hideNativeFileCard(msgEl, docId);
+    if (existing) {
+      hideNativeFileCard(msgEl, doc);
+      return;
+    }
+    const col = contentColumnOf(msgEl);
+    if (col) col.appendChild(buildCard(doc));
+    hideNativeFileCard(msgEl, doc);
   }
 
   const messageEl = (id) => (id ? document.getElementById('message-' + id) : null);
+
+  // -------------------------------- masquage du bloc html (code brut)
+  // Le document vit dans le panneau d'artefacts NATIF — le bloc ```html du
+  // message n'est qu'un transport : son code brut n'a rien à faire dans la
+  // conversation. Le bouton « Preview » reste cliquable (handler sur
+  // l'élément) pour ouvrir le panneau natif.
+
+  function hideDocCodeBlocks() {
+    try {
+      // Le SPA rend les blocs de code via CodeMirror : l'enveloppe du CODE
+      // porte la classe language-html ; la BARRE (langage + Collapse/Save/
+      // Copy/Preview) vit dans le conteneur PARENT — on masque le bloc
+      // ENTIER. Le marqueur nelth-doc-artifact ouvre la première .cm-line
+      // dès le début du flux (masquage pendant le streaming compris).
+      const blocks = document.querySelectorAll('div[class~="language-html"]');
+      for (let i = 0; i < blocks.length; i++) {
+        const area = blocks[i];
+        let host = area;
+        for (let k = 0; k < 4; k++) {
+          const p = host.parentElement;
+          if (!p || (p.id && /^message-/.test(p.id))) break;
+          host = p;
+          if (p.querySelector('button')) break; // conteneur avec la barre d'outils
+        }
+        if (host.classList.contains('ndocs-hide')) continue;
+        const firstLine = host.querySelector('.cm-line');
+        const txt = firstLine ? firstLine.textContent || '' : host.textContent || '';
+        if (txt.indexOf('nelth-doc-artifact:') === -1) continue;
+        host.classList.add('ndocs-hide');
+      }
+    } catch (e) {
+      /* best effort */
+    }
+  }
 
   // ------------------------------------------------- (a) TAP SSE (live)
 
@@ -640,30 +626,17 @@ html.ndocs-lock{overflow:hidden}
   /** Messages dont le panneau d'artefacts natif a déjà été demandé. */
   const nativeOpenedFor = new Set();
 
-  /** Fin d'un tour de génération de document : ouvre le document dans le
-   *  PANNEAU D'ARTEFACTS NATIF (même surface que l'aperçu de code) dès que
-   *  le bloc html est tombé dans le message (l'événement done remplace le
-   *  contenu juste après les événements document). Viewports étroits : si le
-   *  panneau natif n'ouvre toujours pas, l'atelier plein écran prend le
-   *  relais ; sinon les cartes et le bouton « Preview » restent là. */
+  /** Fin d'un tour de génération : ouvre le document dans le panneau
+   *  d'artefacts NATIF dès que le bloc html est tombé dans le message. */
   function scheduleNativeOpen(messageId) {
     if (!messageId || nativeOpenedFor.has(messageId)) return;
     nativeOpenedFor.add(messageId);
-    const attempts = [500, 1400, 2600, 4200];
-    let docId = null;
-    attempts.forEach((delay, i) => {
+    const attempts = [500, 1400, 2600, 4200, 6500];
+    attempts.forEach((delay) => {
       setTimeout(() => {
         try {
           if (nativeArtifactsOpen()) return;
           openNativeArtifacts(messageEl(messageId));
-          // Dernier essai écoulé sans panneau → mobile : l'atelier plein écran
-          // prend le relais (le panneau natif n'y auto-ouvre pas).
-          if (i === attempts.length - 1 && !nativeArtifactsOpen()) {
-            if (isNarrowViewport()) {
-              docId = docId || lastDocOfMessage(messageId);
-              if (docId) open(docId);
-            }
-          }
         } catch (e) {
           /* le SPA reste maître */
         }
@@ -671,26 +644,15 @@ html.ndocs-lock{overflow:hidden}
     });
   }
 
-  /** Dernier document connu rattaché à un message (cartes déjà posées). */
-  function lastDocOfMessage(messageId) {
-    try {
-      const msgEl = messageEl(messageId);
-      if (!msgEl) return null;
-      const cards = msgEl.querySelectorAll('[data-ndocs-doc]');
-      return cards.length ? cards[cards.length - 1].getAttribute('data-ndocs-doc') : null;
-    } catch (e) {
-      return null;
-    }
-  }
-
   function showGenerating(messageId, label) {
     const msgEl = messageEl(messageId);
     if (!msgEl) return;
+    const col = contentColumnOf(msgEl) || msgEl;
     const old = genCards.get(messageId);
     if (old) {
       const span = old.querySelector('.ndocs-gen-label');
       if (span && label) span.textContent = label;
-      if (old.parentElement !== msgEl) msgEl.appendChild(old);
+      if (!old.isConnected || old.parentElement !== col) col.appendChild(old);
       return;
     }
     const el = document.createElement('div');
@@ -699,7 +661,7 @@ html.ndocs-lock{overflow:hidden}
     el.innerHTML =
       '<span class="ndocs-gen-dot" aria-hidden="true"></span><span class="ndocs-gen-label"></span>';
     el.querySelector('.ndocs-gen-label').textContent = label || 'Génération du document…';
-    msgEl.appendChild(el);
+    col.appendChild(el);
     genCards.set(messageId, el);
   }
 
@@ -751,9 +713,11 @@ html.ndocs-lock{overflow:hidden}
           url: doc.url,
           size: doc.size,
         });
+        cardRegistry.set(docId, messageId);
         const tryAttach = () => {
           const msgEl = messageEl(messageId);
           if (msgEl) attachDocCard(msgEl, docCache.get(docId));
+          hideDocCodeBlocks();
           return !!msgEl;
         };
         if (!tryAttach()) setTimeout(tryAttach, 350);
@@ -793,6 +757,7 @@ html.ndocs-lock{overflow:hidden}
               size: file.size,
             };
           if (!cached) docCache.set(docId, doc);
+          cardRegistry.set(docId, msgId);
           const tryAttach = () => {
             const msgEl = messageEl(msgId);
             if (msgEl) attachDocCard(msgEl, doc);
@@ -801,6 +766,7 @@ html.ndocs-lock{overflow:hidden}
           if (!tryAttach()) setTimeout(tryAttach, 600);
         });
       });
+      setTimeout(hideDocCodeBlocks, 200);
     });
   }
 
@@ -863,22 +829,47 @@ html.ndocs-lock{overflow:hidden}
   });
   window.addEventListener('popstate', onChatNavigation);
 
-  // Premier chargement (deep-link /c/{id} après reload) + garde anti-zombi
-  // (les cartes retirées par un re-render Svelte sont ré-insérées).
-  let navScheduled = false;
-  const observer = new MutationObserver(() => {
-    if (navScheduled) return;
-    navScheduled = true;
+  // Premier chargement (deep-link /c/{id} après reload) + garde anti-zombi :
+  // les cartes masquées/retirées par un re-render Svelte sont ré-insérées,
+  // le code brut des documents reste masqué. Tout ça rAF-throttlé.
+  const cardRegistry = new Map(); // docId → messageId
+  let sweepScheduled = false;
+  function sweep() {
+    if (sweepScheduled) return;
+    sweepScheduled = true;
     requestAnimationFrame(() => {
-      navScheduled = false;
-      onChatNavigation();
+      sweepScheduled = false;
+      hideDocCodeBlocks();
+      cardRegistry.forEach((messageId, docId) => {
+        const msgEl = messageEl(messageId);
+        if (!msgEl) return;
+        const existing = msgEl.querySelector('[data-ndocs-doc="' + CSS.escape(docId) + '"]');
+        if (!existing) {
+          if (docCache.has(docId)) {
+            const doc = docCache.get(docId);
+            if (doc) attachDocCard(msgEl, doc);
+          } else {
+            resolveDocument(docId).then((data) => {
+              if (data && data.document) {
+                const msgEl2 = messageEl(messageId);
+                if (msgEl2) attachDocCard(msgEl2, Object.assign({}, data, { doc_type: data.docType }));
+              }
+            });
+          }
+        } else {
+          hideNativeFileCard(msgEl, docCache.get(docId) || { id: docId });
+        }
+      });
     });
-  });
+  }
+
+  const observer = new MutationObserver(sweep);
 
   function start() {
     observer.observe(document.body, { childList: true, subtree: true });
     lastChatUrl = null;
     onChatNavigation();
+    sweep();
     setTimeout(() => renderChatDocuments((location.pathname.match(/^\/c\/([a-zA-Z0-9-]+)/) || [])[1]), 900);
   }
 

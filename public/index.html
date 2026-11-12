@@ -43,13 +43,15 @@
                      translucide flouté (suit le thème clair/sombre). -->
                 <script src="/static/images-bridge.js?v=20261112a1" defer></script>
                 <!-- Documents : artefact aperçu code natif (bloc ```html →
-                     panneau Artifacts du SPA) + cartes premium + atelier
-                     (voir documents-bridge.js — le bundle React
-                     /static/documents/ est chargé en lazy au premier open).
-                     v=20261113a1 — les documents empruntent le système
-                     d'artefacts NATIF (panneau Artifacts, bouton Preview) ;
-                     barre d'outils dans l'artefact via postMessage. -->
-                <script src="/static/documents-bridge.js?v=20261113a2" defer></script>
+                     panneau Artifacts du SPA) + cartes premium SOUS la
+                     réponse + studio d'édition DANS l'aperçu (voir
+                     documents-bridge.js — l'atelier overlay est SUPPRIMÉ :
+                     save/improve/fetch passent par le proxy postMessage du
+                     pont, aucun bundle React séparé).
+                     v=20261114a1 — outils de modification intégrés à
+                     l'artefact (texte, structures, IA, enregistrement) ;
+                     bloc html masqué dans le chat ; cartes sous la réponse. -->
+                <script src="/static/documents-bridge.js?v=20261114a1" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->

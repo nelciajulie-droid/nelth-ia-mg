@@ -1,31 +1,40 @@
-import type { DocumentDoc, DocBlock, DocSlide, DocSheet } from '../core/document-schema';
+import type { DocumentDoc, DocBlock } from '../core/document-schema';
 import { buildPreview } from './preview-model';
 import { resolveTemplate, cssFonts, type DocumentTemplate } from '../templates';
 
 /**
- * DOCUMENT ARTIFACT — the code-preview artifact block.
+ * DOCUMENT ARTIFACT — the code-preview artifact block (v3 — in-artifact studio).
  *
- * The compiled SPA already owns a premium artifact system: an ```html fenced
- * block inside an assistant message becomes a sandboxed iframe preview in the
+ * The compiled SPA owns a premium artifact system: an ```html fenced block
+ * inside an assistant message becomes a sandboxed iframe preview in the
  * right-hand Artifacts panel (Preview button on the code block, version
  * navigation, full screen, native HTML download). This module renders the
- * SAME SDR the exports use into a self-contained html BODY (style + dom +
- * script — no <html>/<head> wrapper: the artifact host injects its own), so a
- * generated document opens EXACTLY where code previews open, with the
- * document elements ADDED on top:
+ * SAME SDR the exports use into that self-contained html body — and now the
+ * MODIFICATION TOOLS live INSIDE the artifact itself (no separate workshop):
  *
  *   • true A4 paper pages (template margins/typography/palette, running
  *     footer « title — N / total ») — the same pagination model the PDF uses
  *   • 16:9 slide cards for presentations, sheet tables for spreadsheets
- *   • a slim floating toolbar (PDF/DOCX/XLSX/PPTX/CSV/MD/TXT + « Modifier »)
- *     that talks to the host page through postMessage — the sandbox
- *     (`allow-scripts allow-downloads allow-forms`, opaque origin) cannot
- *     call the API itself, the documents bridge performs the authenticated
- *     download / opens the editor workspace.
+ *   • fit-to-width scaling that tracks the panel size (ResizeObserver) so the
+ *     document renders correctly at ANY panel width — narrow included
+ *   • « Modifier » toggles an edit mode IN the preview: every text surface
+ *     becomes editable (paragraphs, headings, list items, table cells, quote
+ *     authors, callouts, code, slide titles/bullets/notes, sheet cells),
+ *     structure controls add/remove blocks, rows, items and slides
+ *   • « Enregistrer » → postMessage → documents bridge PATCHes the SDR
+ *     (the sandbox's opaque origin cannot call the API itself)
+ *   • « ✨ IA » → natural-language instruction → bridge POSTs /improve →
+ *     the artifact re-renders itself from the updated SDR
+ *   • the embedded SDR is only the bootstrap: opening/editing refreshes the
+ *     document from the server so the preview always shows the saved truth
+ *   • a slim floating toolbar (PDF/DOCX/XLSX/PPTX/CSV/MD/TXT + Modifier)
+ *     performs multi-format downloads through the same postMessage bridge
  *
  * Everything is escaped; the output never contains a ``` run (it would close
  * the host fence early — runs are broken with a zero-width word joiner) nor
- * `</script>` (escaped as &lt;/script&gt; inside text nodes).
+ * `</script>` (escaped as &lt;/script&gt; inside text nodes). The host script
+ * itself uses string concatenation only (no template literals) so a stray
+ * backtick run can never appear.
  */
 
 // ---------------------------------------------------------------------------
@@ -79,7 +88,7 @@ const CALLOUT_ICON: Record<string, string> = {
   danger: '✕',
 };
 
-function renderBlock(blk: DocBlock, tpl: DocumentTemplate): string {
+function renderBlock(blk: DocBlock, tpl: DocumentTemplate, bi: number): string {
   const base = tpl.typography.size;
   const lead = tpl.typography.leading;
   switch (blk.t) {
@@ -89,68 +98,72 @@ function renderBlock(blk: DocBlock, tpl: DocumentTemplate): string {
       const style =
         `font-size:${size.toFixed(2)}pt;font-weight:${blk.level <= 3 ? 700 : 600};` +
         `margin:${blk.level <= 2 ? 10 : 6}pt 0 ${blk.level === 1 ? 14 : blk.level === 2 ? 8 : 6}pt;`;
-      return `<div class="${cls} ndoc-heading" data-ndoc-block style="${style}">${inlineMd(blk.text)}</div>`;
+      return `<div class="${cls} ndoc-heading" data-ndoc-block data-ndoc-bi="${bi}" data-ndoc-ed="text" style="${style}">${inlineMd(blk.text)}</div>`;
     }
     case 'para':
-      return `<p class="ndoc-p" data-ndoc-block style="font-size:${base}pt;line-height:${(1.42 * lead).toFixed(3)};margin:0 0 ${(7 * lead).toFixed(1)}pt;">${inlineMd(blk.text)}</p>`;
+      return `<p class="ndoc-p" data-ndoc-block data-ndoc-bi="${bi}" data-ndoc-ed="text" style="font-size:${base}pt;line-height:${(1.42 * lead).toFixed(3)};margin:0 0 ${(7 * lead).toFixed(1)}pt;">${inlineMd(blk.text)}</p>`;
     case 'list': {
       const tag = blk.style === 'number' ? 'ol' : 'ul';
       const marker = blk.style === 'check' ? '☑' : blk.style === 'number' ? '' : '•';
       const items = blk.items
         .map(
-          (it) =>
+          (it, j) =>
             `<li style="margin:0 0 ${(3.5 * lead).toFixed(1)}pt;padding-left:${10 + it.level * 14}pt;">` +
             (marker ? `<span class="ndoc-li-mk" aria-hidden="true">${marker}</span>` : '') +
-            `<span>${inlineMd(it.text)}</span></li>`
+            `<span data-ndoc-ed="li" data-ndoc-j="${j}">${inlineMd(it.text)}</span></li>`
         )
         .join('');
-      return `<${tag} class="ndoc-list" data-ndoc-block style="font-size:${base}pt;line-height:${(1.4 * lead).toFixed(3)};margin:0 0 ${(6 * lead).toFixed(1)}pt;padding:0;list-style:${blk.style === 'number' ? 'decimal' : 'none'};">${items}</${tag}>`;
+      return `<${tag} class="ndoc-list" data-ndoc-block data-ndoc-bi="${bi}" style="font-size:${base}pt;line-height:${(1.4 * lead).toFixed(3)};margin:0 0 ${(6 * lead).toFixed(1)}pt;padding:0;list-style:${blk.style === 'number' ? 'decimal' : 'none'};">${items}</${tag}>`;
     }
     case 'table': {
       const cols = Math.max(1, blk.header.length);
-      const head = blk.header.map((c) => `<th>${inlineMd(c)}</th>`).join('');
+      const head = blk.header
+        .map((c, ci) => `<th data-ndoc-ed="hcell" data-ndoc-c="${ci}">${inlineMd(c)}</th>`)
+        .join('');
       const rows = blk.rows
-        .map((row) => {
-          const cells = Array.from({ length: cols }, (_, c) => `<td>${inlineMd(String(row[c] ?? ''))}</td>`).join('');
-          return `<tr>${cells}</tr>`;
-        })
+        .map(
+          (row, ri) =>
+            '<tr>' +
+            Array.from({ length: cols }, (_, c) => `<td data-ndoc-ed="cell" data-ndoc-r="${ri}" data-ndoc-c="${c}">${inlineMd(String(row[c] ?? ''))}</td>`).join('') +
+            '</tr>'
+        )
         .join('');
       return (
-        `<div class="ndoc-tbl-wrap" data-ndoc-block style="margin:0 0 ${(10 * lead).toFixed(1)}pt;">` +
+        `<div class="ndoc-tbl-wrap" data-ndoc-block data-ndoc-bi="${bi}" style="margin:0 0 ${(10 * lead).toFixed(1)}pt;">` +
         `<table class="ndoc-tbl" style="font-size:${(base - 1).toFixed(2)}pt;">` +
         `<thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>` +
-        (blk.caption ? `<div class="ndoc-tbl-cap">${inlineMd(blk.caption)}</div>` : '') +
+        (blk.caption ? `<div class="ndoc-tbl-cap" data-ndoc-ed="caption">${inlineMd(blk.caption)}</div>` : '') +
         '</div>'
       );
     }
     case 'quote':
       return (
-        `<blockquote class="ndoc-quote" data-ndoc-block>` +
-        `<p>${inlineMd(blk.text)}</p>` +
-        (blk.author ? `<footer>— ${inlineMd(blk.author)}</footer>` : '') +
+        `<blockquote class="ndoc-quote" data-ndoc-block data-ndoc-bi="${bi}">` +
+        `<p data-ndoc-ed="text">${inlineMd(blk.text)}</p>` +
+        (blk.author ? `<footer data-ndoc-ed="author">— ${inlineMd(blk.author)}</footer>` : '') +
         '</blockquote>'
       );
     case 'callout':
       return (
-        `<div class="ndoc-callout ndoc-callout--${blk.variant}" data-ndoc-block>` +
+        `<div class="ndoc-callout ndoc-callout--${blk.variant}" data-ndoc-block data-ndoc-bi="${bi}">` +
         `<span class="ndoc-callout-ico" aria-hidden="true">${CALLOUT_ICON[blk.variant] ?? 'i'}</span>` +
-        `<div>${blk.title ? `<div class="ndoc-callout-tt">${inlineMd(blk.title)}</div>` : ''}` +
-        `<div>${inlineMd(blk.text)}</div></div></div>`
+        `<div>${blk.title ? `<div class="ndoc-callout-tt" data-ndoc-ed="ctitle">${inlineMd(blk.title)}</div>` : ''}` +
+        `<div data-ndoc-ed="text">${inlineMd(blk.text)}</div></div></div>`
       );
     case 'code':
       return (
-        `<pre class="ndoc-code" data-ndoc-block>${blk.lang ? `<span class="ndoc-code-lang">${esc(blk.lang)}</span>` : ''}` +
-        `<code>${esc(blk.text)}</code></pre>`
+        `<pre class="ndoc-code" data-ndoc-block data-ndoc-bi="${bi}">${blk.lang ? `<span class="ndoc-code-lang">${esc(blk.lang)}</span>` : ''}` +
+        `<code data-ndoc-ed="codetext">${esc(blk.text)}</code></pre>`
       );
     case 'divider':
-      return '<hr class="ndoc-hr" data-ndoc-block />';
+      return '<hr class="ndoc-hr" data-ndoc-block data-ndoc-bi="-1" />';
     case 'pagebreak':
       return '';
     case 'image':
       return (
-        `<figure class="ndoc-fig" data-ndoc-block>` +
+        `<figure class="ndoc-fig" data-ndoc-block data-ndoc-bi="${bi}">` +
         `<img src="${esc(blk.url)}" alt="${esc(blk.alt ?? 'Illustration')}" loading="lazy" />` +
-        (blk.alt ? `<figcaption>${inlineMd(blk.alt)}</figcaption>` : '') +
+        (blk.alt ? `<figcaption data-ndoc-ed="text">${inlineMd(blk.alt)}</figcaption>` : '') +
         '</figure>'
       );
     default:
@@ -165,9 +178,12 @@ function renderBlock(blk: DocBlock, tpl: DocumentTemplate): string {
 function paperHtml(doc: DocumentDoc, tpl: DocumentTemplate): string {
   const preview = buildPreview(doc);
   const m = preview.margins;
+  // Global SDR block index — editing maps DOM → SDR through it.
+  const indexOf = new Map<DocBlock, number>();
+  doc.blocks.forEach((b, i) => indexOf.set(b, i));
   const pages = preview.pages
     .map((page) => {
-      const blocks = page.blocks.map((p) => renderBlock(p.block, tpl)).join('');
+      const blocks = page.blocks.map((p) => renderBlock(p.block, tpl, indexOf.get(p.block) ?? -1)).join('');
       return (
         `<section class="ndoc-pg" data-ndoc-pg>` +
         `<div class="ndoc-pg-body" style="padding:${m.top}pt ${m.side}pt ${m.bottom}pt;">${blocks}</div>` +
@@ -182,22 +198,25 @@ function paperHtml(doc: DocumentDoc, tpl: DocumentTemplate): string {
 }
 
 function slidesHtml(doc: DocumentDoc, tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>): string {
-  const slides: DocSlide[] = doc.slides ?? [];
+  void tpl;
+  const slides = doc.slides ?? [];
   const cards = slides
     .map((s, i) => {
       const big = s.layout === 'title' || s.layout === 'section';
       const bullets = s.bullets.length
-        ? `<ul class="ndoc-sli-ul">${s.bullets.map((b) => `<li><span class="ndoc-li-mk" aria-hidden="true">•</span><span>${inlineMd(b)}</span></li>`).join('')}</ul>`
+        ? `<ul class="ndoc-sli-ul">${s.bullets
+            .map((b, j) => `<li><span class="ndoc-li-mk" aria-hidden="true">•</span><span data-ndoc-ed="sbullet" data-ndoc-j="${j}">${inlineMd(b)}</span></li>`)
+            .join('')}</ul>`
         : '';
       return (
-        `<section class="ndoc-sli${big ? ' ndoc-sli--big' : ''}" data-ndoc-sli aria-label="Diapositive ${i + 1}">` +
+        `<section class="ndoc-sli${big ? ' ndoc-sli--big' : ''}" data-ndoc-sli data-ndoc-si="${i}" aria-label="Diapositive ${i + 1}">` +
         `<div class="ndoc-sli-rail" aria-hidden="true"></div>` +
         `<div class="ndoc-sli-body" style="font-family:${esc(fonts.heading)};">` +
-        `<div class="ndoc-sli-tt">${s.title ? inlineMd(s.title) : '<span class="ndoc-sli-ph">Diapositive</span>'}</div>` +
+        `<div class="ndoc-sli-tt" data-ndoc-ed="stitle">${s.title ? inlineMd(s.title) : '<span class="ndoc-sli-ph">Diapositive</span>'}</div>` +
         bullets +
         (s.layout === 'closing' ? '<div class="ndoc-sli-close">Merci</div>' : '') +
         `</div><div class="ndoc-sli-num">${i + 1}</div>` +
-        (s.notes ? `<div class="ndoc-sli-notes"><span>Notes</span><p>${inlineMd(s.notes)}</p></div>` : '') +
+        (s.notes ? `<div class="ndoc-sli-notes"><span>Notes</span><p data-ndoc-ed="snotes">${inlineMd(s.notes)}</p></div>` : '') +
         '</section>'
       );
     })
@@ -206,21 +225,25 @@ function slidesHtml(doc: DocumentDoc, tpl: DocumentTemplate, fonts: ReturnType<t
 }
 
 function sheetsHtml(doc: DocumentDoc, tpl: DocumentTemplate): string {
-  const sheets: DocSheet[] = doc.sheets ?? [];
+  const sheets = doc.sheets ?? [];
   const base = tpl.typography.size;
   const cards = sheets
-    .map((sheet) => {
+    .map((sheet, si) => {
       const cols = Math.max(1, sheet.header.length);
-      const head = sheet.header.map((c) => `<th>${inlineMd(c)}</th>`).join('');
+      const head = sheet.header
+        .map((c, ci) => `<th data-ndoc-ed="shh" data-ndoc-c="${ci}">${inlineMd(c)}</th>`)
+        .join('');
       const rows = sheet.rows
-        .map((row) => {
-          const cells = Array.from({ length: cols }, (_, c) => `<td>${inlineMd(String(row[c] ?? ''))}</td>`).join('');
-          return `<tr>${cells}</tr>`;
-        })
+        .map(
+          (row, ri) =>
+            '<tr>' +
+            Array.from({ length: cols }, (_, c) => `<td data-ndoc-ed="shcell" data-ndoc-r="${ri}" data-ndoc-c="${c}">${inlineMd(String(row[c] ?? ''))}</td>`).join('') +
+            '</tr>'
+        )
         .join('');
       return (
-        `<section class="ndoc-sheet" data-ndoc-sheet>` +
-        `<header class="ndoc-sheet-hd"><span class="ndoc-sheet-name">${inlineMd(sheet.name)}</span>` +
+        `<section class="ndoc-sheet" data-ndoc-sheet data-ndoc-shi="${si}">` +
+        `<header class="ndoc-sheet-hd"><span class="ndoc-sheet-name" data-ndoc-ed="shname">${inlineMd(sheet.name)}</span>` +
         `<span class="ndoc-sheet-meta">${sheet.rows.length} ligne${sheet.rows.length > 1 ? 's' : ''} · ${cols} colonne${cols > 1 ? 's' : ''}</span></header>` +
         `<div class="ndoc-sheet-scroll"><table class="ndoc-tbl" style="font-size:${(base - 1).toFixed(2)}pt;"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>` +
         '</section>'
@@ -243,7 +266,7 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
   margin:0;background:#e9eae8;padding:24px 16px 96px;}
 .ndoc-root *{box-sizing:border-box}
 .ndoc-fit{margin:0 auto;width:fit-content}
-.ndoc-doc{display:flex;flex-direction:column;align-items:center;gap:22px;transform-origin:top center}
+.ndoc-doc{display:flex;flex-direction:column;align-items:center;gap:22px;transform-origin:top left}
 
 /* — pages — */
 .ndoc-pg{position:relative;width:595.28pt;height:841.89pt;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.10),0 12px 32px rgba(16,24,40,.13);border-radius:2px;overflow:hidden}
@@ -285,7 +308,7 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 .ndoc-empty{font-family:var(--fd);color:var(--muted);text-align:center;padding:40px 0;margin:0}
 
 /* — slides — */
-.ndoc-sli{position:relative;width:720px;max-width:100%;aspect-ratio:16/9;background:var(--tint);border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.10),0 12px 32px rgba(16,24,40,.13)}
+.ndoc-sli{position:relative;width:720px;aspect-ratio:16/9;background:var(--tint);border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.10),0 12px 32px rgba(16,24,40,.13)}
 .ndoc-sli-rail{position:absolute;inset:0 auto 0 0;width:7px;background:var(--a)}
 .ndoc-sli-body{position:relative;height:100%;display:flex;flex-direction:column;justify-content:center;gap:14px;padding:34px 44px 34px 50px}
 .ndoc-sli-tt{font-size:26pt;font-weight:700;color:var(--ink);line-height:1.12}
@@ -306,7 +329,7 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 .ndoc-sheet-scroll{overflow:auto;max-height:420px}
 .ndoc-sheet-scroll .ndoc-tbl th{position:sticky;top:0;z-index:1}
 
-/* — barre d'outils (éléments ajoutés : téléchargements + atelier) — */
+/* — barre d'outils (vues + état édition + IA) — */
 .ndoc-bar{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:40;
   display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 24px);
   padding:6px;border-radius:14px;background:rgba(24,26,25,.86);backdrop-filter:blur(10px);
@@ -325,45 +348,108 @@ function stylesHtml(tpl: DocumentTemplate, fonts: ReturnType<typeof cssFonts>, m
 .ndoc-edit:hover{filter:brightness(1.12)}
 .ndoc-edit:focus-visible{outline:2px solid #fff;outline-offset:1px}
 .ndoc-edit svg{width:12px;height:12px}
-@media (prefers-reduced-motion:reduce){.ndoc-root *,.ndoc-bar{transition:none!important}}
+.ndoc-cancel{appearance:none;border:1px solid rgba(255,255,255,.25);border-radius:9px;padding:6px 11px;cursor:pointer;
+  background:transparent;color:#d9dddb;font-family:inherit;font-size:11.5px;font-weight:600;white-space:nowrap}
+.ndoc-cancel:hover{background:rgba(255,255,255,.12);color:#fff}
+.ndoc-save{appearance:none;border:0;border-radius:9px;padding:6px 13px;cursor:pointer;
+  background:#0F6B61;color:#fff;font-family:inherit;font-size:11.5px;font-weight:700;letter-spacing:.02em;
+  display:flex;align-items:center;gap:6px;white-space:nowrap}
+.ndoc-save:hover{filter:brightness(1.15)}
+.ndoc-save[data-busy="1"]{opacity:.55;pointer-events:none}
+.ndoc-ia{appearance:none;border:0;border-radius:9px;padding:6px 11px;cursor:pointer;
+  background:linear-gradient(135deg,#7C3AED,#0F6B61);color:#fff;font-family:inherit;font-size:11.5px;font-weight:700;white-space:nowrap}
+.ndoc-ia:hover{filter:brightness(1.12)}
+.ndoc-dirty{width:8px;height:8px;border-radius:99px;background:#f59e0b;margin-left:2px;flex-shrink:0}
+.ndoc-x{display:none}
+
+/* — panneau IA (instruction naturelle) — */
+.ndoc-iap{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:41;display:flex;gap:6px;align-items:center;
+  width:min(520px,calc(100% - 24px));padding:8px;border-radius:14px;background:rgba(24,26,25,.92);backdrop-filter:blur(10px);
+  box-shadow:0 12px 34px rgba(0,0,0,.4);font-family:var(--fd)}
+.ndoc-iap.ndoc-x{display:none}
+.ndoc-iap input{flex:1;min-width:0;appearance:none;border:1px solid rgba(255,255,255,.18);border-radius:9px;background:rgba(255,255,255,.06);
+  color:#fff;font-family:inherit;font-size:12.5px;padding:7px 11px;outline:none}
+.ndoc-iap input:focus{border-color:#7C3AED}
+.ndoc-iap input::placeholder{color:#9aa19e}
+.ndoc-iap-run{appearance:none;border:0;border-radius:9px;padding:7px 13px;cursor:pointer;background:linear-gradient(135deg,#7C3AED,#0F6B61);
+  color:#fff;font-family:inherit;font-size:12px;font-weight:700;white-space:nowrap}
+.ndoc-iap-run[data-busy="1"]{opacity:.55;pointer-events:none}
+.ndoc-iap-x{appearance:none;border:0;border-radius:9px;padding:7px 9px;cursor:pointer;background:transparent;color:#b8bebc;font-size:13px}
+.ndoc-iap-x:hover{background:rgba(255,255,255,.12);color:#fff}
+
+/* — toast (état des opérations) — */
+.ndoc-toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:42;display:flex;align-items:center;gap:8px;
+  padding:8px 14px;border-radius:12px;background:rgba(24,26,25,.92);color:#e8ebea;font-family:var(--fd);font-size:12.5px;font-weight:600;
+  box-shadow:0 12px 34px rgba(0,0,0,.4);max-width:calc(100% - 24px)}
+.ndoc-toast.ndoc-x{display:none}
+.ndoc-toast .ndoc-spin{width:14px;height:14px;border-radius:99px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;
+  animation:ndoc-rotate .8s linear infinite;flex-shrink:0}
+@keyframes ndoc-rotate{to{transform:rotate(360deg)}}
+
+/* — mode édition : surfaces éditables + rails structure — */
+.ndoc-root .ndoc-x{display:none}
+.ndoc-editing [data-ndoc-ed]{border-radius:3px}
+.ndoc-editing [data-ndoc-ed]:hover{background:rgba(127,127,127,.10);box-shadow:0 0 0 1px rgba(127,127,127,.28) inset}
+.ndoc-editing [data-ndoc-ed]:focus{outline:none;background:rgba(127,127,127,.14);box-shadow:0 0 0 2px var(--a) inset}
+.ndoc-editing [data-ndoc-ed]:empty:before{content:'…';color:var(--muted);opacity:.7}
+.ndoc-editing [data-ndoc-block]{position:relative}
+.ndoc-rail{display:none;position:absolute;top:-8px;right:2px;z-index:6;gap:3px;padding:2px;border-radius:8px;
+  background:rgba(24,26,25,.85);box-shadow:0 3px 12px rgba(0,0,0,.3)}
+.ndoc-editing [data-ndoc-block]:hover>.ndoc-rail,.ndoc-editing [data-ndoc-block]:focus-within>.ndoc-rail{display:flex}
+.ndoc-editing [data-ndoc-sli]>.ndoc-rail,.ndoc-editing [data-ndoc-sli]:focus-within>.ndoc-rail{display:flex;top:8px;right:8px}
+.ndoc-rail button{appearance:none;border:0;border-radius:6px;padding:3px 8px;cursor:pointer;background:transparent;color:#d9dddb;
+  font-family:var(--fd);font-size:11px;font-weight:700;line-height:1;white-space:nowrap}
+.ndoc-rail button:hover{background:rgba(255,255,255,.16);color:#fff}
+.ndoc-rail button[data-ndoc-r="del"]:hover{background:#b91c1c;color:#fff}
 
 /* — print (le téléchargement html natif de l'artefact) — */
 @media print{
   .ndoc-root{background:#fff;padding:0}
   .ndoc-fit{width:auto}
-  .ndoc-doc{gap:0}
-  .ndoc-bar{display:none}
+  .ndoc-doc{gap:0;transform:none!important}
+  .ndoc-bar,.ndoc-iap,.ndoc-toast,.ndoc-rail{display:none!important}
   .ndoc-pg{width:auto;height:auto;min-height:auto;box-shadow:none;border-radius:0;break-after:page}
   .ndoc-pg:last-of-type{break-after:auto}
   .ndoc-pg-body{height:auto;overflow:visible}
   .ndoc-sli,.ndoc-sheet{box-shadow:none;break-inside:avoid;margin:0 auto 16px}
+  .ndoc-editing [data-ndoc-ed]{background:none!important;box-shadow:none!important}
   @page{size:A4;margin:0}
 }
+@media (max-width:640px){.ndoc-root{padding:14px 6px 84px}}
+@media (prefers-reduced-motion:reduce){.ndoc-root *,.ndoc-bar,.ndoc-iap,.ndoc-toast{transition:none!important}}
+@media (prefers-reduced-motion:reduce){.ndoc-toast .ndoc-spin{animation:none}}
 </style>`;
 }
 
 // ---------------------------------------------------------------------------
-// Host script — fit-to-width, pagination refinement, toolbar postMessage
+// Host script — editing studio, renderer, fit-to-width, pagination
 // ---------------------------------------------------------------------------
 
 const HOST_SCRIPT = `<script>
 (function(){
   var DOC_ID = window.__NDOC_ID__;
-  var mode = window.__NDOC_MODE__;
-  function send(action, format, btn){
-    if (btn){ btn.setAttribute('data-busy','1'); setTimeout(function(){ btn.removeAttribute('data-busy'); }, 4000); }
-    try { parent.postMessage({ nelthDocArtifact: { docId: DOC_ID, action: action, format: format || null } }, '*'); } catch(e){}
+  var MODE = window.__NDOC_MODE__;
+  var TPL = window.__NDOC_TPL__ || {};
+  var SDR = window.__NDOC_SDR__ || null;
+  var seq = 0;
+  var editing = false;
+  var dirty = false;
+  var busy = false;
+  var snapshotSdr = null;
+  var lastOpenCmd = 0;
+
+  function $(sel, root){ return (root || document).querySelector(sel); }
+  function $$(sel, root){ return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+
+  // ------------------------------------------------------------ postMessage
+  function post(msg){
+    try { parent.postMessage(msg, '*'); } catch(e){}
   }
-  // Toolbar — downloads + atelier (les éléments ajoutés à l'artefact).
-  var bar = document.querySelector('.ndoc-bar');
-  if (bar){
-    bar.addEventListener('click', function(e){
-      var b = e.target.closest('button');
-      if (!b) return;
-      if (b.hasAttribute('data-fmt')) send('download', b.getAttribute('data-fmt'), b);
-      else if (b.hasAttribute('data-ndoc-edit')) send('edit', null, b);
-    });
+  function send(action, extra){
+    var m = { nelthDocArtifact: Object.assign({ docId: DOC_ID, action: action }, extra || {}) };
+    post(m);
   }
+
   // Images locales protégées (401 sans Bearer) : l'origine opaque ne peut pas
   // s'authentifier → le pont les relit en data-URL et répond par postMessage.
   var relaySeq = 0;
@@ -372,114 +458,702 @@ const HOST_SCRIPT = `<script>
     var img = e.target;
     if (!img || img.tagName !== 'IMG' || img.dataset.ndocRelay) return;
     var url = img.getAttribute('src') || '';
-    if (!url || !/^\\//.test(url)) return; // relatives same-origin uniquement
+    if (!url || !/^\\//.test(url)) return;
     img.dataset.ndocRelay = '1';
-    var seq = ++relaySeq;
-    relayMap[seq] = img;
-    try { parent.postMessage({ nelthDocArtifact: { docId: DOC_ID, action: 'image', url: url, seq: seq } }, '*'); } catch(err){}
+    var rseq = ++relaySeq;
+    relayMap[rseq] = img;
+    send('image', { url: url, seq: rseq });
   }, true);
+
   window.addEventListener('message', function(e){
-    var d = e.data && e.data.nelthDocArtifactImage;
-    if (!d || !relayMap[d.seq]) return;
-    var img = relayMap[d.seq];
-    if (d.dataUrl) img.src = d.dataUrl;
-    delete relayMap[d.seq];
+    var d = e.data;
+    if (!d) return;
+    if (d.nelthDocArtifactImage){
+      var img = relayMap[d.nelthDocArtifactImage.seq];
+      if (img && d.nelthDocArtifactImage.dataUrl) img.src = d.nelthDocArtifactImage.dataUrl;
+      delete relayMap[d.nelthDocArtifactImage.seq];
+      return;
+    }
+    var cmd = d.nelthDocCommand;
+    if (cmd && cmd.docId === DOC_ID){
+      if (cmd.action === 'open'){
+        if (Date.now() - lastOpenCmd < 6000) return;
+        lastOpenCmd = Date.now();
+        refreshFromServer(false);
+      }
+      else if (cmd.action === 'edit'){ lastOpenCmd = 0; refreshFromServer(true); }
+      return;
+    }
+    if (d.nelthDocSaved && d.nelthDocSaved.for === DOC_ID) onSaved(d.nelthDocSaved);
+    if (d.nelthDocImproved && d.nelthDocImproved.for === DOC_ID) onImproved(d.nelthDocImproved);
+    if (d.nelthDocFetched && d.nelthDocFetched.for === DOC_ID) onFetched(d.nelthDocFetched);
   });
-  // Ajuste la largeur du papier au conteneur (mise à l'échelle homothétique).
-  var root = document.querySelector('.ndoc-root');
-  var fit = document.querySelector('.ndoc-fit');
-  var doc = document.querySelector('.ndoc-doc');
-  function rescale(){
-    if (!root || !fit || !doc) return;
-    if (mode === 'paper'){
-      var avail = root.clientWidth - 8;
-      var natural = doc.scrollWidth || 794;
-      var s = Math.min(1, avail / natural);
-      if (s < 0.999){
-        doc.style.transformOrigin = 'top left';
-        doc.style.transform = 'scale(' + s + ')';
-        fit.style.width = Math.round(natural * s) + 'px';
-        fit.style.height = Math.round(doc.offsetHeight * s) + 'px';
-      } else {
-        doc.style.transform = '';
-        fit.style.width = '';
-        fit.style.height = '';
+
+  // ---------------------------------------------------------- md ↔ html mini
+  function escText(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function imd(text){
+    var out = escText(text);
+    out = out.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+    out = out.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    out = out.replace(/(^|[\\s(«])\\*([^*\\n]+)\\*(?!\\*)/g, '$1<em>$2</em>');
+    return out;
+  }
+  /** contentEditable html → markdown-lite (strong/em/code reconvertis). */
+  function mdFromNode(node){
+    var out = '';
+    for (var i = 0; i < node.childNodes.length; i++){
+      var n = node.childNodes[i];
+      if (n.nodeType === 3) out += n.nodeValue;
+      else if (n.nodeType === 1){
+        var tag = n.tagName.toLowerCase();
+        if (tag === 'br') out += '\\n';
+        else if (tag === 'strong' || tag === 'b') out += '**' + mdFromNode(n) + '**';
+        else if (tag === 'em' || tag === 'i') out += '*' + mdFromNode(n) + '*';
+        else if (tag === 'code') out += '\\u0060' + mdFromNode(n) + '\\u0060';
+        else out += mdFromNode(n);
       }
-    } else {
-      fit.style.width = '';
-      fit.style.height = '';
     }
+    return out;
   }
-  // Renumérote les pages « N / total ».
-  function renumber(){
-    var pages = document.querySelectorAll('.ndoc-pg');
-    var total = pages.length;
-    for (var i = 0; i < pages.length; i++){
-      var num = pages[i].querySelector('.ndoc-pg-num');
-      if (num) num.textContent = (i + 1) + ' / ' + total;
+  function mdOf(el){ return (el ? mdFromNode(el) : '').replace(/\\u00a0/g,' '); }
+
+  // ---------------------------------------------------------- mini renderer
+  function hfs(level){ var b = TPL.base || 10.5; var s = TPL.headingScale || [1.6,1.28,1.1]; return b * (level===1?2:level===2?s[0]:level===3?s[1]:s[2]); }
+  function blockHtml(blk, bi){
+    var b = TPL.base || 10.5, lead = TPL.leading || 1;
+    if (!blk) return '';
+    switch (blk.t){
+      case 'heading': {
+        var cls = blk.level===1?'ndoc-h1':blk.level===2?'ndoc-h2':blk.level===3?'ndoc-h3':'ndoc-h4';
+        var sz = hfs(blk.level).toFixed(2);
+        var mt = (blk.level<=2?10:6), mb = (blk.level===1?14:blk.level===2?8:6);
+        return '<div class="'+cls+' ndoc-heading" data-ndoc-block data-ndoc-bi="'+bi+'" data-ndoc-ed="text" style="font-size:'+sz+'pt;font-weight:'+(blk.level<=3?700:600)+';margin:'+mt+'pt 0 '+mb+'pt;">'+imd(blk.text)+'</div>';
+      }
+      case 'para':
+        return '<p class="ndoc-p" data-ndoc-block data-ndoc-bi="'+bi+'" data-ndoc-ed="text" style="font-size:'+b+'pt;line-height:'+(1.42*lead).toFixed(3)+';margin:0 0 '+(7*lead).toFixed(1)+'pt;">'+imd(blk.text)+'</p>';
+      case 'list': {
+        var tag = blk.style==='number' ? 'ol' : 'ul';
+        var mk = blk.style==='check' ? '☑' : (blk.style==='number' ? '' : '•');
+        var items = '';
+        for (var j = 0; j < blk.items.length; j++){
+          var it = blk.items[j];
+          items += '<li style="margin:0 0 '+(3.5*lead).toFixed(1)+'pt;padding-left:'+(10+it.level*14)+'pt;">'
+            + (mk ? '<span class="ndoc-li-mk" aria-hidden="true">'+mk+'</span>' : '')
+            + '<span data-ndoc-ed="li" data-ndoc-j="'+j+'">'+imd(it.text)+'</span></li>';
+        }
+        return '<'+tag+' class="ndoc-list" data-ndoc-block data-ndoc-bi="'+bi+'" style="font-size:'+b+'pt;line-height:'+(1.4*lead).toFixed(3)+';margin:0 0 '+(6*lead).toFixed(1)+'pt;padding:0;list-style:'+(blk.style==='number'?'decimal':'none')+';">'+items+'</'+tag+'>';
+      }
+      case 'table': {
+        var cols = Math.max(1, blk.header.length);
+        var head = '';
+        for (var c = 0; c < cols; c++) head += '<th data-ndoc-ed="hcell" data-ndoc-c="'+c+'">'+imd(blk.header[c] == null ? '' : blk.header[c])+'</th>';
+        var rows = '';
+        for (var r = 0; r < blk.rows.length; r++){
+          rows += '<tr>';
+          for (var c2 = 0; c2 < cols; c2++) rows += '<td data-ndoc-ed="cell" data-ndoc-r="'+r+'" data-ndoc-c="'+c2+'">'+imd(blk.rows[r][c2] == null ? '' : String(blk.rows[r][c2]))+'</td>';
+          rows += '</tr>';
+        }
+        return '<div class="ndoc-tbl-wrap" data-ndoc-block data-ndoc-bi="'+bi+'" style="margin:0 0 '+(10*lead).toFixed(1)+'pt;"><table class="ndoc-tbl" style="font-size:'+(b-1).toFixed(2)+'pt;"><thead><tr>'+head+'</tr></thead><tbody>'+rows+'</tbody></table>'
+          + (blk.caption ? '<div class="ndoc-tbl-cap" data-ndoc-ed="caption">'+imd(blk.caption)+'</div>' : '') + '</div>';
+      }
+      case 'quote':
+        return '<blockquote class="ndoc-quote" data-ndoc-block data-ndoc-bi="'+bi+'"><p data-ndoc-ed="text">'+imd(blk.text)+'</p>'
+          + (blk.author ? '<footer data-ndoc-ed="author">— '+imd(blk.author)+'</footer>' : '') + '</blockquote>';
+      case 'callout': {
+        var ico = { info:'i', warning:'!', success:'✓', danger:'✕' }[blk.variant] || 'i';
+        return '<div class="ndoc-callout ndoc-callout--'+(blk.variant||'info')+'" data-ndoc-block data-ndoc-bi="'+bi+'"><span class="ndoc-callout-ico" aria-hidden="true">'+ico+'</span><div>'
+          + (blk.title ? '<div class="ndoc-callout-tt" data-ndoc-ed="ctitle">'+imd(blk.title)+'</div>' : '')
+          + '<div data-ndoc-ed="text">'+imd(blk.text)+'</div></div></div>';
+      }
+      case 'code':
+        return '<pre class="ndoc-code" data-ndoc-block data-ndoc-bi="'+bi+'">'+(blk.lang?'<span class="ndoc-code-lang">'+escText(blk.lang)+'</span>':'')+'<code data-ndoc-ed="codetext">'+escText(blk.text)+'</code></pre>';
+      case 'divider':
+        return '<hr class="ndoc-hr" data-ndoc-block data-ndoc-bi="-1" />';
+      case 'pagebreak':
+        return '';
+      case 'image':
+        return '<figure class="ndoc-fig" data-ndoc-block data-ndoc-bi="'+bi+'"><img src="'+escText(blk.url)+'" alt="'+escText(blk.alt||'Illustration')+'" loading="lazy" />'
+          + (blk.alt ? '<figcaption data-ndoc-ed="text">'+imd(blk.alt)+'</figcaption>' : '') + '</figure>';
     }
+    return '';
   }
-  // Raffine la pagination : un bloc qui déborde glisse sur la page suivante.
+
+  function paperBody(sdr){
+    var m = TPL.margins || { top:66, side:56, bottom:62 };
+    var html = '';
+    var pageOpen = false;
+    function openPage(){
+      if (pageOpen) html += '</div><footer class="ndoc-pg-foot" style="left:'+m.side+'pt;right:'+m.side+'pt;bottom:'+(m.bottom*0.38).toFixed(1)+'pt;"><span class="ndoc-pg-title">'+escText(sdr.title||'')+'</span><span class="ndoc-pg-num"></span></footer></section>';
+      html += '<section class="ndoc-pg" data-ndoc-pg><div class="ndoc-pg-body" style="padding:'+m.top+'pt '+m.side+'pt '+m.bottom+'pt;">';
+      pageOpen = true;
+    }
+    openPage();
+    for (var i = 0; i < (sdr.blocks ? sdr.blocks.length : 0); i++){
+      var blk = sdr.blocks[i];
+      if (blk && blk.t === 'pagebreak'){ openPage(); continue; }
+      html += blockHtml(blk, i);
+    }
+    if (pageOpen) html += '</div><footer class="ndoc-pg-foot" style="left:'+m.side+'pt;right:'+m.side+'pt;bottom:'+(m.bottom*0.38).toFixed(1)+'pt;"><span class="ndoc-pg-title">'+escText(sdr.title||'')+'</span><span class="ndoc-pg-num"></span></footer></section>';
+    return html;
+  }
+
+  function slidesBody(sdr){
+    var out = '';
+    var slides = sdr.slides || [];
+    if (!slides.length) return '<p class="ndoc-empty">Aucune diapositive.</p>';
+    for (var i = 0; i < slides.length; i++){
+      var s = slides[i];
+      var big = s.layout === 'title' || s.layout === 'section';
+      var bullets = '';
+      for (var j = 0; j < (s.bullets || []).length; j++){
+        bullets += '<li><span class="ndoc-li-mk" aria-hidden="true">•</span><span data-ndoc-ed="sbullet" data-ndoc-j="'+j+'">'+imd(s.bullets[j])+'</span></li>';
+      }
+      out += '<section class="ndoc-sli'+(big?' ndoc-sli--big':'')+'" data-ndoc-sli data-ndoc-si="'+i+'" aria-label="Diapositive '+(i+1)+'">'
+        + '<div class="ndoc-sli-rail" aria-hidden="true"></div>'
+        + '<div class="ndoc-sli-body" style="font-family:var(--fh);"><div class="ndoc-sli-tt" data-ndoc-ed="stitle">'+(s.title ? imd(s.title) : '<span class="ndoc-sli-ph">Diapositive</span>')+'</div>'
+        + (bullets ? '<ul class="ndoc-sli-ul">'+bullets+'</ul>' : '')
+        + (s.layout === 'closing' ? '<div class="ndoc-sli-close">Merci</div>' : '')
+        + '</div><div class="ndoc-sli-num">'+(i+1)+'</div>'
+        + (s.notes ? '<div class="ndoc-sli-notes"><span>Notes</span><p data-ndoc-ed="snotes">'+imd(s.notes)+'</p></div>' : '')
+        + '</section>';
+    }
+    return out;
+  }
+
+  function sheetsBody(sdr){
+    var out = '';
+    var sheets = sdr.sheets || [];
+    if (!sheets.length) return '<p class="ndoc-empty">Feuille vide.</p>';
+    var b = TPL.base || 10.5;
+    for (var si = 0; si < sheets.length; si++){
+      var sheet = sheets[si];
+      var cols = Math.max(1, sheet.header.length);
+      var head = '';
+      for (var c = 0; c < cols; c++) head += '<th data-ndoc-ed="shh" data-ndoc-c="'+c+'">'+imd(sheet.header[c] == null ? '' : sheet.header[c])+'</th>';
+      var rows = '';
+      for (var r = 0; r < sheet.rows.length; r++){
+        rows += '<tr>';
+        for (var c2 = 0; c2 < cols; c2++) rows += '<td data-ndoc-ed="shcell" data-ndoc-r="'+r+'" data-ndoc-c="'+c2+'">'+imd(sheet.rows[r][c2] == null ? '' : String(sheet.rows[r][c2]))+'</td>';
+        rows += '</tr>';
+      }
+      out += '<section class="ndoc-sheet" data-ndoc-sheet data-ndoc-shi="'+si+'"><header class="ndoc-sheet-hd">'
+        + '<span class="ndoc-sheet-name" data-ndoc-ed="shname">'+imd(sheet.name)+'</span>'
+        + '<span class="ndoc-sheet-meta">'+sheet.rows.length+' ligne'+(sheet.rows.length>1?'s':'')+' · '+cols+' colonne'+(cols>1?'s':'')+'</span></header>'
+        + '<div class="ndoc-sheet-scroll"><table class="ndoc-tbl" style="font-size:'+(b-1).toFixed(2)+'pt;"><thead><tr>'+head+'</tr></thead><tbody>'+rows+'</tbody></table></div></section>';
+    }
+    return out;
+  }
+
+  /** Re-rendère intégralement le document depuis le SDR (après IA/save/fetch). */
+  function renderDoc(sdr){
+    SDR = sdr;
+    var docEl = $('.ndoc-doc');
+    if (!docEl) return;
+    docEl.innerHTML = MODE === 'slides' ? slidesBody(SDR) : MODE === 'sheets' ? sheetsBody(SDR) : paperBody(SDR);
+    boot();
+    if (editing) wireEdit();
+    updateBrand();
+  }
+  function updateBrand(){
+    var b = $('[data-ndoc-brand]');
+    if (b && SDR && SDR.title != null) b.textContent = SDR.title;
+    var t = $('.ndoc-bar-brand');
+    if (t) t.setAttribute('title', (SDR && SDR.title) || '');
+  }
+
+  // ---------------------------------------------------------- pagination
+  function ensureNext(pg){
+    var next = pg.nextElementSibling;
+    if (next && next.hasAttribute && next.hasAttribute('data-ndoc-pg')) return next;
+    next = document.createElement('section');
+    next.className = 'ndoc-pg';
+    next.setAttribute('data-ndoc-pg','');
+    var body = pg.querySelector('.ndoc-pg-body');
+    var nb = document.createElement('div');
+    nb.className = 'ndoc-pg-body';
+    if (body) nb.setAttribute('style', body.getAttribute('style') || '');
+    var foot = document.createElement('footer');
+    foot.className = 'ndoc-pg-foot';
+    var oldFoot = pg.querySelector('.ndoc-pg-foot');
+    if (oldFoot) foot.setAttribute('style', oldFoot.getAttribute('style') || '');
+    var ls = document.createElement('span');
+    ls.className = 'ndoc-pg-title';
+    var oldTitle = pg.querySelector('.ndoc-pg-title');
+    if (oldTitle) ls.textContent = oldTitle.textContent;
+    var ns = document.createElement('span');
+    ns.className = 'ndoc-pg-num';
+    foot.appendChild(ls); foot.appendChild(ns);
+    next.appendChild(nb); next.appendChild(foot);
+    pg.parentNode.insertBefore(next, pg.nextSibling);
+    return next;
+  }
   function repaginate(){
-    if (mode !== 'paper') return;
-    var guard = 0;
-    var moved = true;
-    while (moved && guard < 6){
-      moved = false; guard++;
-      var pages = document.querySelectorAll('.ndoc-pg');
-      for (var i = 0; i < pages.length && !moved; i++){
-        var body = pages[i].querySelector('.ndoc-pg-body');
-        if (!body) continue;
-        var blocks = body.querySelectorAll('[data-ndoc-block]');
-        if (!blocks.length) continue;
-        if (body.scrollHeight <= body.clientHeight + 1) continue;
-        // retire les derniers blocs jusqu'à rentrer (min. 1 bloc conservé)
-        var stash = [];
-        for (var k = blocks.length - 1; k >= 1; k--){
-          stash.unshift(blocks[k]);
-          blocks[k].parentNode.removeChild(blocks[k]);
-          if (body.scrollHeight <= body.clientHeight + 1) break;
-        }
-        // page suivante (créée si besoin) — même gabarit
-        var next = pages[i + 1];
-        if (!next){
-          next = document.createElement('section');
-          next.className = 'ndoc-pg';
-          next.setAttribute('data-ndoc-pg','');
-          var nb = document.createElement('div');
-          nb.className = 'ndoc-pg-body';
-          nb.setAttribute('style', body.getAttribute('style') || '');
-          var foot = document.createElement('footer');
-          foot.className = 'ndoc-pg-foot';
-          var ls = document.createElement('span');
-          ls.className = 'ndoc-pg-title';
-          var oldTitle = pages[i].querySelector('.ndoc-pg-title');
-          if (oldTitle) ls.textContent = oldTitle.textContent;
-          var ns = document.createElement('span');
-          ns.className = 'ndoc-pg-num';
-          foot.appendChild(ls); foot.appendChild(ns);
-          var oldFoot = pages[i].querySelector('.ndoc-pg-foot');
-          if (oldFoot) foot.setAttribute('style', oldFoot.getAttribute('style') || '');
-          next.appendChild(nb); next.appendChild(foot);
-          pages[i].parentNode.insertBefore(next, pages[i].nextSibling);
-        }
-        var nbody = next.querySelector('.ndoc-pg-body');
-        if (nbody) for (var j = 0; j < stash.length; j++) nbody.insertBefore(stash[j], nbody.firstChild);
-        moved = true;
-      }
+    if (MODE !== 'paper') return;
+    var i = 0, guard = 0;
+    while (guard++ < 600){
+      var pages = $$('.ndoc-pg');
+      if (i >= pages.length) break;
+      var body = pages[i].querySelector('.ndoc-pg-body');
+      if (!body){ i++; continue; }
+      if (body.scrollHeight <= body.clientHeight + 1){ i++; continue; }
+      var blocks = body.querySelectorAll(':scope > [data-ndoc-block]');
+      if (!blocks.length) blocks = body.querySelectorAll('[data-ndoc-block]');
+      if (blocks.length <= 1){ i++; continue; }
+      var last = blocks[blocks.length - 1];
+      var next = ensureNext(pages[i]);
+      var nb = next.querySelector('.ndoc-pg-body');
+      if (nb) nb.insertBefore(last, nb.firstChild);
     }
     renumber();
   }
+  function renumber(){
+    var pages = $$('.ndoc-pg');
+    for (var i = 0; i < pages.length; i++){
+      var num = pages[i].querySelector('.ndoc-pg-num');
+      if (num) num.textContent = (i + 1) + ' / ' + pages.length;
+    }
+  }
+
+  // ---------------------------------------------------------- mise à l'échelle
+  var rootEl, fitEl, docEl;
+  function rescale(){
+    rootEl = rootEl || $('.ndoc-root');
+    fitEl = fitEl || $('.ndoc-fit');
+    docEl = docEl || $('.ndoc-doc');
+    if (!rootEl || !fitEl || !docEl) return;
+    if (MODE === 'sheets'){ fitEl.style.width = ''; fitEl.style.height = ''; docEl.style.transform = ''; return; }
+    var pad = 32;
+    try {
+      var cs = getComputedStyle(rootEl);
+      pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    } catch(e){}
+    var avail = Math.max(160, rootEl.clientWidth - pad - 2);
+    var natural = docEl.scrollWidth || (MODE === 'slides' ? 720 : 794);
+    var s = Math.min(1, avail / natural);
+    if (s < 0.999){
+      docEl.style.transformOrigin = 'top left';
+      docEl.style.transform = 'scale(' + s + ')';
+      fitEl.style.width = Math.round(natural * s) + 'px';
+      fitEl.style.height = Math.round(docEl.offsetHeight * s) + 'px';
+    } else {
+      docEl.style.transform = '';
+      fitEl.style.width = '';
+      fitEl.style.height = '';
+    }
+  }
+
+  // ---------------------------------------------------------- édition
+  function clone(o){ return JSON.parse(JSON.stringify(o)); }
+
+  function collect(){
+    if (!SDR) return null;
+    var d = clone(SDR);
+    if (MODE === 'slides'){
+      $$('[data-ndoc-sli]').forEach(function(sec){
+        var si = parseInt(sec.getAttribute('data-ndoc-si'), 10);
+        var s = d.slides && d.slides[si];
+        if (!s) return;
+        var tt = sec.querySelector('[data-ndoc-ed="stitle"]');
+        if (tt) s.title = mdOf(tt).trim();
+        $$('[data-ndoc-ed="sbullet"]', sec).forEach(function(el){
+          var j = parseInt(el.getAttribute('data-ndoc-j'), 10);
+          if (s.bullets && s.bullets[j] != null) s.bullets[j] = mdOf(el).trim() || ' ';
+        });
+        var nt = sec.querySelector('[data-ndoc-ed="snotes"]');
+        if (nt && s.notes != null) s.notes = mdOf(nt).trim();
+      });
+      return d;
+    }
+    if (MODE === 'sheets'){
+      $$('[data-ndoc-sheet]').forEach(function(sec){
+        var shi = parseInt(sec.getAttribute('data-ndoc-shi'), 10);
+        var sh = d.sheets && d.sheets[shi];
+        if (!sh) return;
+        var nm = sec.querySelector('[data-ndoc-ed="shname"]');
+        if (nm) sh.name = mdOf(nm).trim() || sh.name;
+        $$('[data-ndoc-ed="shh"]', sec).forEach(function(el){
+          var c = parseInt(el.getAttribute('data-ndoc-c'), 10);
+          if (sh.header && sh.header[c] != null) sh.header[c] = mdOf(el).trim() || ' ';
+        });
+        $$('[data-ndoc-ed="shcell"]', sec).forEach(function(el){
+          var r = parseInt(el.getAttribute('data-ndoc-r'), 10);
+          var c = parseInt(el.getAttribute('data-ndoc-c'), 10);
+          if (sh.rows && sh.rows[r] && sh.rows[r][c] != null) sh.rows[r][c] = mdOf(el).trim();
+        });
+      });
+      return d;
+    }
+    $$('[data-ndoc-bi]').forEach(function(el){
+      var bi = parseInt(el.getAttribute('data-ndoc-bi'), 10);
+      var blk = d.blocks && d.blocks[bi];
+      if (!blk) return;
+      var t = el.getAttribute('data-ndoc-ed');
+      if (t === 'text' && blk.t !== 'image') blk.text = mdOf(el).trim() || ' ';
+      else if (t === 'codetext' && blk.t === 'code') blk.text = (el.textContent || '').trim() || ' ';
+      $$('[data-ndoc-ed]', el).forEach(function(sub){
+        var st = sub.getAttribute('data-ndoc-ed');
+        var j = sub.getAttribute('data-ndoc-j');
+        var r = sub.getAttribute('data-ndoc-r');
+        var c = sub.getAttribute('data-ndoc-c');
+        if (st === 'li' && blk.items && j != null) blk.items[+j].text = mdOf(sub).trim() || ' ';
+        else if (st === 'hcell' && blk.header && c != null) blk.header[+c] = mdOf(sub).trim() || ' ';
+        else if (st === 'cell' && blk.rows && r != null && c != null && blk.rows[+r]) blk.rows[+r][+c] = mdOf(sub).trim();
+        else if (st === 'caption' && blk.t === 'table') blk.caption = mdOf(sub).trim();
+        else if (st === 'author' && blk.t === 'quote') blk.author = mdOf(sub).replace(/^\\s*—\\s*/, '').trim();
+        else if (st === 'ctitle' && blk.t === 'callout') blk.title = mdOf(sub).trim();
+      });
+      if (blk.t === 'quote'){
+        var p = el.querySelector('p[data-ndoc-ed="text"]');
+        if (p) blk.text = mdOf(p).trim() || ' ';
+      }
+      if (blk.t === 'callout'){
+        var tx = el.querySelector('[data-ndoc-ed="text"]');
+        if (tx) blk.text = mdOf(tx).trim() || ' ';
+      }
+      if (blk.t === 'image'){
+        var cap = el.querySelector('figcaption[data-ndoc-ed="text"]');
+        if (cap) blk.alt = mdOf(cap).trim();
+      }
+    });
+    return d;
+  }
+
+  function setDirty(v){
+    dirty = v;
+    var el = $('[data-ndoc-dirty]');
+    if (el) el.classList.toggle('ndoc-x', !v);
+  }
+
+  function wireEdit(){
+    $$('.ndoc-rail').forEach(function(r){ r.remove(); });
+    if (MODE === 'slides'){
+      $$('[data-ndoc-sli]').forEach(function(sec){
+        if (sec.querySelector(':scope > .ndoc-rail')) return;
+        sec.insertAdjacentHTML('afterbegin', railHtml('slide'));
+      });
+    } else if (MODE !== 'sheets') {
+      $$('[data-ndoc-bi]').forEach(function(el){
+        if (el.querySelector(':scope > .ndoc-rail')) return;
+        el.insertAdjacentHTML('afterbegin', railHtml(el.tagName === 'OL' || el.tagName === 'UL' ? 'list' : el.querySelector('.ndoc-tbl') ? 'table' : 'block'));
+      });
+    }
+    $$('[data-ndoc-ed]').forEach(function(el){
+      el.setAttribute('contenteditable', 'true');
+      el.setAttribute('spellcheck', 'false');
+    });
+  }
+  function unwireEdit(){
+    $$('[data-ndoc-ed]').forEach(function(el){
+      el.removeAttribute('contenteditable');
+      el.removeAttribute('spellcheck');
+    });
+    $$('.ndoc-rail').forEach(function(r){ r.remove(); });
+  }
+  function railHtml(kind){
+    var b = '';
+    if (kind === 'list') b += '<button type="button" data-ndoc-r="additem" title="Ajouter un élément">＋ élément</button>';
+    if (kind === 'table') b += '<button type="button" data-ndoc-r="addrow" title="Ajouter une ligne">＋ ligne</button>'
+      + '<button type="button" data-ndoc-r="delrow" title="Supprimer la dernière ligne">－ ligne</button>';
+    if (kind === 'slide') b += '<button type="button" data-ndoc-r="addslide" title="Ajouter une diapositive">＋ diapo</button>';
+    b += '<button type="button" data-ndoc-r="addp" title="Ajouter un paragraphe">＋ ¶</button>'
+      + '<button type="button" data-ndoc-r="del" title="Supprimer">✕</button>';
+    return '<span class="ndoc-rail" role="toolbar" aria-label="Modifier ce bloc">' + b + '</span>';
+  }
+
+  function mutate(fn){
+    if (!SDR) return;
+    var d = collect() || clone(SDR);
+    if (!fn(d)) return;
+    renderDoc(d);
+    setDirty(true);
+  }
+
+  function railAction(act, host){
+    if (!SDR) return;
+    if (act === 'addp' || act === 'additem' || act === 'addrow' || act === 'delrow' || act === 'del' || act === 'addslide'){
+      mutate(function(d){
+        if (MODE === 'slides'){
+          var si = parseInt(host.closest('[data-ndoc-sli]').getAttribute('data-ndoc-si'), 10);
+          if (!d.slides || d.slides[si] == null) return false;
+          if (act === 'addslide'){
+            d.slides.splice(si + 1, 0, { title: ' ', bullets: [' '], layout: 'content' });
+          } else if (act === 'addp'){
+            d.slides[si].bullets = (d.slides[si].bullets || []).concat([' ']);
+          } else if (act === 'del'){
+            if (d.slides.length <= 1) return false;
+            d.slides.splice(si, 1);
+          }
+          return true;
+        }
+        var el = host.closest('[data-ndoc-bi]');
+        if (!el) return false;
+        var bi = parseInt(el.getAttribute('data-ndoc-bi'), 10);
+        var blk = d.blocks && d.blocks[bi];
+        if (!blk) return false;
+        if (act === 'addp'){
+          d.blocks.splice(bi + 1, 0, { t: 'para', text: ' ' });
+          return true;
+        }
+        if (blk.t === 'list'){
+          if (act === 'additem'){ blk.items.push({ text: ' ', level: 0 }); return true; }
+        } else if (blk.t === 'table'){
+          if (act === 'addrow'){ blk.rows.push(new Array(Math.max(1, blk.header.length)).fill(' ')); return true; }
+          if (act === 'delrow' && blk.rows.length){ blk.rows.pop(); return true; }
+        }
+        if (act === 'del' && d.blocks.length > 1){ d.blocks.splice(bi, 1); return true; }
+        return false;
+      });
+    }
+  }
+
+  function enterEditMode(){
+    if (editing || !SDR) return;
+    editing = true;
+    snapshotSdr = clone(SDR);
+    wireEdit();
+    document.body.classList.add('ndoc-editing');
+    var root = $('.ndoc-root');
+    if (root) root.classList.add('ndoc-editing');
+    setDirty(false);
+    syncBar();
+    toast(null);
+  }
+  function exitEditMode(keepToast){
+    if (!editing) return;
+    editing = false;
+    unwireEdit();
+    document.body.classList.remove('ndoc-editing');
+    var root = $('.ndoc-root');
+    if (root) root.classList.remove('ndoc-editing');
+    setDirty(false);
+    syncBar();
+    if (!keepToast) toast(null);
+    closeIa();
+  }
+
+  function syncBar(){
+    var b = $('.ndoc-bar');
+    if (!b) return;
+    $$('[data-ndoc-viewctl]', b).forEach(function(el){ el.classList.toggle('ndoc-x', editing); });
+    $$('[data-ndoc-editctl]', b).forEach(function(el){ el.classList.toggle('ndoc-x', !editing); });
+  }
+
+  // ---------------------------------------------------------- save / improve
+  var pendingImprove = null;
+  function onSaved(r){
+    busy = false;
+    clearSaveTimeout();
+    var btn = $('[data-ndoc-save]');
+    if (btn) btn.removeAttribute('data-busy');
+    if (r.ok && pendingImprove){
+      // sauvegarde préalable silencieuse avant l'amélioration IA
+      SDR = r.document || SDR;
+      snapshotSdr = clone(SDR);
+      setDirty(false);
+      var ins = pendingImprove;
+      pendingImprove = null;
+      improve(ins);
+      return;
+    }
+    if (r.ok){
+      SDR = r.document || SDR;
+      snapshotSdr = clone(SDR);
+      setDirty(false);
+      exitEditMode(true);
+      toast('Enregistré ✓', 2200);
+      updateBrand();
+    } else {
+      pendingImprove = null;
+      toast("Échec de l'enregistrement" + (r.error ? ' — ' + r.error : ''), 3200);
+    }
+  }
+  function onImproved(r){
+    busy = false;
+    clearSaveTimeout();
+    var btn = $('[data-ndoc-iarun]');
+    if (btn) btn.removeAttribute('data-busy');
+    closeIa();
+    if (r.ok && r.document){
+      renderDoc(r.document);
+      snapshotSdr = clone(SDR);
+      setDirty(false);
+      if (!editing) toast('Document amélioré ✓', 2400);
+      else { exitEditMode(true); toast('Document amélioré ✓', 2400); }
+    } else {
+      toast("L'amélioration a échoué" + (r.error ? ' — ' + r.error : ''), 3200);
+    }
+  }
+  function onFetched(r){
+    if (r.ok && r.document){
+      renderDoc(r.document);
+      snapshotSdr = clone(SDR);
+      setDirty(false);
+      if (r.thenEdit){ exitEditMode(true); enterEditMode(); toast(null); }
+      else toast(null);
+    } else if (r.thenEdit){
+      enterEditMode();
+      toast('Ouverture de la version locale…', 2200);
+    } else {
+      toast(null);
+    }
+  }
+
+  var saveTimeout = null;
+  function save(silent){
+    if (busy) return;
+    var d = collect();
+    if (!d) return;
+    busy = true;
+    var btn = $('[data-ndoc-save]');
+    if (btn && !silent) btn.setAttribute('data-busy', '1');
+    if (!silent) toast('Enregistrement…', 0, true);
+    var myseq = ++seq;
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(function(){
+      if (busy){ busy = false; var b2 = $('[data-ndoc-save]'); if (b2) b2.removeAttribute('data-busy'); toast("Pas de réponse du serveur — réessayez", 3200); }
+    }, 25000);
+    send('save', { document: d, seq: myseq });
+  }
+  function clearSaveTimeout(){
+    if (saveTimeout){ clearTimeout(saveTimeout); saveTimeout = null; }
+  }
+
+  function improve(instruction){
+    if (busy) return;
+    busy = true;
+    var btn = $('[data-ndoc-iarun]');
+    if (btn) btn.setAttribute('data-busy', '1');
+    toast("L'IA retravaille le document…", 0, true);
+    send('improve', { instruction: instruction, seq: ++seq });
+  }
+
+  function refreshFromServer(thenEdit){
+    send('fetch', { seq: ++seq, thenEdit: !!thenEdit });
+    toast('Chargement…', 0, true);
+  }
+
+  // ---------------------------------------------------------- toast / IA
+  var toastTimer = null;
+  function toast(msg, duration, spin){
+    var el = $('[data-ndoc-toast]');
+    if (!el) return;
+    if (toastTimer){ clearTimeout(toastTimer); toastTimer = null; }
+    if (!msg){ el.classList.add('ndoc-x'); el.innerHTML = ''; return; }
+    el.classList.remove('ndoc-x');
+    el.innerHTML = (spin ? '<span class="ndoc-spin" aria-hidden="true"></span>' : '') + '<span></span>';
+    el.lastChild.textContent = msg;
+    if (duration) toastTimer = setTimeout(function(){ el.classList.add('ndoc-x'); }, duration);
+  }
+  function openIa(){
+    closeIa();
+    var p = document.createElement('div');
+    p.className = 'ndoc-iap';
+    p.setAttribute('data-ndoc-iap', '');
+    p.setAttribute('role', 'group');
+    p.setAttribute('aria-label', 'Amélioration par IA');
+    p.innerHTML = '<input type="text" placeholder="Instruction pour l' + '’IA — ex : « raccourcir la conclusion, ton plus formel »">'
+      + '<button type="button" class="ndoc-iap-run" data-ndoc-iarun>Améliorer</button>'
+      + '<button type="button" class="ndoc-iap-x" data-ndoc-iax aria-label="Fermer">✕</button>';
+    document.body.appendChild(p);
+    var input = p.querySelector('input');
+    setTimeout(function(){ try { input.focus(); } catch(e){} }, 30);
+    input.addEventListener('keydown', function(e){
+      if (e.key === 'Enter'){ runIa(); }
+      if (e.key === 'Escape'){ closeIa(); }
+    });
+    p.querySelector('[data-ndoc-iarun]').addEventListener('click', runIa);
+    p.querySelector('[data-ndoc-iax]').addEventListener('click', closeIa);
+  }
+  function closeIa(){
+    var p = $('[data-ndoc-iap]');
+    if (p) p.remove();
+  }
+  function runIa(){
+    var p = $('[data-ndoc-iap]');
+    if (!p) return;
+    var input = p.querySelector('input');
+    var instruction = (input && input.value || '').trim();
+    if (!instruction){ try { input && input.focus(); } catch(e){} return; }
+    // sauvegarde d'abord les retouches locales, PUIS l'IA retravaille la
+    // version enregistrée (onSaved enchaîne sur improve) — jamais l'inverse.
+    if (dirty){
+      var d = collect();
+      if (d){
+        pendingImprove = instruction;
+        toast('Enregistrement…', 0, true);
+        saveQuiet(d);
+        return;
+      }
+    }
+    improve(instruction);
+  }
+  function saveQuiet(d){
+    if (busy) { pendingImprove = null; return; }
+    busy = true;
+    var myseq = ++seq;
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(function(){
+      if (busy){ busy = false; pendingImprove = null; toast("Pas de réponse du serveur — réessayez", 3200); }
+    }, 25000);
+    send('save', { document: d, seq: myseq });
+  }
+
+  // ---------------------------------------------------------- barre d'outils
+  var bar = $('.ndoc-bar');
+  if (bar){
+    bar.addEventListener('click', function(e){
+      var b = e.target.closest('button');
+      if (!b) return;
+      if (b.hasAttribute('data-fmt')){
+        b.setAttribute('data-busy', '1');
+        setTimeout(function(){ b.removeAttribute('data-busy'); }, 4000);
+        send('download', { format: b.getAttribute('data-fmt') });
+        return;
+      }
+      if (b.hasAttribute('data-ndoc-edit')){
+        if (!editing) refreshFromServer(true);
+        return;
+      }
+      if (b.hasAttribute('data-ndoc-save')){ save(); return; }
+      if (b.hasAttribute('data-ndoc-cancel')){
+        if (dirty && snapshotSdr != null){ renderDoc(clone(snapshotSdr)); }
+        exitEditMode();
+        return;
+      }
+      if (b.hasAttribute('data-ndoc-ia')){ openIa(); return; }
+    });
+    document.addEventListener('click', function(e){
+      var r = e.target.closest && e.target.closest('[data-ndoc-r]');
+      if (r) railAction(r.getAttribute('data-ndoc-r'), r);
+    });
+  }
+  document.addEventListener('input', function(){
+    if (editing && !busy) setDirty(true);
+  });
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && editing && !busy){ exitEditMode(); }
+  });
+
+  // ---------------------------------------------------------- boot
   function boot(){
     repaginate();
     rescale();
     renumber();
-    // les images relais (data-URL) arrivent plus tard → recale au load.
-    window.addEventListener('load', function(){ rescale(); });
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-  else boot();
-  window.addEventListener('resize', function(){ rescale(); });
+  function start(){
+    boot();
+    if (window.ResizeObserver && $('.ndoc-root')){
+      try { new ResizeObserver(function(){ rescale(); }).observe($('.ndoc-root')); } catch(e){}
+    }
+    window.addEventListener('resize', function(){ rescale(); });
+    if (document.fonts && document.fonts.ready && document.fonts.ready.then) document.fonts.ready.then(function(){ rescale(); });
+    window.addEventListener('load', function(){ rescale(); });
+    // les images relais (data-URL) arrivent plus tard → recale au load de chaque image
+    document.addEventListener('load', function(e){ if (e.target && e.target.tagName === 'IMG') rescale(); }, true);
+    updateBrand();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
 })();
 <\/script>`;
 
@@ -509,8 +1183,8 @@ const FORMATS: Array<{ id: string; label: string }> = [
 
 /**
  * Build the ```html artifact body for a document. Returns null when the
- * document renders to more than ARTIFACT_MAX_HTML bytes (the chat card +
- * workspace still carry it — only the inline artifact is skipped).
+ * document renders to more than ARTIFACT_MAX_HTML bytes (the chat card still
+ * carries it — only the inline artifact is skipped).
  */
 export function buildArtifactHtml(doc: DocumentDoc, opts: ArtifactOptions): string | null {
   const tpl = resolveTemplate(doc.template, doc.docType);
@@ -535,18 +1209,41 @@ export function buildArtifactHtml(doc: DocumentDoc, opts: ArtifactOptions): stri
 
   const bar =
     `<nav class="ndoc-bar" aria-label="Actions du document">` +
-    `<span class="ndoc-bar-brand" title="${esc(doc.title)}">${N_MARK}<span>${esc(doc.title)}</span></span>` +
+    `<span class="ndoc-bar-brand" title="${esc(doc.title)}">${N_MARK}<span data-ndoc-brand>${esc(doc.title)}</span></span>` +
     `<span class="ndoc-bar-sep" aria-hidden="true"></span>` +
     fmtButtons +
     `<span class="ndoc-bar-sep" aria-hidden="true"></span>` +
-    `<button type="button" class="ndoc-edit" data-ndoc-edit title="Modifier dans l'atelier">` +
+    // — vue —
+    `<button type="button" class="ndoc-edit" data-ndoc-edit data-ndoc-viewctl title="Modifier dans l'aperçu">` +
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>` +
     `<span>Modifier</span></button>` +
-    `</nav>`;
+    // — édition —
+    `<button type="button" class="ndoc-cancel" data-ndoc-cancel data-ndoc-editctl ndoc-x title="Annuler les modifications">Annuler</button>` +
+    `<button type="button" class="ndoc-save" data-ndoc-save data-ndoc-editctl ndoc-x title="Enregistrer le document">` +
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>` +
+    `<span>Enregistrer</span></button>` +
+    `<button type="button" class="ndoc-ia" data-ndoc-ia data-ndoc-editctl ndoc-x title="Améliorer avec l'IA">✨ IA</button>` +
+    `<span class="ndoc-dirty ndoc-x" data-ndoc-dirty title="Modifications non enregistrées" aria-hidden="true"></span>` +
+    `</nav>` +
+    `<div class="ndoc-toast ndoc-x" data-ndoc-toast role="status" aria-live="polite"></div>`;
+
+  const tplParams = {
+    base: tpl.typography.size,
+    leading: tpl.typography.leading,
+    headingScale: tpl.typography.headingScale,
+    margins: {
+      top: tpl.page.top,
+      side: tpl.page.side,
+      bottom: tpl.page.bottom,
+    },
+  };
 
   const head =
     `<!--nelth-doc-artifact:${esc(opts.documentId)}-->` +
-    `<script>window.__NDOC_ID__=${jsStr(opts.documentId)};window.__NDOC_MODE__=${jsStr(mode)};<\/script>`;
+    `<script>window.__NDOC_ID__=${jsStr(opts.documentId)};window.__NDOC_MODE__=${jsStr(mode)};` +
+    `window.__NDOC_TPL__=${jsStr(JSON.stringify(tplParams))};` +
+    `window.__NDOC_SDR__=${jsStr(JSON.stringify(doc))};` +
+    `<\/script>`;
 
   const html =
     head +
