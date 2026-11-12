@@ -746,7 +746,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   {
     const { CAPABILITY_SYSTEM_PROMPT, FILE_REQUEST_RE } = await import('@/lib/document-generation');
     const CAPABILITY_RELEVANCE_RE =
-      /\b(fichier|file|pdf|docx?|word|excel|xlsx|csv|pptx?|powerpoint|slides?|pr[eé]sentation|t[eé]l[eé]charg\w*|download|export\w*|cv|lett?re|rapport|report|m[eé]moire|contrat|facture|invoice|cr[eé][ea]|g[eé]n[eè]r\w*|fais|produis|r[eé]dige|write|make|build)\b/i;
+      /\b(fichier|file|pdf|docx?|word|excel|xlsx|csv|pptx?|powerpoint|slides?|pr[eé]sentation|t[eé]l[eé]charg\w*|download|export\w*|cv|lett?re|rapport|report|m[eé]moire|contrat|facture|invoice|portfolio|cr[eé][ea]|g[eé]n[eè]r\w*|fais|produis|r[eé]dige|write|make|build|moder(?:ne|n)s?|designs?|styl[ée]e?s?|graphiques?)\b/i;
     const capabilityRelevant =
       FILE_REQUEST_RE.test(rawLastUserText || '') || CAPABILITY_RELEVANCE_RE.test(rawLastUserText || '');
     const hasCapabilityPrompt = llmMessages.some(
@@ -2502,10 +2502,20 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   ): Promise<{ content: string; files: any[] }> => {
     let safeContent = content;
     try {
-      const { extractDocumentBlocks, generateDocumentFiles, sanitizeInventedDownloadLinks } =
+      const { extractDocumentBlocks, generateDocumentFiles, sanitizeInventedDownloadLinks, MODERN_DESIGN_RE } =
         await import('@/lib/document-generation');
+      // Deterministic "ultra moderne" filet: explicit file request + design
+      // language in the user's own words → force the modern design engine on
+      // every extracted block (a design="moderne" fence attribute also wins
+      // independently). Mirrors the GIF/SEARCH filet philosophy — the model
+      // has no veto power over an explicit user command.
+      const forceModern = userAskedForFile && MODERN_DESIGN_RE.test(rawLastUserText || '');
+      if (forceModern) {
+        console.log('[v12-flow] ultra-modern design filet → design="moderne"');
+      }
       const { blocks, stripped } = extractDocumentBlocks(safeContent, {
         extract: userAskedForFile,
+        modern: forceModern,
       });
       if (!blocks.length) {
         // No document block extracted (none emitted, or no explicit user

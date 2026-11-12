@@ -49,6 +49,33 @@ import type { ApiUser } from '@/lib/auth';
  *
  * The Markdown parser was upgraded accordingly: pipe tables, numbered lists
  * and nested list levels are all first-class citizens now.
+ *
+ * ---------------------------------------------------------------------------
+ * ULTRA-MODERN DESIGN (v3 — "j'aime qu'il sache générer document ultra moderne")
+ * ---------------------------------------------------------------------------
+ * v2 shipped ONE professional look (deep-teal editorial). v3 adds a second
+ * design engine — "moderne" — a bold contemporary visual language applied
+ * to every converter when the user asks for a modern/stylish/designer look:
+ *
+ *   • Selection is belt-and-suspenders (same philosophy as the GIF/SEARCH
+ *     filets): the MODEL picks the style via a fence attribute
+ *     (```document filename="cv.pdf" design="moderne") AND a deterministic
+ *     keyword filet (MODERN_DESIGN_RE on the RAW user text, gated by an
+ *     explicit file request) forces moderne even if a weak free model
+ *     forgets the attribute. The classifier never has veto power over an
+ *     explicit user command.
+ *   • PDF     — full-bleed violet→fuchsia gradient banner on every page,
+ *              magazine-style date pill above the title, gradient title
+ *              underline, violet section chips, white-on-violet table
+ *              headers with fuchsia rule, violet bullet markers.
+ *   • DOCX    — violet-700 headings, tinted h2 bands, fuchsia title rule,
+ *              white-on-violet table headers, light-violet zebra.
+ *   • XLSX    — solid violet header (white bold), fuchsia bottom rule,
+ *              alternating violet/fuchsia sheet tabs, light-violet zebra.
+ *   • HTML    — gradient hero (kicker pill + big title + edition line),
+ *              Inter font, section chips, rounded gradient-bordered tables,
+ *              tinted blockquotes, gradient hairlines; markdown bodies are
+ *              converted to real HTML (mdToBasicHtml) instead of raw text.
  */
 
 // ---------------------------------------------------------------------------
@@ -88,6 +115,12 @@ QUALITY STANDARD — EXPERT-LEVEL DOCUMENTS (the file is the deliverable, make i
 - Never leave placeholders like [Your Name] or "à compléter" unless the user gave strictly zero information.
 - In French, follow French typographic conventions (guillemets « », espaces avant ! ? : ;).
 
+DESIGN STYLES — the platform has TWO professional design engines for your documents:
+- Default style "classique": elegant deep-teal editorial design (reports, letters, official docs).
+- If the user asks for a modern / ultra-modern / stylish / designer / creative look ("ultra moderne", "moderne", "stylé", "design", "élégant", "soigné", "créatif", "modern", "stylish"), add the attribute design="moderne" to the document fence: \u0060\u0060\u0060document filename="cv.pdf" design="moderne"\n…content…\n\u0060\u0060\u0060 — the platform then renders an ULTRA-MODERN design (gradient hero banner, violet-fuchsia accents, colored table headers, magazine-style layout).
+- Choose "moderne" for CVs, portfolios, pitches, business plans, one-pagers, marketing and creative documents — anything where the user wants a WOW effect or says anything about style/design; keep "classique" for administrative letters, invoices, legal or official documents.
+- The QUALITY STANDARD above applies IDENTICALLY to both styles — never write less or thinner content because of the style choice.
+
 DOWNLOAD LINKS — ABSOLUTE BAN:
 You CANNOT publish, host or link files at any URL. You have no website, no domain, no file server.
 - NEVER write a download link: no [Télécharger](...), no [Download](...), no bare https://… URL for a file
@@ -110,7 +143,12 @@ The platform also searches the web automatically when a question needs fresh fac
 export type DocumentBlock = {
   filename: string;
   content: string;
+  /** Visual design engine. Defaults to 'classique' (professional deep-teal).
+   *  'moderne' = ultra-modern violet/fuchsia design system. */
+  design?: DocumentDesign;
 };
+
+export type DocumentDesign = 'classique' | 'moderne';
 
 const FENCE_RE = /^```([a-zA-Z0-9_-]+)?(?:[ \t]+([^\n]*))?[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm;
 
@@ -160,6 +198,42 @@ export const FILE_REQUEST_RE = new RegExp(
   'i'
 );
 
+/** Ultra-modern design request, in the user's OWN words (FR + EN).
+ *
+ *  Belt-and-suspenders filet — mirrors the GIF/SEARCH command philosophy:
+ *  when the user asks for a FILE *and* uses design language, the design is
+ *  forced to "moderne" even if the model forgets the design="moderne"
+ *  attribute. Always gated by an explicit file request in v12-flow, so
+ *  "l'art moderne" in a casual chat never flips anything. Edges use
+ *  Unicode-letter lookarounds (NOT \b — \b doesn't fire around accented
+ *  characters, so "stylé"/"élégant"/"soigné" would slip through). */
+export const MODERN_DESIGN_RE = new RegExp(
+  [
+    String.raw`(?<![\p{L}])ultra\s*-?\s*moder(?:ne|n)s?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])tr[èe]s\s+moder(?:ne|n)s?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])moder(?:ne|n)s?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])styl[ée]e?s?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])designs?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])[ée]l[ée]gants?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])elegants?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])raffin[ée]s?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])soign[ée]s?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])graphiques?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])cr[ée]atifs?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])creatives?(?![\p{L}])`,
+    String.raw`(?<![\p{L}])next\s*[- ]?level(?![\p{L}])`,
+    String.raw`(?<![\p{L}])pro\s+design(?![\p{L}])`,
+  ].join('|'),
+  'iu'
+);
+
+/** Normalize a design="…" fence attribute value to a DocumentDesign. */
+function parseDesignAttr(value: string | null): DocumentDesign | undefined {
+  if (!value) return undefined;
+  const v = value.trim().toLowerCase();
+  return /moder|ultra|design|styl|cr[ée]at|creatif|futur|tendance/i.test(v) ? 'moderne' : undefined;
+}
+
 /** Fenced-code language used to keep a document block INLINE when the user
  *  did not ask for a file (extract=false): the "```document …" fence is
  *  re-tagged as a plain code fence so the chat renders a normal block. */
@@ -207,10 +281,13 @@ function filenameAttr(info: string): string | null {
  *  opts.extract (default true): set false when the user did NOT explicitly
  *  ask for a file — document-shaped fences are then kept INLINE, re-tagged
  *  as plain code fences (```html, ```markdown…), so nothing becomes a file
- *  card unless requested. See FILE_REQUEST_RE for the intent gate. */
+ *  card unless requested. See FILE_REQUEST_RE for the intent gate.
+ *  opts.modern (default false): force the ultra-modern design engine on every
+ *  extracted block — the deterministic filet for "ultra moderne" requests.
+ *  A design="moderne" attribute on the fence always wins regardless. */
 export function extractDocumentBlocks(
   content: string,
-  opts?: { extract?: boolean }
+  opts?: { extract?: boolean; modern?: boolean }
 ): {
   blocks: DocumentBlock[];
   stripped: string;
@@ -236,8 +313,12 @@ export function extractDocumentBlocks(
       filename = attr;
     }
     if (!filename) continue; // regular code fence — leave it alone
+    // Design selection: fence attribute first, deterministic filet second.
+    const attrDesign = parseDesignAttr(info.match(/design\s*=\s*["']([^"']+)["']/i)?.[1] ?? null);
+    const design: DocumentDesign =
+      attrDesign === 'moderne' || opts?.modern === true ? 'moderne' : 'classique';
     if (extract) {
-      blocks.push({ filename, content: body });
+      blocks.push({ filename, content: body, design });
       replacements.push({
         start: match.index,
         end: match.index + match[0].length,
@@ -450,16 +531,174 @@ function htmlToLines(html: string): LineKind[] {
 }
 
 // ---------------------------------------------------------------------------
+// Markdown → basic semantic HTML (.html documents whose body the model
+// wrote as Markdown — never show raw "# …" text in a downloaded web page)
+// ---------------------------------------------------------------------------
+
+const escHtml = (s: string) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+/** Inline Markdown → safe HTML (bold / italic / code / links). */
+function mdInlineToHtml(s: string): string {
+  let out = escHtml(s);
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  out = out.replace(/(^|[^*\w])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  return out;
+}
+
+function mdTableToHtml(header: string[], rows: string[][]): string {
+  const nCols = Math.max(1, header.length, ...rows.map((r) => r.length));
+  const norm = (cells: string[]) => {
+    const out = cells.slice(0, nCols).map((c) => String(c ?? ''));
+    while (out.length < nCols) out.push('');
+    return out;
+  };
+  const thead = header.length
+    ? `<thead><tr>${norm(header).map((h) => `<th>${mdInlineToHtml(h)}</th>`).join('')}</tr></thead>`
+    : '';
+  const tbody = rows
+    .map((r) => `<tr>${norm(r).map((c) => `<td>${mdInlineToHtml(c)}</td>`).join('')}</tr>`)
+    .join('');
+  return `<table>${thead}<tbody>${tbody}</tbody></table>`;
+}
+
+/** Split a table row "| a | b |" into trimmed RAW cells (inline markers
+ *  preserved — the HTML renderer converts **bold** itself). */
+const splitRawTableRow = (line: string): string[] =>
+  line
+    .replace(/^\s*\|/, '')
+    .replace(/\|\s*$/, '')
+    .split('|')
+    .map((c) => c.trim());
+
+/** Markdown → semantic HTML with a RAW line parser (inline markers kept —
+ *  markdownToLines strips bold / italic / link markers, which is right for the
+ *  PDF/DOCX renderers but would flatten the HTML conversion).
+ *  With stripFirstH1 the first "# Heading" becomes the returned title (the
+ *  modern hero renders it) and leaves the body; the classique template
+ *  keeps the h1 in the body (title for <title> only). */
+function mdToBasicHtml(md: string, stripFirstH1 = false): { title: string; html: string } {
+  const rawLines = md.split(/\r?\n/);
+  const out: string[] = [];
+  let title = '';
+  let para: string[] = [];
+  let bullets: string[] = [];
+  let nums: string[] = [];
+  const flush = () => {
+    if (para.length) {
+      out.push(`<p>${mdInlineToHtml(para.join(' ').trim())}</p>`);
+      para = [];
+    }
+    if (bullets.length) {
+      out.push(`<ul>${bullets.map((b) => `<li>${mdInlineToHtml(b)}</li>`).join('')}</ul>`);
+      bullets = [];
+    }
+    if (nums.length) {
+      out.push(`<ol>${nums.map((n) => `<li>${mdInlineToHtml(n)}</li>`).join('')}</ol>`);
+      nums = [];
+    }
+  };
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].replace(/\s+$/, '');
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      flush();
+      const level = h[1].length;
+      if (level === 1) {
+        if (stripFirstH1 && !title && !out.length && !bullets.length && !nums.length && !para.length) {
+          title = stripInline(h[2]).trim();
+        } else {
+          if (!title) title = stripInline(h[2]).trim();
+          out.push(`<h1>${mdInlineToHtml(h[2].trim())}</h1>`);
+        }
+      } else {
+        out.push(`<h${level}>${mdInlineToHtml(h[2].trim())}</h${level}>`);
+      }
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flush();
+      out.push('<hr>');
+      continue;
+    }
+    // Pipe table run (header = row followed by a --- separator).
+    if (isTableRow(line)) {
+      const cells = isTableSeparator(line) ? null : splitRawTableRow(line);
+      if (cells === null) continue;
+      const next = (rawLines[i + 1] ?? '').trim();
+      const hasHeader = isTableSeparator(next) && cells.length > 0;
+      const header = hasHeader ? cells : [];
+      const rows: string[][] = [];
+      let j = hasHeader ? i + 2 : i;
+      for (; j < rawLines.length; j++) {
+        const rl = rawLines[j].replace(/\s+$/, '');
+        if (!isTableRow(rl)) break;
+        if (isTableSeparator(rl)) continue;
+        rows.push(splitRawTableRow(rl));
+      }
+      flush();
+      out.push(mdTableToHtml(header, rows));
+      i = j - 1;
+      continue;
+    }
+    const n = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
+    if (n && listLevel(n[1]) <= 1) {
+      flush();
+      nums.push(n[3].trim());
+      continue;
+    }
+    const b = line.match(/^(\s*)[-*+]\s+(.*)$/);
+    if (b && listLevel(b[1]) <= 2) {
+      flush();
+      bullets.push(b[2].trim());
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      flush();
+      out.push(`<blockquote>${mdInlineToHtml(line.replace(/^>\s?/, '').trim())}</blockquote>`);
+      continue;
+    }
+    para.push(line.trim());
+  }
+  flush();
+  return { title, html: out.join('\n') };
+}
+
+// ---------------------------------------------------------------------------
 // Design tokens (shared palette across PDF / DOCX / XLSX / HTML)
 // ---------------------------------------------------------------------------
 
-/** Deep teal — professional, print-friendly, brand-safe accent. */
+/** Deep teal — professional, print-friendly, brand-safe accent (classique). */
 const ACCENT_HEX = '0F6B61';
 const ACCENT_DARK_HEX = '0B4A44';
 const ACCENT_TINT_HEX = 'E8F1EF';
 const INK_HEX = '1F2937';
 const ZEBRA_HEX = 'F4F6F6';
 const HAIRLINE_HEX = 'D6DBDB';
+
+/** Ultra-modern "violet néon" palette (moderne engine).
+ *  Violet-600 → fuchsia-600 gradient accents, purple-tinted ink/zebra. */
+const MODERN_ACCENT_HEX = '7C3AED';
+const MODERN_ACCENT2_HEX = 'C026D3';
+const MODERN_ACCENT_DARK_HEX = '6D28D9';
+const MODERN_TINT_HEX = 'F4EEFF';
+const MODERN_INK_HEX = '1E1B2E';
+const MODERN_ZEBRA_HEX = 'F8F5FC';
+const MODERN_HAIRLINE_HEX = 'E4DBF5';
+
+/** Raw RGB channels (0-1) for the gradient interpolator. */
+const VIOLET_CH = { r: 0.486, g: 0.227, b: 0.929 }; // #7C3AED
+const FUCHSIA_CH = { r: 0.753, g: 0.149, b: 0.827 }; // #C026D3
 
 // ---------------------------------------------------------------------------
 // PDF converter (pdf-lib, standard fonts — WinAnsi safe)
@@ -489,8 +728,13 @@ function parseInlineBold(s: string): RichRun[] {
   return flat.length ? flat : [{ text: clean(s), bold: false }];
 }
 
-async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Array> {
+async function markdownToPdfBytes(
+  md: string,
+  filename: string,
+  design: DocumentDesign = 'classique'
+): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const modern = design === 'moderne';
   const doc = await PDFDocument.create();
   const F = {
     regular: await doc.embedFont(StandardFonts.Helvetica),
@@ -499,17 +743,31 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
     boldItalic: await doc.embedFont(StandardFonts.HelveticaBoldOblique),
   };
 
-  // Design tokens.
-  const C = {
-    ink: rgb(0.09, 0.11, 0.13),
-    body: rgb(0.16, 0.19, 0.22),
-    muted: rgb(0.45, 0.48, 0.5),
-    accent: rgb(0.06, 0.42, 0.38),
-    accentSoft: rgb(0.91, 0.95, 0.94),
-    zebra: rgb(0.957, 0.965, 0.965),
-    hairline: rgb(0.84, 0.86, 0.87),
-    tableBorder: rgb(0.79, 0.82, 0.83),
-  };
+  // Design tokens — two engines. "classique": deep-teal editorial.
+  // "moderne": violet/fuchsia ultra-modern system.
+  const C = modern
+    ? {
+        ink: rgb(0.12, 0.106, 0.18),
+        body: rgb(0.19, 0.165, 0.25),
+        muted: rgb(0.47, 0.43, 0.52),
+        accent: rgb(0.486, 0.227, 0.929), // #7C3AED
+        accent2: rgb(0.753, 0.149, 0.827), // #C026D3
+        accentSoft: rgb(0.957, 0.933, 1.0), // #F4EEFF
+        zebra: rgb(0.973, 0.961, 0.988), // #F8F5FC
+        hairline: rgb(0.894, 0.863, 0.961), // #E4DBF5
+        tableBorder: rgb(0.87, 0.84, 0.94),
+      }
+    : {
+        ink: rgb(0.09, 0.11, 0.13),
+        body: rgb(0.16, 0.19, 0.22),
+        muted: rgb(0.45, 0.48, 0.5),
+        accent: rgb(0.06, 0.42, 0.38),
+        accent2: rgb(0.06, 0.42, 0.38),
+        accentSoft: rgb(0.91, 0.95, 0.94),
+        zebra: rgb(0.957, 0.965, 0.965),
+        hairline: rgb(0.84, 0.86, 0.87),
+        tableBorder: rgb(0.79, 0.82, 0.83),
+      };
 
   const PAGE_W = 595.28; // A4
   const PAGE_H = 841.89;
@@ -526,9 +784,41 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
     y = PAGE_H - M_TOP;
   };
 
+  /** Violet→fuchsia gradient band (pdf-lib has no native gradients —
+   *  simulated with N interpolated slices, overlap hides the seams). */
+  const drawGradientBar = (
+    target: typeof page,
+    x: number,
+    gy: number,
+    w: number,
+    h: number,
+    c1: typeof VIOLET_CH,
+    c2: typeof FUCHSIA_CH,
+    steps = 26
+  ) => {
+    const sw = w / steps;
+    for (let i = 0; i < steps; i++) {
+      const t = i / (steps - 1);
+      target.drawRectangle({
+        x: x + i * sw,
+        y: gy,
+        width: sw + 0.5,
+        height: h,
+        color: rgb(
+          c1.r + (c2.r - c1.r) * t,
+          c1.g + (c2.g - c1.g) * t,
+          c1.b + (c2.b - c1.b) * t
+        ),
+      });
+    }
+  };
+
   /** WinAnsi-safe transliteration. CP1252 already covers accents, œ, €,
    *  smart quotes, dashes, ellipsis and • — only truly exotic glyphs are
-   *  mapped/fallback'd, so French text renders with REAL typography. */
+   *  mapped/fallback'd, so French text renders with REAL typography.
+   *  Emoji/pictographs are STRIPPED (a bare "?" reads like a typo — the
+   *  model loves "📧 a@b.com" contact lines), and the hollow bullet ◦ maps
+   *  to "-" so nested lists never print "?" (pre-existing v2 wart). */
   const latin = (s: string): string =>
     s
       .replace(/\u00A0/g, ' ')
@@ -536,6 +826,12 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
       .replace(/[\u2713\u2714]/g, 'v')
       .replace(/\u2611/g, '[x]')
       .replace(/[\u25A0\u25CF]/g, '*')
+      .replace(/\u25E6/g, '-')
+      .replace(
+        /[\u{1F000}-\u{1FAFF}\u{1F000}-\u{1F2FF}\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D\u2700-\u27BF]/gu,
+        ''
+      )
+      .replace(/ {2,}/g, ' ')
       .replace(/[^\u0000-\u00FF\u0152\u0153\u0160\u0161\u0178\u017D\u017E\u2013\u2014\u2018\u2019\u201A\u201C\u201D\u201E\u2020\u2021\u2022\u2026\u2030\u2039\u203A\u20AC\u2122]/g, '?');
 
   const lines = markdownToLines(md);
@@ -559,6 +855,7 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
       indent?: number;
       hang?: number;
       prefix?: string;
+      prefixColor?: typeof C.ink;
     }
   ) => {
     const runs: RichRun[] = opts.forceBold
@@ -604,7 +901,7 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
           y,
           size: opts.size,
           font: fontFor(false),
-          color: opts.color,
+          color: opts.prefixColor ?? opts.color,
         });
       }
       let x = M_SIDE + indent + hang;
@@ -621,9 +918,13 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
     if (y - h < M_BOT) newPage();
   };
 
-  /** Underline bar used under the title / h1s. */
+  /** Underline bar used under the title / h1s — gradient in moderne. */
   const accentBar = (width: number, height = 2.4) => {
-    page.drawRectangle({ x: M_SIDE, y: y - 2, width, height, color: C.accent });
+    if (modern) {
+      drawGradientBar(page, M_SIDE, y - 2, width, height, VIOLET_CH, FUCHSIA_CH, 14);
+    } else {
+      page.drawRectangle({ x: M_SIDE, y: y - 2, width, height, color: C.accent });
+    }
     y -= height + 8;
   };
 
@@ -696,18 +997,24 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
         }
       }
       const rowTop = y;
-      // Backgrounds.
+      // Backgrounds — moderne: solid violet header (white text rides on it).
       if (kind === 'header') {
-        page.drawRectangle({ x: M_SIDE, y: rowTop - rowH, width: CONTENT_W, height: rowH, color: C.accentSoft });
+        page.drawRectangle({
+          x: M_SIDE,
+          y: rowTop - rowH,
+          width: CONTENT_W,
+          height: rowH,
+          color: modern ? C.accent : C.accentSoft,
+        });
       } else if (rowIdx % 2 === 1) {
         page.drawRectangle({ x: M_SIDE, y: rowTop - rowH, width: CONTENT_W, height: rowH, color: C.zebra });
       }
-      // Bottom border (accent under header, hairline under data).
+      // Bottom border (fuchsia under the moderne header, accent classique).
       page.drawLine({
         start: { x: M_SIDE, y: rowTop - rowH },
         end: { x: PAGE_W - M_SIDE, y: rowTop - rowH },
-        thickness: kind === 'header' ? 1.1 : 0.5,
-        color: kind === 'header' ? C.accent : C.tableBorder,
+        thickness: kind === 'header' ? (modern ? 1.5 : 1.1) : 0.5,
+        color: kind === 'header' ? (modern ? C.accent2 : C.accent) : C.tableBorder,
       });
       // Cell separators (verticals).
       for (let i = 1; i < nCols; i++) {
@@ -720,7 +1027,7 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
       }
       // Text.
       const font = kind === 'header' ? F.bold : F.regular;
-      const color = kind === 'header' ? C.ink : C.body;
+      const color = kind === 'header' ? (modern ? rgb(1, 1, 1) : C.ink) : C.body;
       const baseline0 = rowTop - padV - size * 0.85;
       cellLines.forEach((cl, i) => {
         for (let k = 0; k < cl.length; k++) {
@@ -751,6 +1058,26 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
       case 'h1': {
         const isTitle = !sawTitle && lines.indexOf(item) === 0;
         sawTitle = true;
+        if (isTitle && modern) {
+          // Magazine treatment: right-aligned date pill above a big title,
+          // full-width violet→fuchsia gradient underline.
+          ensure(112);
+          const month = latin(
+            new Date().toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }).toUpperCase()
+          );
+          const pillFs = 7.5;
+          const pillW = F.bold.widthOfTextAtSize(month, pillFs) + 18;
+          const pillH = 15;
+          const pillX = PAGE_W - M_SIDE - pillW;
+          y -= 6;
+          page.drawRectangle({ x: pillX, y: y - pillH, width: pillW, height: pillH, color: C.accent });
+          page.drawText(month, { x: pillX + 9, y: y - pillH + 4.6, size: pillFs, font: F.bold, color: rgb(1, 1, 1) });
+          y -= pillH + 12;
+          drawRich(item.text, { size: 24, lineH: 28, after: 4, color: C.ink, forceBold: true });
+          drawGradientBar(page, M_SIDE, y - 2, CONTENT_W, 3.4, VIOLET_CH, FUCHSIA_CH, 32);
+          y -= 3.4 + 10;
+          break;
+        }
         ensure(64);
         drawRich(item.text, {
           size: isTitle ? 23 : 20,
@@ -763,6 +1090,14 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
         break;
       }
       case 'h2':
+        if (modern) {
+          // Blocky violet chip before the heading — no hairline rules in moderne.
+          ensure(48);
+          page.drawRectangle({ x: M_SIDE, y: y - 11, width: 8, height: 8, color: C.accent });
+          drawRich(item.text, { size: 13, lineH: 17, after: 5, color: C.ink, forceBold: true, indent: 15 });
+          y -= 2;
+          break;
+        }
         ensure(52);
         drawRich(item.text, { size: 14, lineH: 18, after: 3, color: C.ink, forceBold: true });
         y -= 3;
@@ -776,7 +1111,13 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
         break;
       case 'h3':
         ensure(40);
-        drawRich(item.text, { size: 11.5, lineH: 15, after: 3, color: rgb(0.22, 0.25, 0.28), forceBold: true });
+        drawRich(item.text, {
+          size: 11.5,
+          lineH: 15,
+          after: 3,
+          color: modern ? C.accent : rgb(0.22, 0.25, 0.28),
+          forceBold: true,
+        });
         break;
       case 'h4':
         ensure(36);
@@ -791,6 +1132,7 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
           indent: 6 + item.level * 12,
           hang: 12,
           prefix: item.level === 0 ? '•' : '◦',
+          prefixColor: modern ? C.accent : undefined,
         });
         break;
       case 'numitem': {
@@ -804,6 +1146,7 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
           indent: 6,
           hang: 14,
           prefix: marker,
+          prefixColor: modern ? C.accent : undefined,
         });
         break;
       }
@@ -818,9 +1161,9 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
           font: F.italic,
           indent: 16,
         });
-        // Left accent bar next to the quote.
+        // Left accent bar next to the quote (fuchsia in moderne).
         const barH = Math.max(14, yTop - y - 4);
-        page.drawRectangle({ x: M_SIDE + 2, y: y + 4, width: 1.8, height: barH, color: C.accent });
+        page.drawRectangle({ x: M_SIDE + 2, y: y + 4, width: 1.8, height: barH, color: modern ? C.accent2 : C.accent });
         break;
       }
       case 'hr':
@@ -851,13 +1194,18 @@ async function markdownToPdfBytes(md: string, filename: string): Promise<Uint8Ar
   const N = pages.length;
   const dateStr = new Date().toLocaleDateString('fr-FR');
   pages.forEach((p, i) => {
-    // Slim brand rule at the top of every page.
-    p.drawLine({
-      start: { x: M_SIDE, y: PAGE_H - 34 },
-      end: { x: PAGE_W - M_SIDE, y: PAGE_H - 34 },
-      thickness: 0.75,
-      color: C.accent,
-    });
+    if (modern) {
+      // Full-bleed violet→fuchsia gradient banner across the top edge.
+      drawGradientBar(p, 0, PAGE_H - 6, PAGE_W, 6, VIOLET_CH, FUCHSIA_CH, 36);
+    } else {
+      // Slim brand rule at the top of every page.
+      p.drawLine({
+        start: { x: M_SIDE, y: PAGE_H - 34 },
+        end: { x: PAGE_W - M_SIDE, y: PAGE_H - 34 },
+        thickness: 0.75,
+        color: C.accent,
+      });
+    }
     // Footer rule.
     p.drawLine({
       start: { x: M_SIDE, y: M_BOT - 16 },
@@ -980,8 +1328,9 @@ const NUMERIC_CELL_RE = /^-?\d{1,12}(?:[.,]\d{1,4})?$/;
 
 /** Styled workbook via ExcelJS: bold white-on-teal header, zebra rows,
  *  hairline borders, frozen header, autofilter, content-aware widths,
- *  numeric cells auto-typed. */
-async function markdownToXlsxExcelJS(md: string): Promise<Uint8Array> {
+ *  numeric cells auto-typed. moderne: violet header + fuchsia rule/tabs. */
+async function markdownToXlsxExcelJS(md: string, design: DocumentDesign = 'classique'): Promise<Uint8Array> {
+  const modern = design === 'moderne';
   const mod: any = await import('exceljs');
   const Workbook = mod?.Workbook ?? mod?.default?.Workbook;
   if (!Workbook) throw new Error('exceljs Workbook unavailable');
@@ -1015,7 +1364,7 @@ async function markdownToXlsxExcelJS(md: string): Promise<Uint8Array> {
     sheets = [{ name: 'Feuille 1', header: ['Contenu'], rows }];
   }
 
-  const thin = { style: 'thin' as const, color: { argb: `FF${HAIRLINE_HEX}` } };
+  const thin = { style: 'thin' as const, color: { argb: `FF${modern ? MODERN_HAIRLINE_HEX : HAIRLINE_HEX}` } };
   const used = new Set<string>();
   sheets.forEach((sheet, si) => {
     let name = sheet.name || `Feuille ${si + 1}`;
@@ -1025,6 +1374,10 @@ async function markdownToXlsxExcelJS(md: string): Promise<Uint8Array> {
       views: [{ state: 'frozen', ySplit: 1 }],
       pageSetup: { paperSize: 9, fitToWidth: 1, orientation: 'landscape' },
     });
+    // moderne: alternate violet / fuchsia sheet tabs.
+    if (modern) {
+      ws.properties.tabColor = { argb: `FF${si % 2 === 0 ? MODERN_ACCENT_HEX : MODERN_ACCENT2_HEX}` };
+    }
     const nCols = Math.max(1, sheet.header.length, ...sheet.rows.map((r) => r.length));
     const norm = (r: string[]) => {
       const out = r.slice(0, nCols).map((c) => String(c ?? '').trim());
@@ -1044,12 +1397,19 @@ async function markdownToXlsxExcelJS(md: string): Promise<Uint8Array> {
 
     // Header row styling.
     const hRow = ws.getRow(1);
-    hRow.height = 22;
+    hRow.height = modern ? 26 : 22;
     hRow.eachCell({ includeEmpty: true }, (cell: any) => {
-      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11, name: 'Calibri' };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${ACCENT_HEX}` } };
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: modern ? 12 : 11, name: 'Calibri' };
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: `FF${modern ? MODERN_ACCENT_HEX : ACCENT_HEX}` },
+      };
       cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-      cell.border = { ...thin, bottom: { style: 'medium', color: { argb: `FF${ACCENT_DARK_HEX}` } } };
+      cell.border = {
+        ...thin,
+        bottom: { style: 'medium', color: { argb: `FF${modern ? MODERN_ACCENT2_HEX : ACCENT_DARK_HEX}` } },
+      };
     });
 
     // Data rows: zebra + borders + numeric typing.
@@ -1067,7 +1427,11 @@ async function markdownToXlsxExcelJS(md: string): Promise<Uint8Array> {
         cell.alignment = { vertical: 'middle', wrapText: true };
         cell.border = thin;
         if (ri % 2 === 0) {
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${ZEBRA_HEX}` } };
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: `FF${modern ? MODERN_ZEBRA_HEX : ZEBRA_HEX}` },
+          };
         }
       });
     });
@@ -1121,9 +1485,9 @@ async function markdownToXlsxSheetJS(md: string): Promise<Uint8Array> {
   return new Uint8Array(out as unknown as ArrayBuffer);
 }
 
-async function markdownToXlsxBytes(md: string): Promise<Uint8Array> {
+async function markdownToXlsxBytes(md: string, design: DocumentDesign = 'classique'): Promise<Uint8Array> {
   try {
-    return await markdownToXlsxExcelJS(md);
+    return await markdownToXlsxExcelJS(md, design);
   } catch (e) {
     console.error('[document-generation] exceljs failed, SheetJS fallback', e);
     return markdownToXlsxSheetJS(md);
@@ -1134,7 +1498,8 @@ async function markdownToXlsxBytes(md: string): Promise<Uint8Array> {
 // DOCX converter (docx package) — professional Word documents
 // ---------------------------------------------------------------------------
 
-async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
+async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classique'): Promise<Uint8Array> {
+  const modern = design === 'moderne';
   const {
     Document,
     Packer,
@@ -1199,20 +1564,25 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
     const drift = 100 - pcts.reduce((a, b) => a + b, 0);
     pcts[pcts.length - 1] += drift;
 
-    const hair = { style: BorderStyle.SINGLE, size: 4, color: HAIRLINE_HEX };
+    const hair = { style: BorderStyle.SINGLE, size: 4, color: modern ? MODERN_HAIRLINE_HEX : HAIRLINE_HEX };
     const cellMargins = { top: 80, bottom: 80, left: 140, right: 140 };
 
     const headerCells = norm(header).map(
       (h, i) =>
         new TableCell({
           width: { size: pcts[i], type: WidthType.PERCENTAGE },
-          shading: { type: ShadingType.CLEAR, fill: ACCENT_TINT_HEX, color: 'auto' },
+          // moderne: solid violet header with white bold text.
+          shading: { type: ShadingType.CLEAR, fill: modern ? MODERN_ACCENT_HEX : ACCENT_TINT_HEX, color: 'auto' },
           verticalAlign: VerticalAlign.CENTER,
           margins: cellMargins,
-          borders: { bottom: { style: BorderStyle.SINGLE, size: 12, color: ACCENT_HEX } },
+          borders: { bottom: { style: BorderStyle.SINGLE, size: 12, color: modern ? MODERN_ACCENT2_HEX : ACCENT_HEX } },
           children: [
             new Paragraph({
-              children: runsFromInline(h, { size: 20, bold: true, color: ACCENT_DARK_HEX }),
+              children: runsFromInline(h, {
+                size: 20,
+                bold: true,
+                color: modern ? 'FFFFFF' : ACCENT_DARK_HEX,
+              }),
               spacing: { after: 0, line: 260 },
             }),
           ],
@@ -1224,7 +1594,7 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
           new TableCell({
             width: { size: pcts[ci], type: WidthType.PERCENTAGE },
             margins: cellMargins,
-            shading: ri % 2 === 1 ? { type: ShadingType.CLEAR, fill: ZEBRA_HEX, color: 'auto' } : undefined,
+            shading: ri % 2 === 1 ? { type: ShadingType.CLEAR, fill: modern ? MODERN_ZEBRA_HEX : ZEBRA_HEX, color: 'auto' } : undefined,
             children: [
               new Paragraph({
                 children: runsFromInline(cell, { size: 20, color: INK_HEX }),
@@ -1288,12 +1658,19 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
           new Paragraph({
             heading: isTitle ? HeadingLevel.TITLE : HeadingLevel.HEADING_1,
             children: runsFromInline(item.text, {
-              size: isTitle ? 52 : 40,
+              size: isTitle ? (modern ? 56 : 52) : 40,
               bold: true,
-              color: '0F172A',
+              color: modern ? MODERN_INK_HEX : '0F172A',
             }),
-            spacing: { before: isTitle ? 0 : 320, after: isTitle ? 120 : 140 },
-            border: { bottom: { style: BorderStyle.SINGLE, size: isTitle ? 16 : 10, color: ACCENT_HEX, space: 6 } },
+            spacing: { before: isTitle ? 0 : 320, after: isTitle ? (modern ? 160 : 120) : 140 },
+            border: {
+              bottom: {
+                style: BorderStyle.SINGLE,
+                size: isTitle ? (modern ? 24 : 16) : 10,
+                color: modern ? MODERN_ACCENT2_HEX : ACCENT_HEX,
+                space: 6,
+              },
+            },
           })
         );
         break;
@@ -1303,9 +1680,17 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
         children.push(
           new Paragraph({
             heading: HeadingLevel.HEADING_2,
-            children: runsFromInline(item.text, { size: 30, bold: true, color: '0F172A' }),
+            children: runsFromInline(item.text, {
+              size: 30,
+              bold: true,
+              color: modern ? MODERN_ACCENT_DARK_HEX : '0F172A',
+            }),
             spacing: { before: 280, after: 120 },
-            border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'D9DEDE', space: 3 } },
+            // moderne: tinted violet band instead of a hairline underline.
+            shading: modern ? { type: ShadingType.CLEAR, fill: MODERN_TINT_HEX } : undefined,
+            border: modern
+              ? undefined
+              : { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'D9DEDE', space: 3 } },
           })
         );
         break;
@@ -1314,7 +1699,7 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
         children.push(
           new Paragraph({
             heading: HeadingLevel.HEADING_3,
-            children: runsFromInline(item.text, { size: 25, bold: true, color: '334155' }),
+            children: runsFromInline(item.text, { size: 25, bold: true, color: modern ? MODERN_ACCENT_DARK_HEX : '334155' }),
             spacing: { before: 220, after: 100 },
           })
         );
@@ -1323,7 +1708,7 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
         flushLists();
         children.push(
           new Paragraph({
-            children: runsFromInline(item.text, { size: 23, bold: true, color: '334155' }),
+            children: runsFromInline(item.text, { size: 23, bold: true, color: modern ? MODERN_ACCENT_DARK_HEX : '334155' }),
             spacing: { before: 180, after: 80 },
           })
         );
@@ -1343,7 +1728,7 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
             children: runsFromInline(item.text, { size: 22, italics: true, color: '4B5563' }),
             indent: { left: 360 },
             spacing: { before: 60, after: 120 },
-            border: { left: { style: BorderStyle.SINGLE, size: 12, color: '0F766E', space: 8 } },
+            border: { left: { style: BorderStyle.SINGLE, size: modern ? 18 : 12, color: modern ? MODERN_ACCENT2_HEX : '0F766E', space: 8 } },
           })
         );
         break;
@@ -1352,7 +1737,7 @@ async function markdownToDocxBytes(md: string): Promise<Uint8Array> {
         children.push(
           new Paragraph({
             text: '',
-            border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'D9DEDE', space: 1 } },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: modern ? MODERN_HAIRLINE_HEX : 'D9DEDE', space: 1 } },
             spacing: { before: 120, after: 120 },
           })
         );
@@ -1482,6 +1867,69 @@ ${body}
 </body>
 </html>`;
 
+/** ULTRA-MODERN HTML document (v3 "moderne") — gradient hero with kicker
+ *  pill, Inter typography, diamond section chips, gradient table headers,
+ *  tinted blockquotes, gradient hairlines; print rules included. */
+const HTML_MODERN_DOC_TEMPLATE = (title: string, body: string) => `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(title || 'Document')}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#17141f;--muted:#6e6478;--v:#7c3aed;--v2:#6d28d9;--f:#c026d3;--tint:#f4eeff;--hair:#e9e2f5}
+*{box-sizing:border-box}
+html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{margin:0;background:#f6f3fa;color:var(--ink);font:15.5px/1.7 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+.page{max-width:900px;margin:36px auto 64px;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 24px 60px rgba(23,20,31,.13)}
+.hero{background:linear-gradient(120deg,#6d28d9 0%,#7c3aed 45%,#c026d3 100%);color:#fff;padding:54px 64px 46px;position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;right:-90px;top:-90px;width:280px;height:280px;border-radius:50%;background:rgba(255,255,255,.09)}
+.kicker{display:inline-block;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.38);border-radius:999px;padding:5px 16px;font-size:11.5px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;margin-bottom:20px}
+.hero h1{margin:0;font-size:36px;line-height:1.12;font-weight:800;letter-spacing:-.5px;max-width:640px}
+.hero .meta{margin-top:14px;font-size:13px;color:rgba(255,255,255,.88)}
+.body{padding:52px 64px 56px}
+h2{font-size:21.5px;font-weight:800;letter-spacing:-.2px;margin:40px 0 14px;display:flex;align-items:center;gap:11px}
+h2::before{content:"";width:10px;height:10px;border-radius:3.5px;background:linear-gradient(135deg,var(--v),var(--f));flex:none;transform:rotate(45deg)}
+h3{font-size:16.5px;font-weight:700;color:var(--v2);margin:28px 0 9px}
+h4{font-size:14.5px;font-weight:700;color:var(--v2);margin:20px 0 7px}
+h1{font-size:28px;font-weight:800;letter-spacing:-.3px;margin:26px 0 12px}
+p{margin:0 0 13px}
+strong{font-weight:700}
+ul,ol{padding-left:25px;margin:0 0 13px}
+li{margin:0 0 6px}
+li::marker{color:var(--v);font-weight:600}
+table{width:100%;border-collapse:separate;border-spacing:0;margin:22px 0;font-size:13.5px;border-radius:11px;overflow:hidden;box-shadow:0 0 0 1px var(--hair)}
+th{background:linear-gradient(120deg,#6d28d9,#9d4edd);color:#fff;text-align:left;font-weight:700;padding:12px 15px}
+td{padding:11px 15px;border-top:1px solid var(--hair);vertical-align:top}
+tbody tr:nth-child(even) td{background:#faf7fe}
+blockquote{margin:18px 0;padding:12px 18px;border-radius:0 11px 11px 0;background:var(--tint);border-left:4px solid var(--f);color:#5b5266;font-style:italic}
+code{background:#f1ecfb;color:var(--v2);border-radius:5px;padding:2px 6px;font-size:.9em;font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
+pre{background:#1b1430;color:#e6e0f5;padding:17px 19px;border-radius:13px;overflow:auto;font-size:13px}
+pre code{background:none;color:inherit;padding:0}
+hr{border:none;height:2px;background:linear-gradient(90deg,var(--v),var(--f),transparent);margin:30px 0;border-radius:2px}
+a{color:var(--v2);text-decoration:underline;text-decoration-color:rgba(124,58,237,.4);text-underline-offset:3px}
+.doc-footer{margin-top:52px;padding-top:15px;border-top:1px solid var(--hair);color:var(--muted);font-size:12px;display:flex;justify-content:space-between}
+@media print{body{background:#fff}.page{margin:0;border-radius:0;box-shadow:none;max-width:none}.hero{padding:24mm 16mm 12mm}.body{padding:0 16mm 12mm}.doc-footer{display:none}@page{size:A4;margin:0}}
+</style>
+</head>
+<body>
+<main class="page">
+<header class="hero">
+<span class="kicker">Document · Nelth-AI</span>
+<h1>${escHtml(title || 'Document')}</h1>
+<div class="meta">Édition ${new Date().toLocaleDateString('fr-FR')} · Design ultra moderne · généré par Nelth-AI</div>
+</header>
+<div class="body">
+${body}
+<div class="doc-footer"><span>Généré avec Nelth-AI — design ultra moderne</span><span>${new Date().toLocaleDateString('fr-FR')}</span></div>
+</div>
+</main>
+</body>
+</html>`;
+
 // ---------------------------------------------------------------------------
 // File assembly + persistence
 // ---------------------------------------------------------------------------
@@ -1512,25 +1960,41 @@ function sanitizeFilename(name: string): string {
 }
 
 /** Build the file bytes for one document block. Exported for previews and
- *  local verification harnesses. */
+ *  local verification harnesses. The block's design ("classique" default,
+ *  "moderne" ultra-modern) selects the visual engine per format. */
 export async function buildDocumentBytes(
   block: DocumentBlock
 ): Promise<{ bytes: Buffer; contentType: string; filename: string }> {
   const filename = sanitizeFilename(block.filename);
   const ext = (filename.split('.').pop() ?? '').toLowerCase();
+  const design: DocumentDesign = block.design === 'moderne' ? 'moderne' : 'classique';
   switch (ext) {
     case 'pdf':
-      return { bytes: Buffer.from(await markdownToPdfBytes(block.content, filename)), contentType: CONTENT_TYPES.pdf, filename };
+      return { bytes: Buffer.from(await markdownToPdfBytes(block.content, filename, design)), contentType: CONTENT_TYPES.pdf, filename };
     case 'docx':
-      return { bytes: Buffer.from(await markdownToDocxBytes(block.content)), contentType: CONTENT_TYPES.docx, filename };
+      return { bytes: Buffer.from(await markdownToDocxBytes(block.content, design)), contentType: CONTENT_TYPES.docx, filename };
     case 'xlsx':
     case 'xls':
-      return { bytes: Buffer.from(await markdownToXlsxBytes(block.content)), contentType: CONTENT_TYPES.xlsx, filename: filename.replace(/\.xls$/i, '.xlsx') };
+      return { bytes: Buffer.from(await markdownToXlsxBytes(block.content, design)), contentType: CONTENT_TYPES.xlsx, filename: filename.replace(/\.xls$/i, '.xlsx') };
     case 'html': {
       let body = block.content;
       if (!/<html[\s>]/i.test(body)) {
-        const title = filename.replace(/\.html?$/i, '');
-        body = HTML_DOC_TEMPLATE(title, body);
+        const fileTitle = filename.replace(/\.html?$/i, '');
+        // Markdown bodies are converted to real semantic HTML so raw "# …"
+        // text never shows in the browser; the modern hero takes the first
+        // # heading as its title, the classic template keeps it in the body.
+        const looksHtml = /<(?:div|section|article|table|p|h[1-6]|ul|ol|header|main|body)\b/i.test(body);
+        let inner = body;
+        let heroTitle = fileTitle;
+        if (!looksHtml) {
+          const conv = mdToBasicHtml(body, design === 'moderne');
+          inner = conv.html;
+          heroTitle = conv.title || fileTitle;
+        }
+        body =
+          design === 'moderne'
+            ? HTML_MODERN_DOC_TEMPLATE(heroTitle, inner)
+            : HTML_DOC_TEMPLATE(heroTitle, inner);
       }
       return { bytes: Buffer.from(body, 'utf-8'), contentType: CONTENT_TYPES.html, filename };
     }
