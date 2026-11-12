@@ -14,6 +14,10 @@ import type { NextConfig } from "next";
  */
 const nextConfig: NextConfig = {
   output: "standalone",
+  // exceljs (styled XLSX documents) is a CommonJS/Node-oriented package —
+  // keep it external so the server bundle requires it from node_modules
+  // instead of bundling its dynamic requires.
+  serverExternalPackages: ["exceljs"],
   typescript: {
     ignoreBuildErrors: true,
   },
