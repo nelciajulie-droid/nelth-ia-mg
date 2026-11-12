@@ -99,9 +99,10 @@ When the user DOES explicitly ask for a file, you MUST generate the actual file 
 
 Rules for the document block:
 - The language tag of the block MUST be exactly "document" (never "xlsx", "pdf", "excel", "word"…). Example: \u0060\u0060\u0060document filename="courses.xlsx"\n…table content…\n\u0060\u0060\u0060
-- filename extension selects the format: .pdf, .docx, .xlsx, .html, .md, .txt, .csv, .json
+- filename extension selects the format: .pdf, .docx, .xlsx, .pptx, .html, .md, .txt, .csv, .json
 - The block content must be well-structured Markdown for .pdf/.docx/.txt (headings with #/##, bullets with -, bold with **, plain paragraphs), raw HTML only for .html, CSV rows for .csv, valid JSON for .json
-- For .xlsx (Excel): give ONE Markdown table per sheet, each preceded by a "## Sheet name" heading (e.g. "## Liste des dessins" then the table). Tables use | pipes | with a --- separator row under the header. Plain CSV content is also accepted for a single-sheet workbook
+- For .xlsx (Excel): give ONE Markdown table per sheet, each preceded by a "## Sheet name" heading (e.g. "## Liste des dessins" then the table). Tables use | pipes | with a --- separator row under the header. Plain CSV content is also accepted for a single-sheet workbook. Cells starting with = become real Excel formulas
+- For .pptx (PowerPoint): structure the deck as \u0060# Deck title\u0060 then ONE \u0060## Slide title\u0060 heading PER SLIDE, each followed by 3-6 SHORT bullet lines (- one idea per line, max ~12 words). NEVER put the whole deck on one slide — one section = one slide. You may add \u0060> notes:\u0060 speaker notes under a slide
 - One block per file; you may generate several blocks for several files
 - Write the document in the user's language (French → French document)
 - Add a one-sentence confirmation before or after the block (e.g. "Voici ton CV au format PDF, prêt à télécharger.")
@@ -115,11 +116,11 @@ QUALITY STANDARD — EXPERT-LEVEL DOCUMENTS (the file is the deliverable, make i
 - Never leave placeholders like [Your Name] or "à compléter" unless the user gave strictly zero information.
 - In French, follow French typographic conventions (guillemets « », espaces avant ! ? : ;).
 
-DESIGN STYLES — the platform has TWO professional design engines for your documents:
-- Default style "classique": elegant deep-teal editorial design (reports, letters, official docs).
-- If the user asks for a modern / ultra-modern / stylish / designer / creative look ("ultra moderne", "moderne", "stylé", "design", "élégant", "soigné", "créatif", "modern", "stylish"), add the attribute design="moderne" to the document fence: \u0060\u0060\u0060document filename="cv.pdf" design="moderne"\n…content…\n\u0060\u0060\u0060 — the platform then renders an ULTRA-MODERN design (gradient hero banner, violet-fuchsia accents, colored table headers, magazine-style layout).
-- Choose "moderne" for CVs, portfolios, pitches, business plans, one-pagers, marketing and creative documents — anything where the user wants a WOW effect or says anything about style/design; keep "classique" for administrative letters, invoices, legal or official documents.
-- The QUALITY STANDARD above applies IDENTICALLY to both styles — never write less or thinner content because of the style choice.
+DESIGN STYLES — the platform has a full TEMPLATE system for your documents:
+- The platform auto-picks a professional template per document type (corporate for reports, professional-cv for CVs, financial for invoices, academic for research…).
+- If the user asks for a modern / ultra-modern / stylish / designer / creative look ("ultra moderne", "moderne", "stylé", "design", "élégant", "soigné", "créatif", "modern", "stylish"), add the attribute design="moderne" to the document fence: \u0060\u0060\u0060document filename="cv.pdf" design="moderne"\n…content…\n\u0060\u0060\u0060 — the platform then renders an ULTRA-MODERN design (gradient hero banner, vivid accents, magazine-style layout).
+- You may also pin an explicit template with template="…" (corporate, minimalist, modern, academic, executive, creative, financial, professional-cv, business-proposal, invoice) when the user names a style exactly ("style académique" → template="academic", "design épuré/minimaliste" → template="minimalist").
+- The QUALITY STANDARD above applies IDENTICALLY to every template — never write less or thinner content because of the style choice.
 
 DOWNLOAD LINKS — ABSOLUTE BAN:
 You CANNOT publish, host or link files at any URL. You have no website, no domain, no file server.
@@ -146,6 +147,10 @@ export type DocumentBlock = {
   /** Visual design engine. Defaults to 'classique' (professional deep-teal).
    *  'moderne' = ultra-modern violet/fuchsia design system. */
   design?: DocumentDesign;
+  /** Document template id (documents engine) — when set, its palette +
+   *  typography drive every converter (design keeps driving the LAYOUT
+   *  engine). Overrides the design look-and-feel colors. */
+  template?: string;
 };
 
 export type DocumentDesign = 'classique' | 'moderne';
@@ -188,12 +193,16 @@ export const FILE_REQUEST_RE = new RegExp(
     String.raw`\bpdf\b`,
     String.raw`\bdocx\b`,
     String.raw`\bxlsx\b`,
+    String.raw`\bpptx\b`,
+    String.raw`\bpowerpoints?\b`,
+    String.raw`\bexcels?\b`,
+    String.raw`\bpr[ée]sentations?\b`,
     String.raw`\bexcel\b`,
     String.raw`\bcsv\b`,
     String.raw`\b(?:un|le|du|des|mes?|ton|notre|votre)\s+word\b`,
     String.raw`\bword\s+(?:doc|document)s?\b`,
-    String.raw`\bdocuments?\s+(?:word|pdf|excel|xlsx)\b`,
-    String.raw`\.(?:pdf|docx?|xlsx?|csv|json)\b`,
+    String.raw`\bdocuments?\s+(?:word|pdf|excel|xlsx|pptx)\b`,
+    String.raw`\.(?:pdf|docx?|xlsx?|pptx?|csv|json)\b`,
   ].join('|'),
   'i'
 );
@@ -317,8 +326,12 @@ export function extractDocumentBlocks(
     const attrDesign = parseDesignAttr(info.match(/design\s*=\s*["']([^"']+)["']/i)?.[1] ?? null);
     const design: DocumentDesign =
       attrDesign === 'moderne' || opts?.modern === true ? 'moderne' : 'classique';
+    // Template selection: an explicit template="…" fence attribute (documents
+    // engine — corporate / academic / modern / …). When absent the documents
+    // engine infers a type-appropriate template per block.
+    const attrTemplate = info.match(/template\s*=\s*["']([a-z0-9-]+)["']/i)?.[1] ?? null;
     if (extract) {
-      blocks.push({ filename, content: body, design });
+      blocks.push({ filename, content: body, design, ...(attrTemplate ? { template: attrTemplate } : {}) });
       replacements.push({
         start: match.index,
         end: match.index + match[0].length,
@@ -679,12 +692,12 @@ function mdToBasicHtml(md: string, stripFirstH1 = false): { title: string; html:
 // ---------------------------------------------------------------------------
 
 /** Deep teal — professional, print-friendly, brand-safe accent (classique). */
-const ACCENT_HEX = '0F6B61';
-const ACCENT_DARK_HEX = '0B4A44';
-const ACCENT_TINT_HEX = 'E8F1EF';
-const INK_HEX = '1F2937';
-const ZEBRA_HEX = 'F4F6F6';
-const HAIRLINE_HEX = 'D6DBDB';
+const CLASSIC_ACCENT_HEX = '0F6B61';
+const CLASSIC_ACCENT_DARK_HEX = '0B4A44';
+const CLASSIC_ACCENT_TINT_HEX = 'E8F1EF';
+const CLASSIC_INK_HEX = '1F2937';
+const CLASSIC_ZEBRA_HEX = 'F4F6F6';
+const CLASSIC_HAIRLINE_HEX = 'D6DBDB';
 
 /** Ultra-modern "violet néon" palette (moderne engine).
  *  Violet-600 → fuchsia-600 gradient accents, purple-tinted ink/zebra. */
@@ -696,9 +709,70 @@ const MODERN_INK_HEX = '1E1B2E';
 const MODERN_ZEBRA_HEX = 'F8F5FC';
 const MODERN_HAIRLINE_HEX = 'E4DBF5';
 
+/** Full palettes (classic editorial + modern) shared by DOCX/XLSX. The PDF
+ *  converter computes its rgb tokens from the same source. */
+const CLASSIC_PALETTE = {
+  accent: CLASSIC_ACCENT_HEX,
+  accent2: CLASSIC_ACCENT_HEX,
+  accentDark: CLASSIC_ACCENT_DARK_HEX,
+  tint: CLASSIC_ACCENT_TINT_HEX,
+  ink: '0F172A',
+  body: '334155',
+  muted: '64748B',
+  zebra: CLASSIC_ZEBRA_HEX,
+  hairline: 'D9DEDE',
+} as const;
+const MODERN_PALETTE = {
+  accent: MODERN_ACCENT_HEX,
+  accent2: MODERN_ACCENT2_HEX,
+  accentDark: MODERN_ACCENT_DARK_HEX,
+  tint: MODERN_TINT_HEX,
+  ink: '0F172A',
+  body: '334155',
+  muted: '64748B',
+  zebra: MODERN_ZEBRA_HEX,
+  hairline: MODERN_HAIRLINE_HEX,
+} as const;
+
+/** Template theme — palette + typography override for every converter.
+ *  Provided by the documents engine (src/lib/documents): the layout engine
+ *  stays keyed on `design` (classique editorial / moderne bold) while the
+ *  palette + fonts come from the DOCUMENT TEMPLATE (corporate, academic,
+ *  creative…). When absent the converters keep their classic/modern looks. */
+export type DocTheme = {
+  palette: {
+    accent: string;
+    accent2: string;
+    accentDark: string;
+    tint: string;
+    ink: string;
+    body: string;
+    muted: string;
+    zebra: string;
+    hairline: string;
+  };
+  /** serif typography (academic / executive / …). */
+  serif: boolean;
+};
+
+/** Resolve the palette: explicit theme → design default. */
+function paletteFor(design: DocumentDesign, theme?: DocTheme) {
+  if (theme) return theme.palette;
+  return design === 'moderne' ? MODERN_PALETTE : CLASSIC_PALETTE;
+}
+
 /** Raw RGB channels (0-1) for the gradient interpolator. */
 const VIOLET_CH = { r: 0.486, g: 0.227, b: 0.929 }; // #7C3AED
 const FUCHSIA_CH = { r: 0.753, g: 0.149, b: 0.827 }; // #C026D3
+
+function hexToChannels(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace('#', '');
+  return {
+    r: parseInt(h.slice(0, 2), 16) / 255,
+    g: parseInt(h.slice(2, 4), 16) / 255,
+    b: parseInt(h.slice(4, 6), 16) / 255,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // PDF converter (pdf-lib, standard fonts — WinAnsi safe)
@@ -731,43 +805,69 @@ function parseInlineBold(s: string): RichRun[] {
 async function markdownToPdfBytes(
   md: string,
   filename: string,
-  design: DocumentDesign = 'classique'
+  design: DocumentDesign = 'classique',
+  theme?: DocTheme
 ): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
   const modern = design === 'moderne';
+  const P = paletteFor(design, theme);
+  // Local aliases — every `modern ? MODERN_X : X` in the body below resolves
+  // to the THEMED palette when a template drives this call.
+  const ACCENT_HEX = P.accent;
+  const ACCENT_DARK_HEX = P.accentDark;
+  const ACCENT_TINT_HEX = P.tint;
+  const INK_HEX = P.ink;
+  const ZEBRA_HEX = P.zebra;
+  const HAIRLINE_HEX = P.hairline;
+  const MODERN_ACCENT_HEX = P.accent;
+  const MODERN_ACCENT2_HEX = P.accent2;
+  const MODERN_ACCENT_DARK_HEX = P.accentDark;
+  const MODERN_TINT_HEX = P.tint;
+  const MODERN_INK_HEX = P.ink;
+  const MODERN_ZEBRA_HEX = P.zebra;
+  const MODERN_HAIRLINE_HEX = P.hairline;
   const doc = await PDFDocument.create();
-  const F = {
-    regular: await doc.embedFont(StandardFonts.Helvetica),
-    bold: await doc.embedFont(StandardFonts.HelveticaBold),
-    italic: await doc.embedFont(StandardFonts.HelveticaOblique),
-    boldItalic: await doc.embedFont(StandardFonts.HelveticaBoldOblique),
-  };
-
-  // Design tokens — two engines. "classique": deep-teal editorial.
-  // "moderne": violet/fuchsia ultra-modern system.
-  const C = modern
+  const serifFamily = theme?.serif === true;
+  const F = serifFamily
     ? {
-        ink: rgb(0.12, 0.106, 0.18),
-        body: rgb(0.19, 0.165, 0.25),
-        muted: rgb(0.47, 0.43, 0.52),
-        accent: rgb(0.486, 0.227, 0.929), // #7C3AED
-        accent2: rgb(0.753, 0.149, 0.827), // #C026D3
-        accentSoft: rgb(0.957, 0.933, 1.0), // #F4EEFF
-        zebra: rgb(0.973, 0.961, 0.988), // #F8F5FC
-        hairline: rgb(0.894, 0.863, 0.961), // #E4DBF5
-        tableBorder: rgb(0.87, 0.84, 0.94),
+        regular: await doc.embedFont(StandardFonts.TimesRoman),
+        bold: await doc.embedFont(StandardFonts.TimesRomanBold),
+        italic: await doc.embedFont(StandardFonts.TimesRomanItalic),
+        boldItalic: await doc.embedFont(StandardFonts.TimesRomanBoldItalic),
       }
     : {
-        ink: rgb(0.09, 0.11, 0.13),
-        body: rgb(0.16, 0.19, 0.22),
-        muted: rgb(0.45, 0.48, 0.5),
-        accent: rgb(0.06, 0.42, 0.38),
-        accent2: rgb(0.06, 0.42, 0.38),
-        accentSoft: rgb(0.91, 0.95, 0.94),
-        zebra: rgb(0.957, 0.965, 0.965),
-        hairline: rgb(0.84, 0.86, 0.87),
-        tableBorder: rgb(0.79, 0.82, 0.83),
+        regular: await doc.embedFont(StandardFonts.Helvetica),
+        bold: await doc.embedFont(StandardFonts.HelveticaBold),
+        italic: await doc.embedFont(StandardFonts.HelveticaOblique),
+        boldItalic: await doc.embedFont(StandardFonts.HelveticaBoldOblique),
       };
+
+  // Design tokens — palette-driven (template theme when present; classic /
+  // modern defaults otherwise). The LAYOUT stays keyed on `modern`.
+  const CH = (hex: string) => {
+    const h = hex.replace('#', '');
+    return {
+      r: parseInt(h.slice(0, 2), 16) / 255,
+      g: parseInt(h.slice(2, 4), 16) / 255,
+      b: parseInt(h.slice(4, 6), 16) / 255,
+    };
+  };
+  const fromHex = (hex: string, k = 0) => {
+    const c = CH(hex);
+    if (!k) return rgb(c.r, c.g, c.b);
+    return rgb(c.r + (1 - c.r) * k, c.g + (1 - c.g) * k, c.b + (1 - c.b) * k);
+  };
+  const C = {
+    ink: fromHex(P.ink),
+    body: fromHex(P.body),
+    muted: fromHex(P.muted),
+    accent: fromHex(P.accent),
+    accent2: fromHex(P.accent2),
+    accentSoft: fromHex(P.tint),
+    zebra: fromHex(P.zebra),
+    hairline: fromHex(P.hairline),
+    tableBorder: fromHex(P.hairline, 0.25),
+  };
 
   const PAGE_W = 595.28; // A4
   const PAGE_H = 841.89;
@@ -778,11 +878,15 @@ async function markdownToPdfBytes(
 
   let page = doc.addPage([PAGE_W, PAGE_H]);
   let y = PAGE_H - M_TOP;
-
   const newPage = () => {
     page = doc.addPage([PAGE_W, PAGE_H]);
     y = PAGE_H - M_TOP;
   };
+
+  /** Themed gradient channels (accent → accent2 — violet/fuchsia under the
+   *  modern engine, template accent pair under a themed call). */
+  const GRAD1 = CH(P.accent);
+  const GRAD2 = CH(P.accent2);
 
   /** Violet→fuchsia gradient band (pdf-lib has no native gradients —
    *  simulated with N interpolated slices, overlap hides the seams). */
@@ -921,7 +1025,7 @@ async function markdownToPdfBytes(
   /** Underline bar used under the title / h1s — gradient in moderne. */
   const accentBar = (width: number, height = 2.4) => {
     if (modern) {
-      drawGradientBar(page, M_SIDE, y - 2, width, height, VIOLET_CH, FUCHSIA_CH, 14);
+      drawGradientBar(page, M_SIDE, y - 2, width, height, GRAD1, GRAD2, 14);
     } else {
       page.drawRectangle({ x: M_SIDE, y: y - 2, width, height, color: C.accent });
     }
@@ -1074,7 +1178,7 @@ async function markdownToPdfBytes(
           page.drawText(month, { x: pillX + 9, y: y - pillH + 4.6, size: pillFs, font: F.bold, color: rgb(1, 1, 1) });
           y -= pillH + 12;
           drawRich(item.text, { size: 24, lineH: 28, after: 4, color: C.ink, forceBold: true });
-          drawGradientBar(page, M_SIDE, y - 2, CONTENT_W, 3.4, VIOLET_CH, FUCHSIA_CH, 32);
+          drawGradientBar(page, M_SIDE, y - 2, CONTENT_W, 3.4, GRAD1, GRAD2, 32);
           y -= 3.4 + 10;
           break;
         }
@@ -1196,7 +1300,7 @@ async function markdownToPdfBytes(
   pages.forEach((p, i) => {
     if (modern) {
       // Full-bleed violet→fuchsia gradient banner across the top edge.
-      drawGradientBar(p, 0, PAGE_H - 6, PAGE_W, 6, VIOLET_CH, FUCHSIA_CH, 36);
+      drawGradientBar(p, 0, PAGE_H - 6, PAGE_W, 6, GRAD1, GRAD2, 36);
     } else {
       // Slim brand rule at the top of every page.
       p.drawLine({
@@ -1329,8 +1433,23 @@ const NUMERIC_CELL_RE = /^-?\d{1,12}(?:[.,]\d{1,4})?$/;
 /** Styled workbook via ExcelJS: bold white-on-teal header, zebra rows,
  *  hairline borders, frozen header, autofilter, content-aware widths,
  *  numeric cells auto-typed. moderne: violet header + fuchsia rule/tabs. */
-async function markdownToXlsxExcelJS(md: string, design: DocumentDesign = 'classique'): Promise<Uint8Array> {
+async function markdownToXlsxExcelJS(
+  md: string,
+  design: DocumentDesign = 'classique',
+  theme?: DocTheme
+): Promise<Uint8Array> {
   const modern = design === 'moderne';
+  // Themed palette — locals shadow the module constants.
+  const P = paletteFor(design, theme);
+  const ACCENT_HEX = P.accent;
+  const ACCENT_DARK_HEX = P.accentDark;
+  const HAIRLINE_HEX = P.hairline;
+  const ZEBRA_HEX = P.zebra;
+  const MODERN_ACCENT_HEX = P.accent;
+  const MODERN_ACCENT2_HEX = P.accent2;
+  const MODERN_ZEBRA_HEX = P.zebra;
+  const MODERN_HAIRLINE_HEX = P.hairline;
+  const F_NAME = theme?.serif ? 'Cambria' : 'Calibri';
   const mod: any = await import('exceljs');
   const Workbook = mod?.Workbook ?? mod?.default?.Workbook;
   if (!Workbook) throw new Error('exceljs Workbook unavailable');
@@ -1399,7 +1518,7 @@ async function markdownToXlsxExcelJS(md: string, design: DocumentDesign = 'class
     const hRow = ws.getRow(1);
     hRow.height = modern ? 26 : 22;
     hRow.eachCell({ includeEmpty: true }, (cell: any) => {
-      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: modern ? 12 : 11, name: 'Calibri' };
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: modern ? 12 : 11, name: F_NAME };
       cell.fill = {
         type: 'pattern',
         pattern: 'solid',
@@ -1485,9 +1604,13 @@ async function markdownToXlsxSheetJS(md: string): Promise<Uint8Array> {
   return new Uint8Array(out as unknown as ArrayBuffer);
 }
 
-async function markdownToXlsxBytes(md: string, design: DocumentDesign = 'classique'): Promise<Uint8Array> {
+async function markdownToXlsxBytes(
+  md: string,
+  design: DocumentDesign = 'classique',
+  theme?: DocTheme
+): Promise<Uint8Array> {
   try {
-    return await markdownToXlsxExcelJS(md, design);
+    return await markdownToXlsxExcelJS(md, design, theme);
   } catch (e) {
     console.error('[document-generation] exceljs failed, SheetJS fallback', e);
     return markdownToXlsxSheetJS(md);
@@ -1498,8 +1621,35 @@ async function markdownToXlsxBytes(md: string, design: DocumentDesign = 'classiq
 // DOCX converter (docx package) — professional Word documents
 // ---------------------------------------------------------------------------
 
-async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classique'): Promise<Uint8Array> {
+async function markdownToDocxBytes(
+  md: string,
+  design: DocumentDesign = 'classique',
+  theme?: DocTheme
+): Promise<Uint8Array> {
   const modern = design === 'moderne';
+  // Themed palette — locals shadow the module constants so every
+  // `modern ? MODERN_X : X` below resolves to the template palette.
+  const P = paletteFor(design, theme);
+  const ACCENT_HEX = P.accent;
+  const ACCENT_DARK_HEX = P.accentDark;
+  const ACCENT_TINT_HEX = P.tint;
+  const INK_HEX = P.ink;
+  const BODY_HEX = P.body;
+  const ZEBRA_HEX = P.zebra;
+  const HAIRLINE_HEX = P.hairline;
+  const MODERN_ACCENT_HEX = P.accent;
+  const MODERN_ACCENT2_HEX = P.accent2;
+  const MODERN_ACCENT_DARK_HEX = P.accentDark;
+  const MODERN_TINT_HEX = P.tint;
+  const MODERN_INK_HEX = P.ink;
+  const MODERN_ZEBRA_HEX = P.zebra;
+  const MODERN_HAIRLINE_HEX = P.hairline;
+  // Themed typography — serif templates (academic, executive…) print Cambria.
+  const F_BODY = theme?.serif ? 'Cambria' : 'Calibri';
+  const F_TITLE = theme?.serif ? 'Cambria' : 'Calibri Light';
+  const INK_TITLE = P.ink;
+  const INK_STRONG = P.body;
+  const ACCENT_QUOTE = P.accent2;
   const {
     Document,
     Packer,
@@ -1660,7 +1810,7 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
             children: runsFromInline(item.text, {
               size: isTitle ? (modern ? 56 : 52) : 40,
               bold: true,
-              color: modern ? MODERN_INK_HEX : '0F172A',
+              color: modern ? MODERN_INK_HEX : INK_TITLE,
             }),
             spacing: { before: isTitle ? 0 : 320, after: isTitle ? (modern ? 160 : 120) : 140 },
             border: {
@@ -1683,14 +1833,14 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
             children: runsFromInline(item.text, {
               size: 30,
               bold: true,
-              color: modern ? MODERN_ACCENT_DARK_HEX : '0F172A',
+              color: modern ? MODERN_ACCENT_DARK_HEX : INK_TITLE,
             }),
             spacing: { before: 280, after: 120 },
             // moderne: tinted violet band instead of a hairline underline.
             shading: modern ? { type: ShadingType.CLEAR, fill: MODERN_TINT_HEX } : undefined,
             border: modern
               ? undefined
-              : { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'D9DEDE', space: 3 } },
+              : { bottom: { style: BorderStyle.SINGLE, size: 4, color: HAIRLINE_HEX, space: 3 } },
           })
         );
         break;
@@ -1699,7 +1849,7 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
         children.push(
           new Paragraph({
             heading: HeadingLevel.HEADING_3,
-            children: runsFromInline(item.text, { size: 25, bold: true, color: modern ? MODERN_ACCENT_DARK_HEX : '334155' }),
+            children: runsFromInline(item.text, { size: 25, bold: true, color: modern ? MODERN_ACCENT_DARK_HEX : INK_STRONG }),
             spacing: { before: 220, after: 100 },
           })
         );
@@ -1708,7 +1858,7 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
         flushLists();
         children.push(
           new Paragraph({
-            children: runsFromInline(item.text, { size: 23, bold: true, color: modern ? MODERN_ACCENT_DARK_HEX : '334155' }),
+            children: runsFromInline(item.text, { size: 23, bold: true, color: modern ? MODERN_ACCENT_DARK_HEX : INK_STRONG }),
             spacing: { before: 180, after: 80 },
           })
         );
@@ -1728,7 +1878,7 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
             children: runsFromInline(item.text, { size: 22, italics: true, color: '4B5563' }),
             indent: { left: 360 },
             spacing: { before: 60, after: 120 },
-            border: { left: { style: BorderStyle.SINGLE, size: modern ? 18 : 12, color: modern ? MODERN_ACCENT2_HEX : '0F766E', space: 8 } },
+            border: { left: { style: BorderStyle.SINGLE, size: modern ? 18 : 12, color: modern ? MODERN_ACCENT2_HEX : ACCENT_QUOTE, space: 8 } },
           })
         );
         break;
@@ -1737,7 +1887,7 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
         children.push(
           new Paragraph({
             text: '',
-            border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: modern ? MODERN_HAIRLINE_HEX : 'D9DEDE', space: 1 } },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: modern ? MODERN_HAIRLINE_HEX : HAIRLINE_HEX, space: 1 } },
             spacing: { before: 120, after: 120 },
           })
         );
@@ -1767,7 +1917,7 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'D9DEDE', space: 4 } },
+        border: { top: { style: BorderStyle.SINGLE, size: 4, color: HAIRLINE_HEX, space: 4 } },
         children: [
           new TextRun({ text: 'Page ', size: 16, color: '9CA3AF' }),
           new TextRun({ children: [PageNumber.CURRENT], size: 16, color: '9CA3AF' }),
@@ -1783,13 +1933,13 @@ async function markdownToDocxBytes(md: string, design: DocumentDesign = 'classiq
     styles: {
       default: {
         document: {
-          run: { font: 'Calibri', size: 22, color: INK_HEX },
+          run: { font: F_BODY, size: 22, color: INK_HEX },
           paragraph: { spacing: { line: 276 } },
         },
-        title: { run: { font: 'Calibri Light', size: 52, bold: true, color: '0F172A' } },
-        heading1: { run: { font: 'Calibri', size: 40, bold: true, color: '0F172A' }, paragraph: { spacing: { before: 320, after: 140 } } },
-        heading2: { run: { font: 'Calibri', size: 30, bold: true, color: '0F172A' }, paragraph: { spacing: { before: 280, after: 120 } } },
-        heading3: { run: { font: 'Calibri', size: 25, bold: true, color: '334155' }, paragraph: { spacing: { before: 220, after: 100 } } },
+        title: { run: { font: F_TITLE, size: 52, bold: true, color: INK_TITLE } },
+        heading1: { run: { font: F_BODY, size: 40, bold: true, color: INK_TITLE }, paragraph: { spacing: { before: 320, after: 140 } } },
+        heading2: { run: { font: F_BODY, size: 30, bold: true, color: INK_TITLE }, paragraph: { spacing: { before: 280, after: 120 } } },
+        heading3: { run: { font: F_BODY, size: 25, bold: true, color: INK_STRONG }, paragraph: { spacing: { before: 220, after: 100 } } },
       },
     },
     numbering: {
@@ -1941,12 +2091,20 @@ export type GeneratedDocumentFile = {
   name: string;
   size: number;
   content_type: string;
+  /** Documents-engine metadata — present when the SDR was persisted (the
+   *  workspace uses document_id to open the editor). */
+  document_id?: string;
+  doc_type?: string;
+  template?: string;
+  language?: string;
+  title?: string;
 };
 
 const CONTENT_TYPES: Record<string, string> = {
   pdf: 'application/pdf',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   html: 'text/html',
   md: 'text/markdown',
   txt: 'text/plain',
@@ -1959,23 +2117,56 @@ function sanitizeFilename(name: string): string {
   return cleaned || 'document.txt';
 }
 
+/** Resolve a template id into a converter theme (lazy import avoids a
+ *  cycle: templates/index has no imports back into this module). */
+async function resolveDocTheme(
+  templateId: string | null | undefined,
+  _design: DocumentDesign
+): Promise<DocTheme | undefined> {
+  if (!templateId) return undefined;
+  const { getTemplate } = await import('@/lib/documents/templates');
+  const tpl = getTemplate(templateId);
+  return { palette: tpl.palette, serif: tpl.typography.family === 'serif' };
+}
+
 /** Build the file bytes for one document block. Exported for previews and
  *  local verification harnesses. The block's design ("classique" default,
- *  "moderne" ultra-modern) selects the visual engine per format. */
+ *  "moderne" ultra-modern) selects the visual engine per format; a template
+ *  id (documents engine) recolors + re-styles the same engines. */
 export async function buildDocumentBytes(
   block: DocumentBlock
 ): Promise<{ bytes: Buffer; contentType: string; filename: string }> {
   const filename = sanitizeFilename(block.filename);
   const ext = (filename.split('.').pop() ?? '').toLowerCase();
   const design: DocumentDesign = block.design === 'moderne' ? 'moderne' : 'classique';
+  const theme = await resolveDocTheme(block.template, design);
   switch (ext) {
     case 'pdf':
-      return { bytes: Buffer.from(await markdownToPdfBytes(block.content, filename, design)), contentType: CONTENT_TYPES.pdf, filename };
+      return { bytes: Buffer.from(await markdownToPdfBytes(block.content, filename, design, theme)), contentType: CONTENT_TYPES.pdf, filename };
     case 'docx':
-      return { bytes: Buffer.from(await markdownToDocxBytes(block.content, design)), contentType: CONTENT_TYPES.docx, filename };
+      return { bytes: Buffer.from(await markdownToDocxBytes(block.content, design, theme)), contentType: CONTENT_TYPES.docx, filename };
     case 'xlsx':
     case 'xls':
-      return { bytes: Buffer.from(await markdownToXlsxBytes(block.content, design)), contentType: CONTENT_TYPES.xlsx, filename: filename.replace(/\.xls$/i, '.xlsx') };
+      return { bytes: Buffer.from(await markdownToXlsxBytes(block.content, design, theme)), contentType: CONTENT_TYPES.xlsx, filename: filename.replace(/\.xls$/i, '.xlsx') };
+    case 'pptx':
+    case 'ppt': {
+      // Presentations: the deck slides (markdown headings/bullets) drive a
+      // real PptxGenJS deck — one slide per section, themed by the template.
+      const { generatePptxBytes } = await import('@/lib/documents/generators/pptx-generator');
+      const { parseDocSlides } = await import('@/lib/documents/core/markdown-to-doc');
+      const { getTemplate } = await import('@/lib/documents/templates');
+      const tpl = getTemplate(block.template ?? (design === 'moderne' ? 'modern' : 'corporate'));
+      const { DocumentDocSchema } = await import('@/lib/documents/core/document-schema');
+      const slides = parseDocSlides(block.content);
+      const doc = DocumentDocSchema.parse({
+        title: block.content.match(/^\s*#\s+(.+)$/m)?.[1]?.trim() ?? filename.replace(/\.pptx?$/i, ''),
+        docType: 'presentation',
+        template: tpl.id,
+        blocks: [],
+        slides: slides.length ? slides : [{ title: '', bullets: [], layout: 'title' }],
+      });
+      return { bytes: Buffer.from(await generatePptxBytes(doc, tpl)), contentType: CONTENT_TYPES.pptx, filename: filename.replace(/\.ppt$/i, '.pptx') };
+    }
     case 'html': {
       let body = block.content;
       if (!/<html[\s>]/i.test(body)) {
@@ -2017,7 +2208,11 @@ export async function buildDocumentBytes(
   }
 }
 
-/** Persist a document block through the files pipeline → file card payload. */
+/** Persist a document block through the files pipeline → file card payload.
+ *  v3 (documents engine): the block is ALSO converted to a validated SDR
+ *  (Structured Document Representation) persisted in file.data.document —
+ *  the workspace reads/edits/exports from it — and the payload carries the
+ *  document metadata (document_id, docType, template) for the frontend. */
 export async function generateDocumentFile(
   user: ApiUser,
   block: DocumentBlock,
@@ -2039,6 +2234,48 @@ export async function generateDocumentFile(
   // same field RAG processing fills for uploads — so the ORIGINAL frontend
   // file modal's "Content" tab shows text instead of "No content".
   await updateFileData(id, { content: block.content });
+
+  // Documents engine: SDR + revision history riding the SAME file row.
+  // Failures are non-fatal — the downloadable file already exists.
+  let docMeta: Record<string, any> | null = null;
+  try {
+    const { markdownToDocument, createDocumentRevision } = await import(
+      '@/lib/documents/core/document-engine'
+    );
+    const ext = (filename.split('.').pop() ?? '').toLowerCase();
+    const doc = markdownToDocument(block.content, {
+      filename,
+      ext,
+      modern: block.design === 'moderne',
+      template: block.template,
+    });
+    // A template attribute resolved the template; when the block had none,
+    // markdownToDocument picked a type-appropriate default. The template's
+    // layout engine should ALSO drive the byte design when it disagrees —
+    // but bytes are already built; the workspace re-exports on demand with
+    // the resolved template anyway (export manager re-renders every time).
+    const revisions = createDocumentRevision(null, {
+      by: 'create',
+      title: doc.title,
+      blocks: doc.blocks,
+      sheets: doc.sheets,
+      slides: doc.slides,
+    });
+    await updateFileData(id, { document: doc, revisions });
+    docMeta = {
+      document_id: id,
+      doc_type: doc.docType,
+      template: doc.template,
+      language: doc.language,
+      title: doc.title,
+    };
+    console.log(
+      `[document-generation] SDR created — ${doc.docType}/${doc.template} · ${doc.blocks.length} blocks${doc.sheets?.length ? ` · ${doc.sheets.length} sheets` : ''}${doc.slides?.length ? ` · ${doc.slides.length} slides` : ''}`
+    );
+  } catch (e) {
+    console.error('[document-generation] SDR build failed (file still served)', e);
+  }
+
   const meta = (fileItem?.meta ?? {}) as Record<string, any>;
   return {
     type: 'file',
@@ -2047,6 +2284,7 @@ export async function generateDocumentFile(
     name: meta.name ?? filename,
     size: bytes.length,
     content_type: meta.content_type ?? contentType,
+    ...(docMeta ?? {}),
   };
 }
 

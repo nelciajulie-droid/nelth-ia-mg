@@ -30,7 +30,7 @@
                 <!-- Cache-busted (?v=) — guarantees every browser drops any stale
                      loader.js/custom.css from earlier iterations and always runs
                      the current citation-panel + app-picker + favicon code. -->
-                <script src="/static/loader.js?v=20261110c1" defer crossorigin="use-credentials"></script>
+                <script src="/static/loader.js?v=20261112a1" defer crossorigin="use-credentials"></script>
                 <!-- Pont Google un-clic : intercepte le clic « Continue with Google »
                      et ouvre le popup Firebase directement (voir google-bridge.js). -->
                 <script src="/static/google-bridge.js?v=2026111901" defer></script>
@@ -42,6 +42,11 @@
                      v=20261111a2 — ligne de séparation remplacée par un fondu
                      translucide flouté (suit le thème clair/sombre). -->
                 <script src="/static/images-bridge.js?v=20261112a1" defer></script>
+                <!-- Documents : cartes premium dans le chat + workspace
+                     d'édition (voir documents-bridge.js — le bundle React
+                     /static/documents/ est chargé en lazy au premier open).
+                     v=20261112a1 — première livraison. -->
+                <script src="/static/documents-bridge.js?v=20261112a1" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->

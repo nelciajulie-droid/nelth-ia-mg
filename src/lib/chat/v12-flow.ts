@@ -2525,13 +2525,55 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         );
         return { content: sanitizeCitationMarkers(safeContent), files: [] };
       }
+      // Premium document-generation status (workspace card animation): the
+      // conversion pipeline runs inside this request; the phase labels give
+      // the chat UI a live "building the document" state instead of a silent
+      // gap between the finished text and the file card.
+      await emit({
+        type: 'status',
+        data: {
+          action: 'document_generation',
+          description:
+            blocks.length > 1
+              ? `Generating documents · ${blocks.length} fichiers`
+              : `Generating document · ${blocks[0].filename}`,
+          done: false,
+        },
+      });
       const files = await generateDocumentFiles(user, blocks, {
         chat_id: chatId || undefined,
         message_id: assistantMessageId ?? undefined,
         model: modelId,
       });
+      await emit({
+        type: 'status',
+        data: { action: 'document_generation', description: 'Documents prêts', done: true },
+      });
       if (!files.length) {
         return { content: sanitizeCitationMarkers(stripped), files: [] };
+      }
+      // Documents-engine envelopes: the workspace bridge upgrades the native
+      // file cards into premium document cards + opens the editor from these
+      // (the SPA's own dispatcher ignores the unknown type — pure additive).
+      const docFiles = files.filter((f) => f.document_id);
+      for (const f of docFiles) {
+        await emit({
+          type: 'chat:message:document',
+          data: {
+            document: {
+              id: f.document_id,
+              file_id: f.id,
+              title: f.title ?? f.name,
+              doc_type: f.doc_type ?? 'other',
+              template: f.template ?? 'corporate',
+              language: f.language ?? 'fr',
+              format: (f.name.split('.').pop() ?? '').toLowerCase(),
+              filename: f.name,
+              url: f.url,
+              size: f.size,
+            },
+          },
+        });
       }
       return { content: sanitizeCitationMarkers(stripped), files };
     } catch (e) {

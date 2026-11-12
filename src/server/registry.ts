@@ -20,6 +20,7 @@ import { routes as foldersRoutes } from './routers/folders';
 import { routes as modelsRoutes } from './routers/models';
 import { routes as openaiRoutes } from './routers/openai';
 import { routes as filesRoutes } from './routers/files';
+import { routes as documentsRoutes } from './routers/documents';
 import { routes as knowledgeRoutes } from './routers/knowledge';
 import { routes as retrievalRoutes } from './routers/retrieval';
 import { routes as tasksRoutes } from './routers/tasks';
@@ -79,6 +80,7 @@ export const V1_MOUNTS: Mount[] = [
   { name: 'folders', routes: foldersRoutes },
   { name: 'groups', routes: groupsRoutes },
   { name: 'files', routes: filesRoutes },
+  { name: 'documents', routes: documentsRoutes }, // Nelth-AI documents workspace (/api/v1/documents/*)
   { name: 'functions', routes: functionsRoutes },
   { name: 'evaluations', routes: evaluationsRoutes },
   { name: 'analytics', routes: analyticsRoutes },

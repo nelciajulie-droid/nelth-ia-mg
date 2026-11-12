@@ -1212,6 +1212,13 @@ html.nsrc-lock{overflow:hidden}
                 everTruncated = true;
                 continue;
               }
+              // Documents bridge tap: every envelope is offered to registered
+              // listeners BEFORE the app sees it (chat:message:document lives
+              // outside the compiled dispatcher's vocabulary). Cheap no-op
+              // when no listener registered.
+              if (typeof window.__nelthEventTap === 'function') {
+                try { window.__nelthEventTap(env); } catch (e) { /* bridge bug — never the app's */ }
+              }
               // Withhold the truncated round's done event — superseded by the
               // continuation chain (or the bare-done fallback below).
               if (truncated && t === 'chat:completion' && env.data.data && env.data.data.done) {
