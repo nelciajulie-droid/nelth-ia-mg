@@ -275,6 +275,79 @@ function filenameAttr(info: string): string | null {
   return m ? m[1].trim() : null;
 }
 
+// ---------------------------------------------------------------------------
+// Fence repair (weak-model artifacts — THE most common extraction failure)
+// ---------------------------------------------------------------------------
+
+/** Free gateway models frequently end a ```document block with a tool-call
+ *  artifact (`</parameter>`, `<parameter name="…">`) instead of the closing
+ *  ``` fence — observed on dots-3-note — leaving the block UNTERMINATED, so
+ *  FENCE_RE matches nothing: no file card, no quality pass, the raw markdown
+ *  stays inline in the chat. This deterministic repair closes such fences. */
+const TOOLCALL_ARTIFACT_RE = /^<\/?(?:parameter|tool_call|function_call|tool)\b[^>]*>$/i;
+/** Opener with 3-5 backticks (models copy the ````document nested-fence
+ *  notation from the capability prompt literally — normalize to three). */
+const FENCE_OPENER_LINE_RE = /^(`{3,5})([a-zA-Z0-9_-]+)?(?:[ \t]+([^\n]*))?[ \t]*$/;
+const PLAIN_CLOSER_LINE_RE = /^`{3,}[ \t]*$/;
+
+/** A line that opens a DOCUMENT fence (doc tags always; html/md/txt/csv/json
+ *  only with a filename attribute). Returns the normalized 3-backtick line. */
+function docOpenerLine(line: string): string | null {
+  const m = line.match(FENCE_OPENER_LINE_RE);
+  if (!m) return null;
+  const tag = (m[2] ?? '').toLowerCase();
+  const info = (m[3] ?? '').trim();
+  const isDoc =
+    ALWAYS_DOC_TAGS.has(tag) || (DOC_TAGS_WITH_FILENAME.has(tag) && !!filenameAttr(info));
+  if (!isDoc) return null;
+  return '```' + tag + (info ? ' ' + info : '');
+}
+
+/** Close unterminated document fences + drop tool-call artifacts so
+ *  extractDocumentBlocks sees well-formed blocks. Line-based state machine
+ *  mirroring FENCE_RE semantics (first plain ``` closes; nested tagged fences
+ *  inside the body ride through). Exported for tests. */
+export function repairUnterminatedDocFences(content: string): string {
+  if (!content.includes('```')) return content;
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const out: string[] = [];
+  let open = false;
+  for (const line of lines) {
+    // While inside a document fence, a full-line tool-call artifact ends the
+    // document (the model "closed its tool call" instead of the fence).
+    if (open && TOOLCALL_ARTIFACT_RE.test(line.trim())) {
+      out.push('```');
+      open = false;
+      continue;
+    }
+    if (open) {
+      if (PLAIN_CLOSER_LINE_RE.test(line)) {
+        out.push('```');
+        open = false;
+        continue;
+      }
+      const opener = docOpenerLine(line);
+      if (opener) {
+        // A second document opener while one is open — close the previous.
+        out.push('```');
+        out.push(opener);
+        continue; // stays open
+      }
+      out.push(line);
+      continue;
+    }
+    const opener = docOpenerLine(line);
+    if (opener) {
+      open = true;
+      out.push(opener);
+      continue;
+    }
+    out.push(line);
+  }
+  if (open) out.push('```'); // EOF with the fence still open — close it
+  return out.join('\n');
+}
+
 /** Extract document blocks. Accepted shapes (models do not always follow the
  *  ```document instructions — some emit ```xlsx / ```pdf instead):
  *   ```document filename="CV.pdf"      → always a document
@@ -304,6 +377,11 @@ export function extractDocumentBlocks(
   const extract = opts?.extract !== false;
   const blocks: DocumentBlock[] = [];
   const replacements: { start: number; end: number; text: string }[] = [];
+  // Weak-model repair FIRST: unterminated document fences (closed with a
+  // </parameter> tool-call artifact or plain EOF) never match FENCE_RE — the
+  // block would be lost (no file card, no quality pass). This normalizes
+  // 4+-backtick openers too, and leaves well-formed content byte-identical.
+  content = repairUnterminatedDocFences(content);
   FENCE_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = FENCE_RE.exec(content)) !== null) {

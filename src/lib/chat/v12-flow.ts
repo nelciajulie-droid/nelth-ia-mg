@@ -2525,6 +2525,56 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         );
         return { content: sanitizeCitationMarkers(safeContent), files: [] };
       }
+      // PREMIUM QUALITY PASS (ChatGPT-grade documents): the draft was written
+      // inline by the CHAT model (often the standard free model, 16B active)
+      // — a thin skeleton. Before conversion, every enhanceable block is
+      // REWRITTEN by the strong reasoning model (55B active) with the
+      // senior-document-writer specialist prompt. The pass is non-regressive
+      // (gate failures keep the draft) and time-boxed against the serverless
+      // budget: when the turn already consumed most of the 300s window the
+      // pass is skipped so persistAssistant can never be killed by Vercel.
+      let finalBlocks = blocks;
+      try {
+        const { enhanceDocumentBlocks } = await import(
+          '@/lib/documents/editing/document-quality'
+        );
+        const elapsedMs = Date.now() - flowT0;
+        // Reserve ~40s for conversion + persistence + socket flush.
+        const usableBudgetMs = 260_000 - elapsedMs;
+        if (usableBudgetMs >= 60_000) {
+          await emit({
+            type: 'status',
+            data: {
+              action: 'document_generation',
+              description:
+                blocks.length > 1
+                  ? `Rédaction experte · ${blocks.length} documents`
+                  : `Rédaction experte · ${blocks[0].filename}`,
+              done: false,
+            },
+          });
+          const { blocks: enhanced, stats } = await enhanceDocumentBlocks(blocks, {
+            userRequest: rawLastUserText || undefined,
+            budgetMs: Math.min(150_000, usableBudgetMs),
+          });
+          finalBlocks = enhanced;
+          const applied = stats.filter((s) => s.applied);
+          console.log(
+            `[document-quality] pass done in ${Math.round((Date.now() - flowT0 - elapsedMs) / 1000)}s — ` +
+              (applied.length
+                ? `expert rewrite applied: ${applied
+                    .map((s) => `${s.filename} ${s.draftChars}→${s.finalChars} chars (${s.ms}ms)`)
+                    .join(' · ')}`
+                : `draft kept (${stats.map((s) => `${s.filename}: ${s.reason ?? 'ok'}`).join(' · ')})`)
+          );
+        } else {
+          console.log(
+            `[document-quality] pass SKIPPED — ${Math.round(elapsedMs / 1000)}s already elapsed (budget protection)`
+          );
+        }
+      } catch (e) {
+        console.error('[document-quality] pass error — serving the chat draft', e);
+      }
       // Premium document-generation status (workspace card animation): the
       // conversion pipeline runs inside this request; the phase labels give
       // the chat UI a live "building the document" state instead of a silent
@@ -2534,13 +2584,13 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         data: {
           action: 'document_generation',
           description:
-            blocks.length > 1
-              ? `Generating documents · ${blocks.length} fichiers`
-              : `Generating document · ${blocks[0].filename}`,
+            finalBlocks.length > 1
+              ? `Generating documents · ${finalBlocks.length} fichiers`
+              : `Generating document · ${finalBlocks[0].filename}`,
           done: false,
         },
       });
-      const files = await generateDocumentFiles(user, blocks, {
+      const files = await generateDocumentFiles(user, finalBlocks, {
         chat_id: chatId || undefined,
         message_id: assistantMessageId ?? undefined,
         model: modelId,
