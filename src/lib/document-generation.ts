@@ -2098,6 +2098,11 @@ export type GeneratedDocumentFile = {
   template?: string;
   language?: string;
   title?: string;
+  /** INTERNAL — never persisted nor emitted: the self-contained ```html
+   *  code-preview artifact body for this document. The chat flow appends it
+   *  to the assistant message content (the SPA's native artifacts panel
+   *  renders it), then strips it from the file payload. */
+  artifact_html?: string;
 };
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -2238,6 +2243,7 @@ export async function generateDocumentFile(
   // Documents engine: SDR + revision history riding the SAME file row.
   // Failures are non-fatal — the downloadable file already exists.
   let docMeta: Record<string, any> | null = null;
+  let artifact_html: string | null = null;
   try {
     const { markdownToDocument, createDocumentRevision } = await import(
       '@/lib/documents/core/document-engine'
@@ -2262,6 +2268,16 @@ export async function generateDocumentFile(
       slides: doc.slides,
     });
     await updateFileData(id, { document: doc, revisions });
+    // Code-preview artifact: the document rides the SPA's NATIVE artifacts
+    // system (```html block in the message → Artifacts panel) instead of a
+    // parallel workspace-only preview. The toolbar inside it (downloads +
+    // atelier) talks to the documents bridge through postMessage.
+    try {
+      const { buildArtifactHtml } = await import('@/lib/documents/preview/artifact-html');
+      artifact_html = buildArtifactHtml(doc, { documentId: id });
+    } catch (e) {
+      console.error('[document-generation] artifact html build failed', e);
+    }
     docMeta = {
       document_id: id,
       doc_type: doc.docType,
@@ -2285,6 +2301,7 @@ export async function generateDocumentFile(
     size: bytes.length,
     content_type: meta.content_type ?? contentType,
     ...(docMeta ?? {}),
+    ...(artifact_html ? { artifact_html } : {}),
   };
 }
 

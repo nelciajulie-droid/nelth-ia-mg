@@ -2575,12 +2575,41 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           },
         });
       }
-      return { content: sanitizeCitationMarkers(stripped), files };
+      // Code-preview artifacts: every documents-engine doc rides the SPA's
+      // NATIVE artifacts system — its self-contained html body is appended to
+      // the persisted message content (```html fence), where the compiled
+      // frontend's artifacts parser picks it up (Preview button on the code
+      // block + right-hand Artifacts panel with version navigation). The
+      // html never reaches the NEXT turn's LLM context: llm_content keeps the
+      // raw ```document blocks (see persistAssistant).
+      let artifactAppendix = '';
+      for (const f of files) {
+        if (f.document_id && typeof f.artifact_html === 'string' && f.artifact_html) {
+          artifactAppendix += `\n\n\`\`\`html\n${f.artifact_html}\n\`\`\``;
+        }
+      }
+      if (artifactAppendix) {
+        console.log(
+          `[v12-flow] doc artifact(s) attached — ${artifactAppendix.length} chars of html appended to the message`
+        );
+      }
+      return { content: sanitizeCitationMarkers(stripped) + artifactAppendix, files };
     } catch (e) {
       console.error('[v12-flow] document generation failed', e);
       return { content: safeContent, files: [] };
     }
   };
+
+  /** File payloads crossing the API boundary never carry the internal
+   *  artifact_html field (it lives in the message content instead). */
+  const stripArtifactHtml = (files: any[]): any[] =>
+    (files ?? []).map((f) => {
+      if (f && typeof f === 'object' && 'artifact_html' in f) {
+        const { artifact_html, ...rest } = f;
+        return rest;
+      }
+      return f;
+    });
 
   // ------------------------------------------------------- 5a. Non-streaming
   if (!(form.stream ?? false)) {
@@ -2792,20 +2821,21 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const rawContent = content;
     const docResult = await processGeneratedDocuments(content);
     content = docResult.content;
+    const cleanFiles = stripArtifactHtml(docResult.files);
     if (data?.choices?.[0]?.message) data.choices[0].message.content = content;
-    if (docResult.files.length) data.files = docResult.files;
+    if (cleanFiles.length) data.files = cleanFiles;
 
     await persistAssistant(
       content,
       data?.usage ?? null,
       true,
       reasoningOutput.length ? reasoningOutput : null,
-      docResult.files.length ? docResult.files : null,
+      cleanFiles.length ? cleanFiles : null,
       rawContent
     );
     if (sessionId && chatId) {
-      if (docResult.files.length) {
-        await emit({ type: 'chat:message:files', data: { files: docResult.files } });
+      if (cleanFiles.length) {
+        await emit({ type: 'chat:message:files', data: { files: cleanFiles } });
       }
       await clearThinkingStatus(); // non-streaming: content arrives whole
       await emit({
@@ -3767,6 +3797,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     const rawFinalContent = finalContent;
     const docResult = await processGeneratedDocuments(finalContent);
     finalContent = docResult.content;
+    const cleanFiles = stripArtifactHtml(docResult.files);
     if (finalOutput?.length) {
       // Keep structured output items in sync with the cleaned content.
       finalOutput = finalOutput.map((item: any) =>
@@ -3775,8 +3806,8 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           : item
       );
     }
-    if (docResult.files.length) {
-      await emit({ type: 'chat:message:files', data: { files: docResult.files } });
+    if (cleanFiles.length) {
+      await emit({ type: 'chat:message:files', data: { files: cleanFiles } });
     }
 
     await persistAssistant(
@@ -3784,7 +3815,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       usage,
       true,
       finalOutput,
-      docResult.files.length ? docResult.files : null,
+      cleanFiles.length ? cleanFiles : null,
       rawFinalContent
     );
     finishTask();
@@ -3804,7 +3835,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         ...(finalOutput
           ? { output: finalOutput, content: finalContent }
           : { content: finalContent }),
-        ...(docResult.files.length ? { files: docResult.files } : {}),
+        ...(cleanFiles.length ? { files: cleanFiles } : {}),
         ...(title ? { title } : {}),
         ...(usage ? { usage } : {}),
         ...(webCitations ? { sources: webCitations } : {}),

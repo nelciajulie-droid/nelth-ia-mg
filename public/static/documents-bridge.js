@@ -1,22 +1,32 @@
 /*
- * Nelth-AI Documents — bridge SPA (cartes de chat + workspace).
+ * Nelth-AI Documents — bridge SPA (cartes de chat + artefact aperçu code).
  *
  * ARCHITECTURE (même philosophie que loader.js / images-bridge.js — le SPA
  * Svelte compilé reste INTACT) :
  *
- *  1. CARTES DOCUMENT dans la conversation — TROIS chemins complémentaires
+ *  1. ARTEFACT APERÇU CODE (le SYSTÈME NATIF du SPA) : chaque document
+ *     généré est livré comme bloc ```html dans le message — le panneau
+ *     Artifacts du SPA l'affiche (bouton « Preview » du bloc, versions,
+ *     plein écran, téléchargement html natif). La barre d'outils DANS
+ *     l'artefact (téléchargements multi-formats + « Modifier ») parle au
+ *     pont par postMessage (iframe sandboxée, origine opaque).
+ *
+ *  2. CARTES DOCUMENT dans la conversation — TROIS chemins complémentaires
  *     de découverte (le même rendu final converge vers attachDocCard) :
  *     a. TAP SSE (transport serverless) : window.__nelthEventTap (loader.js
  *        readEvents) voit `chat:message:document` + `status`
  *        (document_generation) AVANT l'app compilée — carte animée pendant
- *        la génération, carte document au dépôt.
+ *        la génération, carte document au dépôt + ouverture du panneau
+ *        d'artefacts natif en fin de tour.
  *     b. POST /api/chat/completions (transport socket) : le wrapper fetch
  *        re-décharge le chat après la réponse — les fichiers persistés
  *        (message.files avec document_id) deviennent des cartes premium.
  *     c. NAVIGATION / historique : le chat actif (/c/{id}) est suivi (hook
  *        pushState + popstate) et chaque conversation ouverte est scannée.
  *
- *  2. WORKSPACE (overlay React autonome) :
+ *  3. ATELIER D'ÉDITION (overlay React autonome — un élément AJOUTÉ, pas le
+ *     canal d'aperçu) : « Modifier » sur la carte ou dans la barre d'outils
+ *     de l'artefact l'ouvre.
  *     • Desktop ≥1024px : panneau ancré à droite (min(880px, 72vw)) —
  *       #chat-container anime sa marge droite (même mécanique que le
  *       panneau Sources de loader.js) : la conversation RESTE visible.
@@ -27,9 +37,10 @@
  *       bundle, window.__nelthDocsBridge { open/close/isOpen } côté bridge
  *       (le bouton retour du workspace appelle le bridge).
  *
- *  3. TÉLÉCHARGEMENT : la carte expose « Télécharger » (fichier original
- *     /api/v1/files/{id}/content) ; le workspace propose TOUS les formats
- *     via /api/v1/documents/{id}/export?format=…
+ *  4. TÉLÉCHARGEMENT : la barre d'outils de l'artefact expose TOUS les
+ *     formats via /api/v1/documents/{id}/export?format=… (postMessage →
+ *     fetch authentifié) ; la carte propose le fichier d'origine
+ *     /api/v1/files/{id}/content.
  */
 (() => {
   'use strict';
@@ -37,8 +48,11 @@
 
   // Versionnée : garantit que les navigateurs laissent tomber un ancien
   // bundle après une mise à jour (les artefacts sont committés dans public/).
-  // 20261112a1 — première livraison : cartes chat + workspace + exports.
-  const BUILD = '20261112a1';
+  // 20261113a1 — les documents passent par l'ARTEFACT APERÇU CODE natif du
+  // SPA (bloc ```html + panneau Artifacts) ; la barre d'outils de l'artefact
+  // (téléchargements + atelier) parle au pont par postMessage ; la carte
+  // gagne « Modifier » et son action principale devient « Aperçu » natif.
+  const BUILD = '20261113a1';
   const SCRIPT_URL = '/static/documents/main.js?v=' + BUILD;
   const CSS_URL = '/static/documents/app.css?v=' + BUILD;
 
@@ -141,6 +155,110 @@
       });
   }
 
+  // ------------------------------------------------ artefact aperçu code
+  // Les documents générés empruntent le SYSTÈME D'ARTEFACTS NATIF du SPA :
+  // un bloc ```html dans le message devient un aperçu dans le panneau
+  // Artifacts (bouton « Preview » du bloc de code). Le pont se contente
+  // d'AJOUTER les éléments documents : barre d'outils de l'artefact
+  // (téléchargements multi-formats + atelier) via postMessage, cartes de
+  // chat, et ouverture du panneau natif à la fin d'un tour de génération.
+
+  /** Le panneau natif est-il ouvert ? (démonté quand fermé) */
+  function nativeArtifactsOpen() {
+    return !!document.getElementById('artifacts-container');
+  }
+
+  /** Clique le bouton « Preview » du bloc html du message — ouvre le panneau
+   *  natif sur LA version de ce document. Retourne false si introuvable. */
+  function openNativeArtifacts(msgEl) {
+    try {
+      if (!msgEl) return false;
+      const btn = Array.from(msgEl.querySelectorAll('button')).find(
+        (b) => /^(preview|aper[uç]u)$/i.test((b.textContent || '').trim())
+      );
+      if (btn) {
+        btn.click();
+        return true;
+      }
+    } catch (e) {
+      /* le SPA reste maître */
+    }
+    return false;
+  }
+
+  const msgElOf = (el) => (el ? el.closest('[id^="message-"]') : null);
+
+  /** Ouvre le document dans le panneau d'artefacts natif ; repli atelier. */
+  function previewDocument(docId, fromEl) {
+    if (openNativeArtifacts(msgElOf(fromEl))) return;
+    open(docId); // repli : workspace d'édition
+  }
+
+  /** Hôte postMessage de la barre d'outils de l'artefact (iframe sandboxée,
+   *  origine opaque → elle ne peut PAS appeler l'API elle-même). */
+  window.addEventListener('message', (e) => {
+    try {
+      const payload = e.data && e.data.nelthDocArtifact;
+      if (!payload || typeof payload.docId !== 'string') return;
+      const docId = payload.docId;
+      if (payload.action === 'edit') {
+        open(docId);
+        return;
+      }
+      if (payload.action === 'image') {
+        // Image locale protégée de l'artefact → relue en data-URL authentifiée.
+        const url = String(payload.url || '');
+        const seq = Number(payload.seq) || 0;
+        const reply = (dataUrl) => {
+          try {
+            e.source && e.source.postMessage({ nelthDocArtifactImage: { seq: seq, dataUrl: dataUrl || null } }, '*');
+          } catch (err) {
+            /* iframe partie */
+          }
+        };
+        if (!seq || !url.startsWith('/')) {
+          // chemins relatifs same-origin uniquement (jamais d'URL externe)
+          reply(null);
+          return;
+        }
+        fetch(url, { headers: authHeaders() })
+          .then((r) => {
+            if (!r.ok) throw new Error(String(r.status));
+            return r.blob();
+          })
+          .then(
+            (blob) =>
+              new Promise((resolve) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(fr.result);
+                fr.onerror = () => resolve(null);
+                fr.readAsDataURL(blob);
+              })
+          )
+          .then(reply)
+          .catch(() => reply(null));
+        return;
+      }
+      if (payload.action === 'download') {
+        const fmt = String(payload.format || '').toLowerCase();
+        if (!/^(pdf|docx|xlsx|pptx|csv|md|txt)$/.test(fmt)) return;
+        resolveDocument(docId).then((data) => {
+          const title =
+            (data && data.document && data.document.title) || 'document';
+          const safe =
+            title.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim() ||
+            'document';
+          downloadFile(
+            '/api/v1/documents/' + encodeURIComponent(docId) + '/export?format=' + fmt,
+            safe + '.' + fmt
+          );
+        });
+      }
+    } catch (err) {
+      /* un bug du pont ne doit JAMAIS casser l'app hôte */
+    }
+  });
+
   // ------------------------------------------------------------------ style
 
   const style = document.createElement('style');
@@ -148,7 +266,7 @@
 /* ============================================================= CARTE CHAT */
 .ndocs-gen{display:flex;align-items:center;gap:10px;width:min(100%,320px);margin:8px 0 2px;
   padding:10px 14px;border-radius:14px;border:1px solid #e7e7e7;background:#fafafa;
-  font-size:13px;color:#5f5f5f;overflow:hidden;position:relative}
+  font-size:13px;color:#5f5f5f;overflow:hidden;position:relative;align-self:flex-start}
 .dark .ndocs-gen{background:#282828;border-color:#3d3d3d;color:#b4b4b4}
 .ndocs-gen-dot{width:8px;height:8px;border-radius:99px;background:currentColor;flex-shrink:0;
   animation:ndocs-pulse 1.2s ease-in-out infinite}
@@ -164,7 +282,7 @@
 .ndocs-card{display:flex;gap:14px;width:min(100%,430px);margin:10px 0 4px;padding:12px;
   border-radius:16px;border:1px solid #e7e7e7;background:#ffffff;cursor:pointer;
   transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease;
-  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  box-shadow:0 1px 2px rgba(0,0,0,.04);align-self:flex-start}
 .ndocs-card:hover{border-color:#d6d6d6;box-shadow:0 6px 22px rgba(0,0,0,.09);transform:translateY(-1px)}
 .ndocs-card:focus-visible{outline:2px solid #0F6B61;outline-offset:2px}
 .dark .ndocs-card{background:#2b2b2b;border-color:rgba(255,255,255,.07)}
@@ -405,9 +523,14 @@ html.ndocs-lock{overflow:hidden}
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 22s8-4 10-10 10-10 10-10"/><path d="M8.5 8.5 2 22l13.5-6.5"/></svg>',
     download:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+    edit:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>',
   };
 
-  /** Carte premium d'un document (métadonnée du file payload ou de l'API). */
+  /** Carte premium d'un document (métadonnée du file payload ou de l'API).
+   *  Actions : « Aperçu » ouvre le document dans le PANNEAU D'ARTEFACTS
+   *  NATIF du SPA (même surface que l'aperçu de code) ; « Modifier » ouvre
+   *  l'atelier d'édition ; « Télécharger » récupère le fichier d'origine. */
   function buildCard(doc) {
     const card = document.createElement('div');
     card.className = 'ndocs-card ndocs-appear';
@@ -419,7 +542,7 @@ html.ndocs-lock{overflow:hidden}
     const typeLabel = doc.typeLabel || TYPE_LABELS[doc.doc_type] || 'Document';
     const format = String(doc.format || (doc.filename || '').split('.').pop() || '').toUpperCase();
     const templateLabel = TEMPLATE_LABELS[doc.template] || doc.template || '';
-    card.setAttribute('aria-label', 'Ouvrir le document ' + title);
+    card.setAttribute('aria-label', 'Aperçu du document ' + title);
     card.innerHTML =
       '<div class="ndocs-thumb" aria-hidden="true">' +
       '<div class="ndocs-thumb-accent" style="background:' + accent + '"></div>' +
@@ -433,7 +556,8 @@ html.ndocs-lock{overflow:hidden}
       (fmtSize(doc.size) ? '<span class="ndocs-dot">·</span><span></span>' : '') +
       '</div>' +
       '<div class="ndocs-actions">' +
-      '<button type="button" class="ndocs-btn ndocs-btn-primary">' + ICONS.open + '<span>Ouvrir</span></button>' +
+      '<button type="button" class="ndocs-btn ndocs-btn-primary">' + ICONS.open + '<span>Aperçu</span></button>' +
+      '<button type="button" class="ndocs-btn ndocs-btn-edit">' + ICONS.edit + '<span>Modifier</span></button>' +
       '<button type="button" class="ndocs-btn">' + ICONS.download + '<span>Télécharger</span></button>' +
       '</div></div>';
     card.querySelector('.ndocs-thumb-title').textContent = title;
@@ -447,16 +571,20 @@ html.ndocs-lock{overflow:hidden}
 
     const docId = doc.id || doc.file_id;
     const fileUrl = doc.url || '/api/v1/files/' + encodeURIComponent(docId) + '/content';
-    const openIt = (e) => {
+    const previewIt = (e) => {
+      e.stopPropagation();
+      previewDocument(docId, card);
+    };
+    card.addEventListener('click', previewIt);
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') previewIt(e);
+    });
+    card.querySelector('.ndocs-btn-primary').addEventListener('click', previewIt);
+    card.querySelector('.ndocs-btn-edit').addEventListener('click', (e) => {
       e.stopPropagation();
       open(docId);
-    };
-    card.addEventListener('click', openIt);
-    card.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') openIt(e);
     });
-    card.querySelector('.ndocs-btn-primary').addEventListener('click', openIt);
-    card.querySelector('.ndocs-btn:not(.ndocs-btn-primary)').addEventListener('click', (e) => {
+    card.querySelector('.ndocs-btn:not(.ndocs-btn-primary):not(.ndocs-btn-edit)').addEventListener('click', (e) => {
       e.stopPropagation();
       downloadFile(fileUrl, doc.filename || title);
     });
@@ -494,6 +622,30 @@ html.ndocs-lock{overflow:hidden}
   // ------------------------------------------------- (a) TAP SSE (live)
 
   const genCards = new Map(); // message_id → element
+  /** Messages dont le panneau d'artefacts natif a déjà été demandé. */
+  const nativeOpenedFor = new Set();
+
+  /** Fin d'un tour de génération de document : ouvre le document dans le
+   *  PANNEAU D'ARTEFACTS NATIF (même surface que l'aperçu de code) dès que
+   *  le bloc html est tombé dans le message (l'événement done remplace le
+   *  contenu juste après les événements document). Repli : rien — les cartes
+   *  et le bouton « Preview » du bloc restent là. */
+  function scheduleNativeOpen(messageId) {
+    if (!messageId || nativeOpenedFor.has(messageId)) return;
+    nativeOpenedFor.add(messageId);
+    const attempts = [500, 1400, 2600, 4200];
+    attempts.forEach((delay) => {
+      setTimeout(() => {
+        try {
+          if (nativeArtifactsOpen()) return;
+          openNativeArtifacts(messageEl(messageId));
+        } catch (e) {
+          /* le SPA reste maître */
+        }
+      }, delay);
+    });
+  }
+
   function showGenerating(messageId, label) {
     const msgEl = messageEl(messageId);
     if (!msgEl) return;
@@ -569,6 +721,7 @@ html.ndocs-lock{overflow:hidden}
         };
         if (!tryAttach()) setTimeout(tryAttach, 350);
         setTimeout(tryAttach, 1200);
+        scheduleNativeOpen(messageId);
       }
     } catch (e) {
       /* un bug du bridge ne doit JAMAIS casser l'app hôte */
