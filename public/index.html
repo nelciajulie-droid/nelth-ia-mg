@@ -133,6 +133,13 @@
                      l'invité est anonyme, ses discussions ne sont pas
                      enregistrées. -->
                 <script src="/static/guest-bridge.js?v=20270108a2" defer></script>
+                <!-- Mode vocal temps réel (parité ChatGPT Advanced Voice) :
+                     micro → VAD (silero, distant) → STT sherpa-onnx distant →
+                     Nemotron (Kilo) → TTS Edge (serveur) ; overlay orb-ui DANS
+                     la zone centrale (sidebar visible), bouton « × » mobile
+                     retour au chat. Aucune inférence navigateur — voir
+                     voice-bridge.js + src/lib/voice/* + mini-services/stt-service. -->
+                <script src="/static/voice-bridge.js?v=20270108a2" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->
