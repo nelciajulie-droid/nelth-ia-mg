@@ -10,8 +10,11 @@ export const STT_REMOTE_URL = (process.env.STT_REMOTE_URL || 'http://127.0.0.1:3
 /** Shared secret between the Vercel backend and the STT host. */
 export const STT_AUTH_SECRET = process.env.STT_AUTH_SECRET || '';
 
-/** Mandated STT model identifier (kept for reporting/switching when a
- * sherpa-onnx ONNX artifact ships — see stt-service /info note). */
+/** Mandated STT model — nvidia/nemotron-3.5-asr-streaming-0.6b, now REALLY
+ *  served by the remote STT host through the OFFICIAL k2-fsa export
+ *  (560ms INT8, scripts/nemo/nemotron-3.5-asr-streaming-0.6b). The
+ *  previously tested zipformers remain available via STT_ENGINE=zipformer
+ *  on the service host. */
 export const STT_MODEL = process.env.STT_MODEL || 'nvidia/nemotron-3.5-asr-streaming-0.6b';
 export const STT_MODEL_PRECISION = process.env.STT_MODEL_PRECISION || 'int8';
 

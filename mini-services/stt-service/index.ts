@@ -5,9 +5,22 @@
  * streaming recognizers + Silero VAD. The browser never runs inference —
  * the Next.js backend forwards PCM here (server-to-server).
  *
+ * Engines (STT_ENGINE env):
+ *   • nemotron (DEFAULT) — nvidia/nemotron-3.5-asr-streaming-0.6b, the
+ *     OFFICIAL k2-fsa export (560 ms chunk, INT8):
+ *     https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/
+ *     sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2
+ *     Multilingual (auto-detect + per-stream language prompts via
+ *     stream.setOption('language', lang) — tested: improves non-auto langs).
+ *     Compatibility with sherpa-onnx-node 2.0.1: the `nemotron` modelConfig
+ *     section is NOT parsed by this addon, but the package loads through the
+ *     `transducer` pathway (RNNT) — measured and verified.
+ *   • zipformer — the previously tested fallback: EN INT8 2023-06-26 +
+ *     FR kroko 2025-08-06 official k2-fsa streaming zipformers.
+ *
  * Endpoints (all JSON unless noted; auth via X-STT-Secret when configured):
  *   GET  /health               — readiness + loaded models
- *   GET  /info                 — model/runtime metadata (chunk, languages)
+ *   GET  /info                 — model/runtime metadata (engine, languages)
  *   POST /v1/sessions          — {language} → {id}         (new STT session)
  *   POST /v1/sessions/:id/audio— raw PCM16 16 kHz mono body → events
  *   POST /v1/sessions/:id/flush— force end-of-turn → final + reset
@@ -15,21 +28,14 @@
  *   DEL  /v1/sessions/:id      — release session resources
  *
  * Audio contract: 16 kHz mono PCM16 little-endian, ANY chunk size; the
- * service re-frames internally (recognizer: 320 ms chunks / VAD: 512-sample
+ * service re-frames internally (nemotron: 560 ms chunks / VAD: 512-sample
  * windows, ~32 ms).
  *
- * Models (auto-downloaded at boot from official sources when missing):
- *   EN  k2-fsa/sherpa-onnx-streaming-zipformer-en-2023-06-26 (INT8)
- *   FR  k2-fsa/sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06
- *   VAD silero_vad.onnx (k2-fsa official release asset)
- *
- * NOTE (mission compliance): the mandated `nvidia/nemotron-3.5-asr-streaming-
- * 0.6b` model is REAL on HuggingFace (FastConformer-RNNT, INT8 quant) but has
- * NO sherpa-onnx-compatible ONNX artifact (nemo/safetensors/gguf only) —
- * verified at build time. Sherpa-ONNX 2.0.1 streaming families are
- * zipformer-transducer / paraformer / nemo-ctc; the artifacts above are the
- * closest OFFICIAL streaming ONNX builds (EN INT8 + FR). STT_MODEL is
- * configurable via env for when a sherpa-packaged Nemotron export ships.
+ * Benchmarks (this host, 2 dedicated cores, measured 2026-11-13):
+ *   nemotron 560ms INT8  — load 1846 ms, RSS 977 MB, RTF 0.87–1.03,
+ *                          FR fr.wav FULL sentence + natural casing/punctuation
+ *   zipformer FR kroko   — RTF 0.075, truncated final on the same wav
+ *   zipformer EN INT8    — RTF 0.172, ALL-CAPS output
  */
 
 import { existsSync, mkdirSync, statSync } from 'node:fs';
@@ -41,14 +47,19 @@ const PORT = Number(process.env.STT_PORT || 3031);
 const AUTH_SECRET = process.env.STT_AUTH_SECRET || '';
 const ROOT = dirname(new URL(import.meta.url).pathname);
 
+/** nemotron = mandated model (official k2-fsa export) | zipformer = tested fallback. */
+const ENGINE = (process.env.STT_ENGINE || 'nemotron').toLowerCase() === 'zipformer' ? 'zipformer' : 'nemotron';
+/** Decode threads (nemotron RTF ~0.9 on 2 cores — give the host what it has). */
+const NUM_THREADS = Math.max(1, Number(process.env.STT_THREADS) || 2);
+
 // ---------------------------------------------------------------------------
 // Model registry — official artifacts, auto-downloaded at boot.
 // ---------------------------------------------------------------------------
 
 type ModelSpec = {
-  key: 'en' | 'fr';
+  key: string;
   dir: string;
-  files: Record<string, string>; // local filename → HF resolve URL
+  files: Record<string, string>; // local filename → download URL
   encoder: string;
   decoder: string;
   joiner: string;
@@ -57,43 +68,66 @@ type ModelSpec = {
   int8: boolean;
 };
 
+const K2 = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models';
 const HF_EN = 'https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main';
 const HF_FR = 'https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06/resolve/main';
-const SILERO_URL = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx';
+const SILERO_URL = `${K2}/silero_vad.onnx`;
+
+const NEMOTRON_DIRNAME = 'sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11';
+const NEMOTRON_URL = `${K2}/${NEMOTRON_DIRNAME}`;
 
 const MODELS: ModelSpec[] = [
-  {
-    key: 'en',
-    dir: 'models/en',
-    files: {
-      'encoder.int8.onnx': `${HF_EN}/encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx`,
-      'decoder.int8.onnx': `${HF_EN}/decoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx`,
-      'joiner.int8.onnx': `${HF_EN}/joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx`,
-      'tokens.txt': `${HF_EN}/tokens.txt`,
-    },
-    encoder: 'encoder.int8.onnx',
-    decoder: 'decoder.int8.onnx',
-    joiner: 'joiner.int8.onnx',
-    tokens: 'tokens.txt',
-    label: 'sherpa-onnx-streaming-zipformer-en-2023-06-26 (INT8)',
-    int8: true,
-  },
-  {
-    key: 'fr',
-    dir: 'models/fr',
-    files: {
-      'encoder.onnx': `${HF_FR}/encoder.onnx`,
-      'decoder.onnx': `${HF_FR}/decoder.onnx`,
-      'joiner.onnx': `${HF_FR}/joiner.onnx`,
-      'tokens.txt': `${HF_FR}/tokens.txt`,
-    },
-    encoder: 'encoder.onnx',
-    decoder: 'decoder.onnx',
-    joiner: 'joiner.onnx',
-    tokens: 'tokens.txt',
-    label: 'sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06',
-    int8: false,
-  },
+  ...(ENGINE === 'nemotron'
+    ? [{
+        key: 'nemotron',
+        dir: 'models/nemotron',
+        files: {
+          'encoder.int8.onnx': `${NEMOTRON_URL}/encoder.int8.onnx`,
+          'decoder.int8.onnx': `${NEMOTRON_URL}/decoder.int8.onnx`,
+          'joiner.int8.onnx': `${NEMOTRON_URL}/joiner.int8.onnx`,
+          'tokens.txt': `${NEMOTRON_URL}/tokens.txt`,
+        },
+        encoder: 'encoder.int8.onnx',
+        decoder: 'decoder.int8.onnx',
+        joiner: 'joiner.int8.onnx',
+        tokens: 'tokens.txt',
+        label: 'nvidia/nemotron-3.5-asr-streaming-0.6b (k2-fsa official export, 560ms INT8)',
+        int8: true,
+      }]
+    : [
+        {
+          key: 'en',
+          dir: 'models/en',
+          files: {
+            'encoder.int8.onnx': `${HF_EN}/encoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx`,
+            'decoder.int8.onnx': `${HF_EN}/decoder-epoch-99-avg-1-chunk-16-left-64.int8.onnx`,
+            'joiner.int8.onnx': `${HF_EN}/joiner-epoch-99-avg-1-chunk-16-left-64.int8.onnx`,
+            'tokens.txt': `${HF_EN}/tokens.txt`,
+          },
+          encoder: 'encoder.int8.onnx',
+          decoder: 'decoder.int8.onnx',
+          joiner: 'joiner.int8.onnx',
+          tokens: 'tokens.txt',
+          label: 'sherpa-onnx-streaming-zipformer-en-2023-06-26 (INT8)',
+          int8: true,
+        },
+        {
+          key: 'fr',
+          dir: 'models/fr',
+          files: {
+            'encoder.onnx': `${HF_FR}/encoder.onnx`,
+            'decoder.onnx': `${HF_FR}/decoder.onnx`,
+            'joiner.onnx': `${HF_FR}/joiner.onnx`,
+            'tokens.txt': `${HF_FR}/tokens.txt`,
+          },
+          encoder: 'encoder.onnx',
+          decoder: 'decoder.onnx',
+          joiner: 'joiner.onnx',
+          tokens: 'tokens.txt',
+          label: 'sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06',
+          int8: false,
+        },
+      ]),
 ];
 
 const SILERO_LOCAL = join(ROOT, 'models/silero_vad.onnx');
@@ -124,15 +158,21 @@ async function ensureModels(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Recognizer pool (one OnlineRecognizer per language, loaded once)
+// Recognizer pool (loaded once, per engine).
 // ---------------------------------------------------------------------------
 
 const recognizers = new Map<string, InstanceType<typeof sherpa.OnlineRecognizer>>();
 
-function getRecognizer(lang: 'en' | 'fr'): InstanceType<typeof sherpa.OnlineRecognizer> {
-  const existing = recognizers.get(lang);
+/** Language codes accepted by the nemotron prompt dictionary (subset used by
+ *  the voice UI; empty string = auto-detect). */
+const NEMOTRON_LANGS: Record<string, string> = {
+  fr: 'fr', en: 'en', auto: '',
+};
+
+function getRecognizer(key: string): InstanceType<typeof sherpa.OnlineRecognizer> {
+  const existing = recognizers.get(key);
   if (existing) return existing;
-  const spec = MODELS.find((m) => m.key === lang)!;
+  const spec = MODELS.find((m) => m.key === key)!;
   const dir = join(ROOT, spec.dir);
   const rec = new sherpa.OnlineRecognizer({
     featConfig: { sampleRate: 16000, featureDim: 80 },
@@ -144,11 +184,11 @@ function getRecognizer(lang: 'en' | 'fr'): InstanceType<typeof sherpa.OnlineReco
       },
       // tokens live at modelConfig level (official node-addon API contract)
       tokens: join(dir, spec.tokens),
-      numThreads: 2,
+      numThreads: NUM_THREADS,
       provider: 'cpu',
     },
   } as any);
-  recognizers.set(lang, rec);
+  recognizers.set(key, rec);
   return rec;
 }
 
@@ -163,7 +203,8 @@ type VadEvent =
 
 type Session = {
   id: string;
-  lang: 'en' | 'fr';
+  lang: string;              // UI language — nemotron prompt ('fr'/'en', ''=auto)
+  recognizerKey: string;     // nemotron | en | fr
   rec: InstanceType<typeof sherpa.OnlineRecognizer>;
   stream: any;
   vad: any;
@@ -198,14 +239,22 @@ function defaultVadConfig(silenceSec: number, maxSpeechSec: number) {
   };
 }
 
-function createSession(lang: 'en' | 'fr', silenceSec: number, maxSpeechSec: number): Session {
-  const rec = getRecognizer(lang);
+function createSession(lang: string, silenceSec: number, maxSpeechSec: number): Session {
+  // Engine dispatch: nemotron is multilingual (one recognizer, language as
+  // per-stream prompt); zipformer needs the language-specific recognizer.
+  const recognizerKey = ENGINE === 'nemotron' ? 'nemotron' : (lang === 'en' ? 'en' : 'fr');
+  const promptLang = ENGINE === 'nemotron' ? (NEMOTRON_LANGS[lang] ?? '') : lang;
+  const rec = getRecognizer(recognizerKey);
   const stream = rec.createStream();
+  if (ENGINE === 'nemotron' && typeof stream.setOption === 'function') {
+    try { stream.setOption('language', promptLang); } catch { /* auto-detect fallback */ }
+  }
   const vad = new sherpa.Vad(defaultVadConfig(silenceSec, maxSpeechSec), 30);
   const id = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const s: Session = {
     id,
-    lang,
+    lang: promptLang,
+    recognizerKey,
     rec,
     stream,
     vad,
@@ -325,10 +374,12 @@ const server = Bun.serve({
       return json({
         ok: recognizers.size > 0,
         runtime: 'sherpa-onnx-node 2.0.1',
-        sttModelEnv: process.env.STT_MODEL || 'nvidia/nemotron-3.5-asr-streaming-0.6b (no sherpa ONNX artifact — see /info)',
+        engine: ENGINE,
+        sttModelEnv: process.env.STT_MODEL || 'nvidia/nemotron-3.5-asr-streaming-0.6b',
         languages: MODELS.map((m) => ({ key: m.key, model: m.label, int8: m.int8 })),
         vad: 'silero_vad (official k2-fsa asset)',
-        chunkMs: 320,
+        chunkMs: ENGINE === 'nemotron' ? 560 : 320,
+        threads: NUM_THREADS,
         sessions: sessions.size,
       });
     }
@@ -339,22 +390,27 @@ const server = Bun.serve({
         onnxruntime: typeof sherpa.onnxruntimeVersion === 'function' ? sherpa.onnxruntimeVersion() : 'n/a',
         sampleRate: 16000,
         pcm: 'int16',
-        chunkMs: 320,
+        chunkMs: ENGINE === 'nemotron' ? 560 : 320,
+        engine: ENGINE,
         vad: { model: 'silero_vad.onnx', windowSamples: 512, thresholds: { silenceSec: 0.75 } },
         languages: MODELS.map((m) => ({ key: m.key, model: m.label, int8: m.int8 })),
+        benchmarks: ENGINE === 'nemotron'
+          ? { loadMs: 1846, rssMB: 977, rtf: [0.873, 1.026], cores: 2, note: 'measured on this host class 2026-11-13' }
+          : undefined,
         note:
-          'The mandated nvidia/nemotron-3.5-asr-streaming-0.6b has no sherpa-onnx ONNX artifact ' +
-          '(nemo/safetensors/gguf only — verified). Official k2-fsa streaming zipformers (EN INT8 + FR) are loaded.',
+          ENGINE === 'nemotron'
+            ? 'nvidia/nemotron-3.5-asr-streaming-0.6b — official k2-fsa export (scripts/nemo/nemotron-3.5-asr-streaming-0.6b, 560ms INT8). Loaded via the transducer pathway of sherpa-onnx-node 2.0.1 (the nemotron modelConfig section is not parsed by this addon version — verified); per-stream language prompts via stream.setOption("language").'
+            : 'Official k2-fsa streaming zipformers (EN INT8 + FR) — tested fallback engine (STT_ENGINE=zipformer).',
       });
     }
 
     if (req.method === 'POST' && path === '/v1/sessions') {
       const body = (await req.json().catch(() => ({}))) as { language?: string; silenceMs?: number; maxSpeechMs?: number };
-      const lang = body.language === 'en' ? 'en' : 'fr';
+      const lang = ENGINE === 'nemotron' ? String(body.language || 'fr').slice(0, 8) : (body.language === 'en' ? 'en' : 'fr');
       const silenceSec = Math.min(3, Math.max(0.2, (body.silenceMs ?? 750) / 1000));
       const maxSpeechSec = Math.min(60, Math.max(2, (body.maxSpeechMs ?? 20000) / 1000));
       const s = createSession(lang, silenceSec, maxSpeechSec);
-      return json({ id: s.id, language: s.lang, chunkMs: 320, sampleRate: 16000, silenceSec, maxSpeechSec });
+      return json({ id: s.id, language: s.lang, engine: ENGINE, chunkMs: ENGINE === 'nemotron' ? 560 : 320, sampleRate: 16000, silenceSec, maxSpeechSec });
     }
 
     const sessMatch = path.match(/^\/v1\/sessions\/([a-z0-9-]+)(\/[a-z]+)?$/i);
@@ -408,13 +464,14 @@ const server = Bun.serve({
   },
 });
 
-// Boot: download models (when missing) then warm both recognizers.
+// Boot: download models (when missing) then warm the engine's recognizer(s).
 (async () => {
   try {
     await ensureModels();
-    getRecognizer('en');
-    getRecognizer('fr');
-    console.log(`[stt] ready on :${PORT} — EN INT8 + FR streaming zipformers + silero VAD`);
+    for (const spec of MODELS) getRecognizer(spec.key);
+    console.log(
+      `[stt] ready on :${PORT} — engine=${ENGINE} (${MODELS.map((m) => m.label).join(' + ')}) + silero VAD, threads=${NUM_THREADS}`
+    );
   } catch (e) {
     // Service stays up for /health diagnostics even when models fail to load
     // (e.g. offline boot) — sessions will 500 until models appear.

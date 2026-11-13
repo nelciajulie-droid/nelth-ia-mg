@@ -24,7 +24,7 @@
   if (window.__nelthVoiceBridge) return;
   window.__nelthVoiceBridge = true;
 
-  var BUILD = '20270109a1';
+  var BUILD = '20270109b1';
   var SCRIPT_URL = '/static/voice/main.js?v=' + BUILD;
   var CSS_URL = '/static/voice/app.css?v=' + BUILD;
   var OVERLAY_ID = 'nelth-voice-overlay';
