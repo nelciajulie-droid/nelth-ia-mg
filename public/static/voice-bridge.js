@@ -3,8 +3,11 @@
  *
  * Intègre l'overlay vocal DANS le SPA existant (Open WebUI compilé) :
  *
- *   1. Bouton « Vocal » injecté dans la rangée de contrôles du composeur
- *      (icône + libellé aria) — visible pour les comptes ET les invités.
+ *   1. AUCUN nouveau bouton (correction utilisateur) : le pont détourne le
+ *      bouton « Mode vocal » DU COMPOSEUR — celui déjà présent à côté du
+ *      dicté (aria-label « Voice mode » EN / « Mode vocal » FR). Son clic est
+ *      intercepté en phase de capture AVANT le handler natif du SPA : il
+ *      ouvre l'overlay Nelth (comptes ET invités).
  *   2. Au clic : l'overlay React (bundle /static/voice/main.js, window.
  *      NelthVoice) monte DANS la zone centrale — la SIDEBAR reste montée
  *      et visible (exigence mission §12 / utilisateur).
@@ -21,17 +24,16 @@
   if (window.__nelthVoiceBridge) return;
   window.__nelthVoiceBridge = true;
 
-  var BUILD = '20270108a1';
+  var BUILD = '20270109a1';
   var SCRIPT_URL = '/static/voice/main.js?v=' + BUILD;
   var CSS_URL = '/static/voice/app.css?v=' + BUILD;
-  var BUTTON_ID = 'nelth-voice-button';
   var OVERLAY_ID = 'nelth-voice-overlay';
 
   var active = false;
   var overlayEl = null;
 
   // ---------------------------------------------------------------------
-  // Button (composer controls row)
+  // Bouton « Mode vocal » du composeur (détourné — PAS de nouveau bouton)
   // ---------------------------------------------------------------------
 
   function ensureStyles() {
@@ -39,52 +41,68 @@
     var style = document.createElement('style');
     style.id = 'nelth-voice-bridge-style';
     style.textContent = [
-      '#' + BUTTON_ID + '{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:9999px;border:1px solid rgba(0,0,0,.1);background:transparent;color:#374151;cursor:pointer;transition:background-color .15s ease,border-color .15s ease;flex:none;}',
-      'html.dark #' + BUTTON_ID + '{border-color:rgba(255,255,255,.14);color:#e5e7eb;}',
-      '#' + BUTTON_ID + ':hover{background:rgba(124,58,237,.08);border-color:rgba(124,58,237,.35);color:#7c3aed;}',
-      'html.dark #' + BUTTON_ID + ':hover{background:rgba(124,58,237,.18);color:#c4b5fd;}',
-      '#' + BUTTON_ID + '.nelth-voice-active{background:#7c3aed;border-color:#7c3aed;color:#fff;}',
-      '#' + BUTTON_ID + ' svg{width:18px;height:18px;}',
+      // État actif appliqué au bouton vocal NATIF pendant que l'overlay est
+      // monté (pastille violette — !important contre les utilitaires Tailwind
+      // du SPA : bg-black / dark:bg-white).
+      'button.nelth-voice-active{background:#7c3aed !important;border-color:#7c3aed !important;color:#ffffff !important;}',
+      'html.dark button.nelth-voice-active{background:#7c3aed !important;color:#ffffff !important;}',
       '#' + OVERLAY_ID + '{position:absolute;inset:0;z-index:40;animation:nelth-voice-in .18s ease;}',
       '@keyframes nelth-voice-in{from{opacity:0}to{opacity:1}}',
     ].join('\n');
     document.head.appendChild(style);
   }
 
-  var ICON_MIC =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
-
-  /** The composer's trailing controls row (mic / send buttons cluster). */
-  function findControlsRow() {
-    // Anchor: the chat textarea, then its enclosing footer → the row of
-    // buttons that carries the audio-record control.
-    var area = document.getElementById('chat-input') || document.querySelector('textarea[aria-label*="essage"], textarea[placeholder*="essage"]');
-    if (!area) return null;
-    var footer = area.closest('footer') || area.parentElement?.parentElement;
-    if (!footer) return null;
-    // Button rows inside the footer (bottom-most row with multiple buttons).
-    var rows = footer.querySelectorAll('div[class*="flex"][class*="items-center"]');
-    var best = null;
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].querySelectorAll('button').length >= 2) best = rows[i];
-    }
-    return best || footer;
+  /** Le bouton vocal du composeur : étiquette localisée (« Voice mode » EN /
+   *  « Mode vocal » FR) + filet structurel (pastille ronde sombre
+   *  immédiatement à droite du dicté) pour toute autre locale. */
+  function isAppVoiceButton(el) {
+    var btn = el && el.closest ? el.closest('button') : null;
+    if (!btn || btn.id === 'voice-input-button') return false;
+    var label = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+    if (label === 'voice mode' || label === 'mode vocal') return true;
+    return btn === structuralVoiceButton();
   }
 
-  function ensureButton() {
-    if (document.getElementById(BUTTON_ID)) return;
-    var row = findControlsRow();
-    if (!row) return;
-    ensureStyles();
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.id = BUTTON_ID;
-    btn.setAttribute('aria-label', 'Mode vocal — conversation temps réel');
-    btn.title = 'Mode vocal';
-    btn.innerHTML = ICON_MIC;
-    btn.addEventListener('click', toggle);
-    // Prepend: the voice mode is the leftmost action of the controls row.
-    row.insertBefore(btn, row.firstChild);
+  function findAppVoiceButton() {
+    var b = document.querySelector(
+      'button[aria-label="Voice mode"], button[aria-label="Mode vocal"]'
+    );
+    return b || structuralVoiceButton();
+  }
+
+  /** Filet structurel (locale inconnue) : premier bouton à droite du dicté,
+   *  pastille ronde sombre (bg-black / dark:bg-white) — signature du bouton
+   *  vocal natif du composeur. */
+  function structuralVoiceButton() {
+    var mic = document.getElementById('voice-input-button');
+    if (!mic) return null;
+    var sib = mic.nextElementSibling;
+    while (sib && sib.tagName !== 'BUTTON') sib = sib.nextElementSibling;
+    if (!sib) return null;
+    var cls = typeof sib.className === 'string' ? sib.className : '';
+    if (
+      cls.indexOf('rounded-full') !== -1 &&
+      (cls.indexOf('bg-black') !== -1 || cls.indexOf('dark:bg-white') !== -1)
+    ) {
+      return sib;
+    }
+    return null;
+  }
+
+  /** Capture AU PLUS TÔT (niveau document) : le clic du bouton vocal du SPA
+   *  n'atteint JAMAIS son handler natif — il pilote l'overlay Nelth
+   *  (ouvre / ferme). Résiste aux re-renders du SPA (délégation document). */
+  function guardAppVoiceButton() {
+    document.addEventListener(
+      'click',
+      function (e) {
+        if (!isAppVoiceButton(e.target)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        toggle();
+      },
+      true
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -167,7 +185,8 @@
       }
     });
 
-    var btn = document.getElementById(BUTTON_ID);
+    // Pastille violette sur le bouton vocal natif pendant la session.
+    var btn = findAppVoiceButton();
     if (btn) btn.classList.add('nelth-voice-active');
   }
 
@@ -182,8 +201,9 @@
       overlayEl.remove();
       overlayEl = null;
     }
-    var btn = document.getElementById(BUTTON_ID);
-    if (btn) btn.classList.remove('nelth-voice-active');
+    // Le bouton natif peut avoir été re-rendu → nettoyer par classe.
+    var btns = document.querySelectorAll('button.nelth-voice-active');
+    for (var i = 0; i < btns.length; i++) btns[i].classList.remove('nelth-voice-active');
   }
 
   function toggle() {
@@ -192,22 +212,10 @@
   }
 
   // ---------------------------------------------------------------------
-  // Re-injection after SPA re-renders (composer row is recreated often)
+  // Aucune ré-injection nécessaire : le détour du bouton natif se fait par
+  // délégation au niveau document (guardAppVoiceButton) — insensible aux
+  // re-renders du SPA (le composeur est recréé constamment).
   // ---------------------------------------------------------------------
-
-  function startObserving() {
-    if (!('MutationObserver' in window) || !document.body) return;
-    var scheduled = false;
-    var observer = new MutationObserver(function () {
-      if (scheduled) return;
-      scheduled = true;
-      setTimeout(function () {
-        scheduled = false;
-        ensureButton();
-      }, 250);
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-  }
 
   // Track the OPEN chat for conversation continuity (persist into it).
   function trackChatId() {
@@ -236,15 +244,7 @@
 
   function boot() {
     trackChatId();
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () {
-        ensureButton();
-        startObserving();
-      });
-    } else {
-      ensureButton();
-      startObserving();
-    }
+    guardAppVoiceButton();
   }
 
   boot();

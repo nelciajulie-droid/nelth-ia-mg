@@ -13,9 +13,9 @@
  *   2. Sidebar — À LA CHATGPT logged-out : la liste de conversations est
  *      REMPLACÉE par une carte « Se connecter / S'inscrire » (« pour
  *      enregistrer vos discussions ») ; le badge de compte en bas de la
- *      sidebar (avatar « Invité ») est retiré ; sur le rail replié (42 px)
- *      un bouton « connexion » compact prend la place de l'avatar. L'invité
- *      n'est JAMAIS présenté comme un compte.
+ *      sidebar (avatar « Invité ») est retiré (tiroir OUVERT et rail
+ *      replié — aucune trace de compte pour l'invité). L'invité n'est
+ *      JAMAIS présenté comme un compte.
  *
  *   3. Barre du haut — boutons « Se connecter » + « S'inscrire » injectés en
  *      haut à droite (affichage ChatGPT), VISIBLES sur la vue principale
@@ -240,9 +240,10 @@
       'html.nelth-guest #sidebar .sticky.bottom-0{display:none !important;}',
       'html.nelth-guest #sidebar button[aria-label="User menu"]{display:none !important;}',
       'html.nelth-guest #sidebar button[aria-label="Menu utilisateur"]{display:none !important;}',
-      // Rail replié : la zone du bas (avatar) — l'invité n'y a AUCUN badge de
-      // compte (et PAS de bouton « Compte » sous Imagine).
-      'html.nelth-guest #sidebar > div:last-child{display:none !important;}',
+      // ATTENTION : ne JAMAIS cibler `#sidebar > div:last-child` — quand le
+      // tiroir est OUVERT, ce dernier enfant est le tiroir ENTIER (cette règle
+      // vidait la sidebar ouverte). Le rail replié n'a pas d'avatar : les
+      // sélecteurs « User menu » ci-dessus couvrent les deux locales.
       // Sélecteur de modèle : TOTALEMENT retiré pour l'invité.
       'html.nelth-guest #model-selector-model-button{display:none !important;}',
       'html.nelth-guest button[aria-label^="Selected model"]{display:none !important;}',
