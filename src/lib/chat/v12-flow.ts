@@ -450,29 +450,10 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     }
   };
 
-  // ---------------------------------------- 1ter. MODE INVITÉ — usage budget
-  // (ChatGPT parity): guests chat anonymously for a limited number of
-  // messages, then the sign-up wall replaces the model answer. READ-ONLY
-  // check here — the counter is incremented right before the model call so
-  // a REFUSED turn (locked feature) never burns a guest message. Continuation
-  // rounds are the SAME logical message (serverless time-budget cut).
-  if (!isContinuation) {
-    const { isGuestUser, getGuestUsage } = await import('@/lib/guests');
-    if (isGuestUser(user)) {
-      const usage = await getGuestUsage(user);
-      console.log(`[v12-flow] guest usage: ${usage.used}/${usage.limit}`);
-      if (usage.remaining <= 0) {
-        const message =
-          `Vous avez utilisé vos ${usage.limit} messages invités.\n\n` +
-          `Créez un compte gratuit pour continuer à discuter sans limites — et débloquer la génération d’images et de vidéos, la recherche web et tous les modèles.`;
-        if (sessionId && chatId) {
-          await emit({ type: 'chat:message:error', data: { error: { content: message }, done: true } });
-          return nullJson();
-        }
-        return json({ detail: message }, 429);
-      }
-    }
-  }
+  // MODE INVITÉ — PAS de budget de messages : l'invité discute librement
+  // (ses discussions ne sont simplement pas conservées ; les fonctionnalités
+  // avancées restent verrouillées plus bas — images/vidéos/recherche web/
+  // sélecteur de modèle).
 
   // ------------------------------------------------- 2. Chat bookkeeping (DB)
   let historyMap: Record<string, any> | null = null;
@@ -2428,17 +2409,6 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
    *  anchor the measured span is ~0s → "Thought for less than a second"). */
   const upstreamStartedAt = Date.now();
   try {
-    // MODE INVITÉ — count the message HERE: the turn is now committed to
-    // the model. Every earlier exit (locked-feature rejections, validation)
-    // never reaches this point, so a refused request does not burn a guest
-    // message; continuations are the same logical message (not counted).
-    if (!isContinuation) {
-      const { isGuestUser, incrementGuestUsage } = await import('@/lib/guests');
-      if (isGuestUser(user)) {
-        const usage = await incrementGuestUsage(user);
-        console.log(`[v12-flow] guest message counted: ${usage.used}/${usage.limit}`);
-      }
-    }
     upstream = await callUpstreamTokenSafe(reqBody);
 
     // Provider flakiness guard (observed on the free dots-studio model with

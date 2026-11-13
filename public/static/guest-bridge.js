@@ -264,7 +264,6 @@
       // ---- Bouton connexion compact (rail replié 42 px) ----
       '#nelth-guest-rail-login{display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0 4px;}',
       '.ngrail-btn{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;border:1px solid rgba(0,0,0,.12);background:transparent;color:#374151;cursor:pointer;transition:background-color .15s ease,border-color .15s ease;}',
-      '.ngrail-btn{.12);background:transparent;}',
       '.ngrail-btn:hover{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.2);}',
       'html.dark .ngrail-btn{border-color:rgba(255,255,255,.16);color:#e5e7eb;}',
       'html.dark .ngrail-btn:hover{background:rgba(255,255,255,.08);}',
@@ -285,8 +284,6 @@
       'html.dark .ngap-text{color:#9ca3af;}',
       '.ngap-actions{display:flex;gap:8px;flex-wrap:wrap;}',
       '.ngap-btn{display:inline-flex;align-items:center;justify-content:center;height:34px;padding:0 16px;border-radius:9999px;font-size:13px;font-weight:500;line-height:1;cursor:pointer;user-select:none;white-space:nowrap;font-family:inherit;}',
-      '.ngap;}',
-      '.ngap-btn--signup{border:1px solid transparent;}',
       '.ngap-btn--signup{border:1px solid transparent;background:#111827;color:#fff;}',
       '.ngap-btn--signup:hover{background:#1f2937;}',
       'html.dark .ngap-btn--signup{background:#f9fafb;color:#111827;}',
@@ -300,7 +297,6 @@
       'html.dark .ngap-close:hover{background:rgba(255,255,255,.08);color:#d1d5db;}',
 
       // ---- Bouton « × » sur la page /auth ----
-      '#nelth-auth-x{position:absolute;top:10px;right:10px;z-index:30;display:flex;align-items:center;justify-content:center;width:32px;height:1;}32px;border-radius:9999px;border:1px solid rgba(0,0,0,.12);background:#fff;color:#374151;cursor:pointer;font-size:15px;line-height:1;transition:background-color .15s ease,border-color .15s ease;}',
       '#nelth-auth-x{position:absolute;top:10px;right:10px;z-index:30;display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:9999px;border:1px solid rgba(0,0,0,.12);background:#fff;color:#374151;cursor:pointer;font-size:15px;line-height:1;transition:background-color .15s ease,border-color .15s ease;}',
       '#nelth-auth-x:hover{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.2);}',
       'html.dark #nelth-auth-x{background:#1f2226;border-color:rgba(255,255,255,.16);color:#e5e7eb;}',
@@ -360,7 +356,6 @@
     });
 
     wrap.appendChild(login);
-    .appendChild(signup);
     wrap.appendChild(signup);
     return wrap;
   }
@@ -380,7 +375,6 @@
       return;
     }
     var cluster = findRightCluster();
-    if (!findRightCluster());
     if (!cluster) return;
     ensureStyles();
     cluster.insertBefore(buildActions(), cluster.firstChild);
@@ -460,10 +454,6 @@
     label.className = 'ngrail-label';
     label.textContent = 'Compte';
 
-    host.createElement('span');
-    label.className = 'ngrail-label';
-    label.textContent = 'Compte';
-
     host.appendChild(btn);
     host.appendChild(label);
     return host;
@@ -488,7 +478,7 @@
 
     // Rail replié — bouton compact après le bouton Images.
     var rail = document.getElementById('images-rail');
-    if (rail && rail.parentElement && !rail.parentElement.querySelector #nelth-guest-rail-login')) {
+    if (rail && rail.parentElement && !rail.parentElement.querySelector('#nelth-guest-rail-login')) {
       ensureStyles();
       rail.parentElement.appendChild(buildRailLogin());
     }
@@ -503,7 +493,6 @@
   function hideAuthPrompt() {
     var backdrop = document.getElementById('nelth-auth-prompt-backdrop');
     var prompt = document.getElementById('nelth-auth-prompt');
-    prompt');
     if (backdrop) backdrop.remove();
     if (prompt) prompt.remove();
   }

@@ -122,12 +122,17 @@
                      l'artefact (texte, structures, IA, enregistrement) ;
                      bloc html masqué dans le chat ; cartes sous la réponse. -->
                 <script src="/static/documents-bridge.js?v=20261114a4" defer></script>
-                <!-- Mode Invité : boutons « Se connecter / S'inscrire » en haut à
-                     droite pour les sessions invitées (affichage ChatGPT), pastille
-                     « N messages restants », bannière limite + verrous UI (Images,
-                     paperclip). Voir guest-bridge.js — les verrous RÉELS sont
-                     côté serveur (v12-flow.ts / models-registry.ts / config). -->
-                <script src="/static/guest-bridge.js?v=20270107a2" defer></script>
+                <!-- Mode Invité (affichage ChatGPT) : boutons « Se connecter /
+                     S'inscrire » en haut à droite (visibles UNIQUEMENT sur la
+                     vue principale), carte « Enregistrer vos discussions » à la
+                     place de la liste de conversations, AUCUN badge de compte,
+                     invite de connexion au clic Imagine, sélecteur de modèle
+                     retiré + verrous UI (paperclip, voix). Voir guest-bridge.js
+                     — les verrous RÉELS sont côté serveur (v12-flow.ts /
+                     models-registry.ts / config). PAS de quota de messages :
+                     l'invité est anonyme, ses discussions ne sont pas
+                     enregistrées. -->
+                <script src="/static/guest-bridge.js?v=20270108a1" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->
