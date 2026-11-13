@@ -1,46 +1,56 @@
 /**
  * Nelth-AI — Mode Invité (guest bridge), affichage à la ChatGPT.
  *
- * Rôle de ce script (chargé sur TOUTES les pages du SPA) :
+ * Ce script (chargé sur TOUTES les pages du SPA) fait 8 choses :
  *
  *   1. Résout la session courante via /api/v1/auths/ et détecte si c'est un
  *      compte invité (email *@guests.nelth-ia.local — compte anonyme jetable
  *      provisionné par POST /api/v1/auths/guest, voir le handshake dans
- *      index.html <head>). L'invité est ANONYME : aucune identification, les
- *      conversations ne survivent pas au navigateur, le compte est purgé par
- *      scripts/cleanup-guests.ts.
+ *      index.html <head>). L'invité est ANONYME : aucune identification, ses
+ *      discussions ne sont PAS enregistrées (invisible dans la sidebar,
+ *      purgé par scripts/cleanup-guests.ts).
  *
- *   2. Si (et seulement si) la session est INVITÉE et qu'on n'est PAS sur la
- *      page /auth : injecte « Se connecter » + « S'inscrire » en haut à
- *      droite de la barre du SPA — exactement l'affichage ChatGPT — PRÉCÉDÉS
- *      d'une pastille « Invité · N messages restants » (compteur servi par
- *      GET /api/v1/auths/guest/usage, incrémenté par le pipeline chat).
- *      La page de login/signup reste INTACTE (aucun bouton invité dessus).
+ *   2. Sidebar — À LA CHATGPT logged-out : la liste de conversations est
+ *      REMPLACÉE par une carte « Se connecter / S'inscrire » (« pour
+ *      enregistrer vos discussions ») ; le badge de compte en bas de la
+ *      sidebar (avatar « Invité ») est retiré ; sur le rail replié (42 px)
+ *      un bouton « connexion » compact prend la place de l'avatar. L'invité
+ *      n'est JAMAIS présenté comme un compte.
  *
- *   3. MODE INVITÉ = fonctionnalités verrouillées (parité ChatGPT logged-out,
- *      appliquée CÔTÉ SERVEUR — v12-flow.ts / models-registry.ts / config —
- *      ce bridge ne fait que refléter l'état dans l'UI) :
- *      • sélecteur de modèle → modèle par défaut unique (Nelth-3.5) ;
- *      • génération d'images & de vidéos → verrouillées ;
- *      • recherche web → verrouillée ;
- *      • téléversement de fichiers → verrouillé (paperclip neutralisé) ;
- *      • studio Images → masqué (#images-rail / #images-nav via la classe
- *        html.nelth-guest) ;
- *      • budget de messages (défaut 10) → bannière « Créez un compte » à
- *        l'épuisement, + message d'erreur dans le chat côté serveur.
+ *   3. Barre du haut — boutons « Se connecter » + « S'inscrire » injectés en
+ *      haut à droite (affichage ChatGPT), VISIBLES sur la vue principale
+ *      uniquement : dès qu'une discussion est ouverte (route /c/…) ils
+ *      deviennent invisibles, et reviennent sur « / ».
  *
- *   4. Clic sur Se connecter / S'inscrire : le token invité est mis de côté
- *      (sessionStorage) puis retiré → /auth?form=signin|signup s'ouvre
- *      proprement. Si l'utilisateur revient SANS se connecter, le handshake
- *      (index.html) RESTAURE la session invitée et ses conversations au lieu
- *      d'en recréer une neuve.
+ *   4. Imagine (bouton Images du rail + du tiroir) : le bouton reste AFFICHÉ
+ *      pour l'invité, mais le clic n'ouvre PAS le studio — il affiche
+ *      l'invite « Se connecter / S'inscrire ». Le studio Images est réservé
+ *      aux comptes (génération d'images/vidéos).
  *
- *   5. Hygiène de session : déconnexion détectée → stash vidé (le prochain
- *      passage sur / recrée un invité NEUF, comme ChatGPT) ; connexion réelle
- *      réussie → stash vidé + classe nelth-guest retirée ; JWT invité expiré
- *      (401) → rotation silencieuse vers un nouvel invité (une seule tentative
- *      par chargement).
+ *   5. Sélecteur de modèle : totalement retiré pour l'invité (le serveur
+ *      épingle de toute façon les complétions invitées au modèle par défaut
+ *      — v12-flow.ts + models-registry.ts).
+ *
+ *   6. Page /auth — bouton « × » (haut droit de la carte) pour revenir à la
+ *      page précédente (fallback « / » quand il n'y a pas d'historique).
+ *
+ *   7. Fonctionnalités verrouillées (parité ChatGPT logged-out, appliquée
+ *      CÔTÉ SERVEUR — v12-flow.ts / models-registry.ts / root-handlers.ts /
+ *      files.ts / images.ts / retrieval.ts) — ce bridge ne fait que
+ *      refléter l'état dans l'UI : images & vidéos, recherche web,
+ *      téléversement, l'espace de travail masqué, le paperclip neutralisé.
+ *
+ *   8. Hygiène de session : déconnexion détectée → stash vidé (le prochain
+ *      passage sur / recrée un invité NEUF, comme ChatGPT) ; connexion
+ *      réelle réussie → stash vidé + classe nelth-guest retirée ; JWT invité
+ *      expiré (401) → rotation silencieuse vers un nouvel invité (une seule
+ *      tentative par chargement).
+ *
+ *   AUCUN compteur : le mode invité n'est PAS un budget — c'est une session
+ * jetable sans historique (les discussions ne survivent ni enregistrées,
+ * ni partagées).
  */
+
 (() => {
   if (window.__nelthGuestBridge) return;
   window.__nelthGuestBridge = true;
@@ -51,8 +61,6 @@
 
   var sessionInfo = null; // { guest, email, name } | null
   var lastSeenToken = null;
-  var usageInfo = null; // { guest, used, limit, remaining } | null
-  var usageFetchScheduled = false;
 
   // ---------------------------------------------------------------------
   // Helpers
@@ -69,6 +77,11 @@
   function isAuthPage() {
     var p = window.location.pathname;
     return p === '/auth' || p.indexOf('/oauth') === 0 || p.indexOf('/forgot') === 0;
+  }
+
+  /** Vue principale = nouveau chat (route « / ») — PAS une discussion. */
+  function isMainView() {
+    return window.location.pathname === '/';
   }
 
   /** Décode le payload d'un JWT (aucune vérification — usage UI uniquement). */
@@ -94,6 +107,17 @@
     } catch (e) {
       /* private mode */
     }
+  }
+
+  function goAuth(form) {
+    try {
+      var token = localStorage.getItem('token');
+      if (token) sessionStorage.setItem(STASH_KEY, token);
+      localStorage.removeItem('token');
+    } catch (e) {
+      /* private mode → simple navigation */
+    }
+    window.location.href = '/auth' + (form ? '?form=' + form : '');
   }
 
   // ---------------------------------------------------------------------
@@ -184,71 +208,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // 2) Compteur invité — GET /api/v1/auths/guest/usage
-  // ---------------------------------------------------------------------
-
-  function usageText(d) {
-    if (!d) return 'Mode invité';
-    if (d.remaining === 0) return 'Invité · limite atteinte';
-    if (d.remaining === 1) return 'Invité · dernier message';
-    return 'Invité · ' + d.remaining + ' messages restants';
-  }
-
-  function updateUsagePill() {
-    var pill = document.getElementById('nelth-guest-usage');
-    if (!pill) return;
-    pill.textContent = usageText(usageInfo);
-    if (usageInfo && usageInfo.remaining === 0) pill.classList.add('nelth-guest-usage--over');
-    else if (usageInfo && usageInfo.remaining <= 2) pill.classList.add('nelth-guest-usage--low');
-    else pill.classList.remove('nelth-guest-usage--over', 'nelth-guest-usage--low');
-  }
-
-  function fetchUsage() {
-    if (!sessionInfo || !sessionInfo.guest || isAuthPage()) return Promise.resolve(null);
-    var token = getToken();
-    if (!token) return Promise.resolve(null);
-    return fetch('/api/v1/auths/guest/usage', {
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + token,
-      },
-    })
-      .then(function (res) {
-        return res.ok ? res.json() : null;
-      })
-      .then(function (d) {
-        if (!d || !d.guest) {
-          usageInfo = null;
-          return null;
-        }
-        usageInfo = d;
-        updateUsagePill();
-        if (d.remaining === 0) showLimitBanner();
-        return d;
-      })
-      .catch(function () {
-        return null;
-      });
-  }
-
-  /** Anti-tempête : le MutationObserver du SPA déclenche en rafale. */
-  function scheduleUsageFetch() {
-    if (usageFetchScheduled) return;
-    usageFetchScheduled = true;
-    setTimeout(function () {
-      usageFetchScheduled = false;
-      fetchUsage();
-    }, 2500);
-  }
-
-  function startUsagePolling() {
-    fetchUsage();
-    setInterval(fetchUsage, 20000);
-  }
-
-  // ---------------------------------------------------------------------
-  // 3) Boutons « Se connecter / S'inscrire » + pastille (haut droit)
+  // 2) Styles (boutons + carte sidebar + invite Imagine + × auth)
   // ---------------------------------------------------------------------
 
   function ensureStyles() {
@@ -256,9 +216,11 @@
     var style = document.createElement('style');
     style.id = 'nelth-guest-actions-style';
     style.textContent = [
+      // ---- Boutons « Se connecter / S'inscrire » (barre du haut) ----
       '#nelth-guest-actions{display:flex;align-items:center;gap:8px;flex:none;}',
+      '#nelth-guest-actions.nelth-guest-actions--hidden{display:none !important;}',
       '.nelth-guest-btn{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 14px;border-radius:9999px;font-size:13.5px;font-weight:500;line-height:1;cursor:pointer;user-select:none;white-space:nowrap;font-family:inherit;transition:background-color .15s ease,border-color .15s ease,opacity .15s ease;}',
-      '.nelth-guest-btn:focus-visible{outline:2px solid rgba(99,102,241,0);box-shadow:0 0 0 2px currentColor;opacity:.85;}',
+      '.nelth-guest-btn:focus-visible{outline:2px solid rgba(0,0,0,.25);opacity:.85;}',
       '.nelth-guest-btn--login{border:1px solid rgba(0,0,0,.14);color:#374151;background:transparent;}',
       '.nelth-guest-btn--login:hover{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.2);}',
       'html.dark .nelth-guest-btn--login{border-color:rgba(255,255,255,.18);color:#e5e7eb;}',
@@ -268,29 +230,96 @@
       'html.dark .nelth-guest-btn--signup{background:#f9fafb;color:#111827;}',
       'html.dark .nelth-guest-btn--signup:hover{background:#e5e7eb;}',
       '.nelth-guest-btn[disabled]{opacity:.6;pointer-events:none;}',
-      // Pastille « Invité · N messages restants »
-      '.nelth-guest-usage{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:9999px;font-size:12.5px;font-weight:500;line-height:1;white-space:nowrap;color:#6b7280;background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.06);user-select:none;cursor:default;}',
-      'html.dark .nelth-guest-usage{color:#9ca3af;background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.08);}',
-      '.nelth-guest-usage--low{color:#b45309;background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.25);}',
-      'html.dark .nelth-guest-usage--low{color:#fbbf24;background:rgba(245,158,11,.15);border-color:rgba(245,158,11,.3);}',
-      '.nelth-guest-usage--over{color:#b91c1c;background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.3);}',
-      'html.dark .nelth-guest-usage--over{color:#f87171;background:rgba(239,68,68,.15);border-color:rgba(239,68,68,.35);}',
-      // Verrous invité : studio Images + espace de travail masqués, paperclip neutralisé
-      'html.nelth-guest #images-rail,html.nelth-guest #images-nav{display:none !important;}',
+
+      // ---- Mode invité : l'invité n'est PAS un compte ----
+      // Liste de conversations masquée + badge de compte retiré (les deux
+      // variantes de sidebar : tiroir étendu + rail replié 42 px).
+      'html.nelth-guest #sidebar .overflow-y-auto > .relative{display:none !important;}',
+      'html.nelth-guest #sidebar .sticky.bottom-0{display:none !important;}',
+      'html.nelth-guest #sidebar button[aria-label="User menu"]{display:none !important;}',
+      // Sélecteur de modèle : TOTALEMENT retiré pour l'invité.
+      'html.nelth-guest #model-selector-model-button{display:none !important;}',
+      'html.nelth-guest button[aria-label^="Selected model"]{display:none !important;}',
+      // Espace de travail masqué + paperclip neutralisés (verrous serveur
+      // réels : files.ts / retrieval.ts / images.ts 403).
       'html.nelth-guest a[href*="/workspace"]{display:none !important;}',
-      '.nelth-guest-hidden{display:none !important;}',
       'html.nelth-guest button[aria-label="Attach files"],',
       'html.nelth-guest button[aria-label="Joindre des fichiers"],',
       'html.nelth-guest button[aria-label="Pièces jointes"]{display:none !important;}',
+      '.nelth-guest-hidden{display:none !important;}',
+
+      // ---- Carte « Se connecter ou S'inscrire » (sidebar — tiroir) ----
+      '#nelth-guest-cta{padding:14px 12px 18px;}',
+      '.ngcta-card{display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,.07);background:rgba(0,0,0,.025);}',
+      'html.dark .ngcta-card{border-color:rgba(255,255,255,.09);background:rgba(255,255,255,.04);}',
+      '.ngcta-icon{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;background:#111827;color:#fff;flex:none;}',
+      'html.dark .ngcta-icon{background:#f9fafb;color:#111827;}',
+      '.ngcta-icon svg{width:15px;height:15px;}',
+      '.ngcta-title{margin:0;font-size:13.5px;font-weight:600;color:#111827;}',
+      'html.dark .ngcta-title{color:#f3f4f6;}',
+      '.ngcta-text{margin:0;font-size:12px;line-height:1.45;color:#6b7280;}',
+      'html.dark .ngcta-text{color:#9ca3af;}',
+      '.ngcta-actions{display:flex;gap:8px;flex-wrap:wrap;}',
+
+      // ---- Bouton connexion compact (rail replié 42 px) ----
+      '#nelth-guest-rail-login{display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0 4px;}',
+      '.ngrail-btn{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;border:1px solid rgba(0,0,0,.12);background:transparent;color:#374151;cursor:pointer;transition:background-color .15s ease,border-color .15s ease;}',
+      '.ngrail-btn{.12);background:transparent;}',
+      '.ngrail-btn:hover{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.2);}',
+      'html.dark .ngrail-btn{border-color:rgba(255,255,255,.16);color:#e5e7eb;}',
+      'html.dark .ngrail-btn:hover{background:rgba(255,255,255,.08);}',
+      '.ngrail-btn svg{width:14px;height:14px;}',
+      '.ngrail-label{font-size:9.5px;line-height:1;color:#9ca3af;letter-spacing:.02em;}',
+
+      // ---- Invite « Se connecter / S'inscrire » (clic Imagine, etc.) ----
+      '#nelth-auth-prompt-backdrop{position:fixed;inset:0;z-index:119;background:rgba(0,0,0,.32);}',
+      '#nelth-auth-prompt{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:120;display:flex;align-items:flex-start;gap:12px;max-width:min(420px,calc(100vw - 32px));padding:18px 20px;border-radius:16px;background:#ffffff;border:1px solid rgba(0,0,0,.08);box-shadow:0 16px 48px rgba(0,0,0,.18);font-family:inherit;}',
+      'html.dark #nelth-auth-prompt{background:#1f2226;border-color:rgba(255,255,255,.1);box-shadow:0 16px 48px rgba(0,0,0,.5);}',
+      '.ngap-icon{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:#111827;color:#fff;flex:none;margin-top:2px;}',
+      'html.dark .ngap-icon{background:#f9fafb;color:#111827;}',
+      '.ngap-icon svg{width:16px;height:16px;}',
+      '.ngap-body{flex:1;min-width:0;}',
+      '.ngap-title{margin:0 0 4px;font-size:14.5px;font-weight:600;color:#111827;}',
+      'html.dark .ngap-title{color:#f3f4f6;}',
+      '.ngap-text{margin:0 0 12px;font-size:13px;line-height:1.5;color:#6b7280;}',
+      'html.dark .ngap-text{color:#9ca3af;}',
+      '.ngap-actions{display:flex;gap:8px;flex-wrap:wrap;}',
+      '.ngap-btn{display:inline-flex;align-items:center;justify-content:center;height:34px;padding:0 16px;border-radius:9999px;font-size:13px;font-weight:500;line-height:1;cursor:pointer;user-select:none;white-space:nowrap;font-family:inherit;}',
+      '.ngap;}',
+      '.ngap-btn--signup{border:1px solid transparent;}',
+      '.ngap-btn--signup{border:1px solid transparent;background:#111827;color:#fff;}',
+      '.ngap-btn--signup:hover{background:#1f2937;}',
+      'html.dark .ngap-btn--signup{background:#f9fafb;color:#111827;}',
+      'html.dark .ngap-btn--signup:hover{background:#e5e7eb;}',
+      '.ngap-btn--login{border:1px solid rgba(0,0,0,.14);color:#374151;background:transparent;}',
+      '.ngap-btn--login:hover{background:rgba(0,0,0,.05);}',
+      'html.dark .ngap-btn--login{border-color:rgba(255,255,255,.18);color:#e5e7eb;}',
+      'html.dark .ngap-btn--login:hover{background:rgba(255,255,255,.08);}',
+      '.ngap-close{flex:none;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:none;background:transparent;color:#9ca3af;cursor:pointer;font-size:16px;line-height:1;}',
+      '.ngap-close:hover{background:rgba(0,0,0,.06);color:#374151;}',
+      'html.dark .ngap-close:hover{background:rgba(255,255,255,.08);color:#d1d5db;}',
+
+      // ---- Bouton « × » sur la page /auth ----
+      '#nelth-auth-x{position:absolute;top:10px;right:10px;z-index:30;display:flex;align-items:center;justify-content:center;width:32px;height:1;}32px;border-radius:9999px;border:1px solid rgba(0,0,0,.12);background:#fff;color:#374151;cursor:pointer;font-size:15px;line-height:1;transition:background-color .15s ease,border-color .15s ease;}',
+      '#nelth-auth-x{position:absolute;top:10px;right:10px;z-index:30;display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:9999px;border:1px solid rgba(0,0,0,.12);background:#fff;color:#374151;cursor:pointer;font-size:15px;line-height:1;transition:background-color .15s ease,border-color .15s ease;}',
+      '#nelth-auth-x:hover{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.2);}',
+      'html.dark #nelth-auth-x{background:#1f2226;border-color:rgba(255,255,255,.16);color:#e5e7eb;}',
+      'html.dark #nelth-auth-x:hover{background:rgba(255,255,255,.08);}',
+
       '@media (max-width:640px){',
       '#nelth-guest-actions{gap:6px;}',
       '.nelth-guest-btn{height:28px;padding:0 11px;font-size:12.5px;}',
       '.nelth-guest-btn--signup{display:none;}',
-      '.nelth-guest-usage{height:28px;padding:0 10px;font-size:11.5px;}',
+      '#nelth-guest-cta{padding:12px 8px 14px;}',
       '}',
     ].join('\n');
     document.head.appendChild(style);
   }
+
+  // ---------------------------------------------------------------------
+  // 3) Boutons « Se connecter / S'inscrire » (haut droit) — vue principale
+  //    seulement : invisibles dès qu'une discussion est ouverte.
+  // ---------------------------------------------------------------------
 
   /** Le cluster droit de la barre du SPA (autour de #temporary-chat-button). */
   function findRightCluster() {
@@ -306,27 +335,9 @@
     return null;
   }
 
-  function goAuth(form) {
-    try {
-      var token = localStorage.getItem('token');
-      if (token) sessionStorage.setItem(STASH_KEY, token);
-      localStorage.removeItem('token');
-    } catch (e) {
-      /* private mode → simple navigation */
-    }
-    window.location.href = '/auth' + (form ? '?form=' + form : '');
-  }
-
   function buildActions() {
     var wrap = document.createElement('div');
     wrap.id = 'nelth-guest-actions';
-
-    var usage = document.createElement('span');
-    usage.id = 'nelth-guest-usage';
-    usage.className = 'nelth-guest-usage';
-    usage.textContent = usageText(usageInfo);
-    usage.title = 'Mode invité — créez un compte pour discuter sans limites et débloquer toutes les fonctionnalités.';
-    wrap.appendChild(usage);
 
     var login = document.createElement('button');
     login.type = 'button';
@@ -341,7 +352,7 @@
     var signup = document.createElement('button');
     signup.type = 'button';
     signup.className = 'nelth-guest-btn nelth-guest-btn--signup';
-    signup.textContent = "S'inscrire";
+    signup.textContent = 'S\u2019inscrire';
     signup.setAttribute('aria-label', 'Créer un compte Nelth-IA');
     signup.addEventListener('click', function () {
       signup.disabled = true;
@@ -349,92 +360,200 @@
     });
 
     wrap.appendChild(login);
+    .appendChild(signup);
     wrap.appendChild(signup);
     return wrap;
+  }
+
+  /** Vue principale → boutons visibles ; discussion (route /c/…) → invisibles. */
+  function applyRouteVisibility() {
+    var wrap = document.getElementById('nelth-guest-actions');
+    if (!wrap) return;
+    wrap.classList.toggle('nelth-guest-actions--hidden', !isMainView());
   }
 
   function injectActions() {
     if (!sessionInfo || !sessionInfo.guest) return;
     if (isAuthPage()) return;
-    if (document.getElementById('nelth-guest-actions')) return;
+    if (document.getElementById('nelth-guest-actions')) {
+      applyRouteVisibility();
+      return;
+    }
     var cluster = findRightCluster();
+    if (!findRightCluster());
     if (!cluster) return;
     ensureStyles();
     cluster.insertBefore(buildActions(), cluster.firstChild);
-    updateUsagePill();
+    applyRouteVisibility();
   }
 
   // ---------------------------------------------------------------------
-  // 3bis) Bannière « limite atteinte » (mur d'inscription, à la ChatGPT)
+  // 4) Sidebar — carte « Se connecter / S'inscrire » à la place de la
+  //    liste de conversations + bouton compact sur le rail replié.
   // ---------------------------------------------------------------------
 
-  function ensureBannerStyles() {
-    if (document.getElementById('nelth-guest-banner-style')) return;
-    var style = document.createElement('style');
-    style.id = 'nelth-guest-banner-style';
-    style.textContent = [
-      '#nelth-guest-limit-banner{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:80;display:flex;align-items:flex-start;gap:12px;max-width:min(440px,calc(100vw - 32px));padding:16px 18px;border-radius:16px;background:#ffffff;border:1px solid rgba(0,0,0,.08);box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:inherit;}',
-      'html.dark #nelth-guest-limit-banner{background:#1f2226;border-color:rgba(255,255,255,.1);box-shadow:0 12px 40px rgba(0,0,0,.5);}',
-      '.nglb-body{flex:1;min-width:0;}',
-      '.nglb-title{margin:0 0 4px;font-size:14.5px;font-weight:600;color:#111827;}',
-      'html.dark .nglb-title{color:#f3f4f6;}',
-      '.nglb-text{margin:0 0 12px;font-size:13px;line-height:1.5;color:#6b7280;}',
-      'html.dark .nglb-text{color:#9ca3af;}',
-      '.nglb-actions{display:flex;gap:8px;flex-wrap:wrap;}',
-      '.nglb-btn{display:inline-flex;align-items:center;justify-content:center;height:34px;padding:0 16px;border-radius:9999px;font-size:13px;font-weight:500;line-height:1;cursor:pointer;user-select:none;white-space:nowrap;font-family:inherit;}',
-      '.nglb-btn--signup{border:1px solid transparent;background:#111827;color:#fff;}',
-      '.nglb-btn--signup:hover{background:#1f2937;}',
-      'html.dark .nglb-btn--signup{background:#f9fafb;color:#111827;}',
-      'html.dark .nglb-btn--signup:hover{background:#e5e7eb;}',
-      '.nglb-btn--login{border:1px solid rgba(0,0,0,.14);color:#374151;background:transparent;}',
-      '.nglb-btn--login:hover{background:rgba(0,0,0,.05);}',
-      'html.dark .nglb-btn--login{border-color:rgba(255,255,255,.18);color:#e5e7eb;}',
-      'html.dark .nglb-btn--login:hover{background:rgba(255,255,255,.08);}',
-      '.nglb-close{flex:none;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:none;background:transparent;color:#9ca3af;cursor:pointer;font-size:16px;line-height:1;}',
-      '.nglb-close:hover{background:rgba(0,0,0,.06);color:#374151;}',
-      'html.dark .nglb-close:hover{background:rgba(255,255,255,.08);color:#d1d5db;}',
-      '@media (max-width:640px){#nelth-guest-limit-banner{bottom:12px;padding:14px;}}',
-    ].join('\n');
-    document.head.appendChild(style);
+  var ICON_LOGIN =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>';
+
+  function ctaButton(variant, label) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className =
+      variant === 'signup' ? 'nelth-guest-btn nelth-guest-btn--signup' : 'nelth-guest-btn nelth-guest-btn--login';
+    b.textContent = label;
+    b.addEventListener('click', function () {
+      goAuth(variant === 'signup' ? 'signup' : 'signin');
+    });
+    return b;
   }
 
-  function showLimitBanner() {
-    if (!sessionInfo || !sessionInfo.guest) return;
-    if (isAuthPage()) return;
-    if (document.getElementById('nelth-guest-limit-banner')) return;
-    ensureBannerStyles();
+  /** Carte tiroir (sidebar étendue) : à la place de la liste de conversations. */
+  function buildCtaCard() {
+    var host = document.createElement('div');
+    host.id = 'nelth-guest-cta';
 
-    var wrap = document.createElement('div');
-    wrap.id = 'nelth-guest-limit-banner';
-    wrap.setAttribute('role', 'dialog');
-    wrap.setAttribute('aria-label', 'Limite du mode invité atteinte');
+    var card = document.createElement('div');
+    card.className = 'ngcta-card';
 
-    var body = document.createElement('div');
-    body.className = 'nglb-body';
+    var icon = document.createElement('div');
+    icon.className = 'ngcta-icon';
+    icon.innerHTML = ICON_LOGIN;
 
     var title = document.createElement('p');
-    title.className = 'nglb-title';
-    title.textContent = 'Limite du mode invité atteinte';
+    title.className = 'ngcta-title';
+    title.textContent = 'Enregistrer vos discussions';
 
     var text = document.createElement('p');
-    text.className = 'nglb-text';
+    text.className = 'ngcta-text';
     text.textContent =
-      'Créez un compte gratuit pour continuer à discuter sans limites — et débloquer la génération d’images et de vidéos, la recherche web et tous les modèles.';
+      'Créez un compte ou connectez-vous pour enregistrer vos discussions et les retrouver sur tous vos appareils.';
 
     var actions = document.createElement('div');
-    actions.className = 'nglb-actions';
+    actions.className = 'ngcta-actions';
+    actions.appendChild(ctaButton('signup', 'S\u2019inscrire'));
+    actions.appendChild(ctaButton('login', 'Se connecter'));
+
+    card.appendChild(icon);
+    card.appendChild(title);
+    card.appendChild(text);
+    card.appendChild(actions);
+    host.appendChild(card);
+    return host;
+  }
+
+  /** Bouton compact du rail replié (42 px) — remplace l'avatar invité. */
+  function buildRailLogin() {
+    var host = document.createElement('div');
+    host.id = 'nelth-guest-rail-login';
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ngrail-btn';
+    btn.setAttribute('aria-label', 'Se connecter à un compte Nelth-IA');
+    btn.title = 'Se connecter ou s\u2019inscrire — pour enregistrer vos discussions';
+    btn.innerHTML = ICON_LOGIN;
+    btn.addEventListener('click', function () {
+      goAuth('signin');
+    });
+
+    var label = document.createElement('span');
+    label.className = 'ngrail-label';
+    label.textContent = 'Compte';
+
+    host.createElement('span');
+    label.className = 'ngrail-label';
+    label.textContent = 'Compte';
+
+    host.appendChild(btn);
+    host.appendChild(label);
+    return host;
+  }
+
+  /**
+   * Ré-injection après chaque re-render du SPA. Cibles :
+   *   • tiroir étendu : la zone défilante qui porte Folders/Chats
+   *     (l'invité n'a PAS de liste — la CSS la masque, la carte la remplace) ;
+   *   • rail replié : le conteneur du bouton Images (#images-rail) — le
+   *     bouton compact vient se poser juste après, à la place de l'avatar.
+   */
+  function syncSidebar() {
+    if (!sessionInfo || !sessionInfo.guest) return;
+
+    // Tiroir (sidebar étendue) — la carte vit dans la zone défilante.
+    var scroll = document.querySelector('#sidebar .overflow-y-auto');
+    if (scroll && !scroll.querySelector('#nelth-guest-cta')) {
+      ensureStyles();
+      scroll.appendChild(buildCtaCard());
+    }
+
+    // Rail replié — bouton compact après le bouton Images.
+    var rail = document.getElementById('images-rail');
+    if (rail && rail.parentElement && !rail.parentElement.querySelector #nelth-guest-rail-login')) {
+      ensureStyles();
+      rail.parentElement.appendChild(buildRailLogin());
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 5) Imagine — le bouton reste affiché, le clic ouvre l'invite de
+  //    connexion (studio réservé aux comptes). Intercepté en PHASE DE
+  //    CAPTURE au niveau document : avant les handlers du pont Images.
+  // ---------------------------------------------------------------------
+
+  function hideAuthPrompt() {
+    var backdrop = document.getElementById('nelth-auth-prompt-backdrop');
+    var prompt = document.getElementById('nelth-auth-prompt');
+    prompt');
+    if (backdrop) backdrop.remove();
+    if (prompt) prompt.remove();
+  }
+
+  function showAuthPrompt(opts) {
+    if (!sessionInfo || !sessionInfo.guest) return;
+    if (isAuthPage()) return;
+    hideAuthPrompt();
+    ensureStyles();
+
+    var backdrop = document.createElement('div');
+    backdrop.id = 'nelth-auth-prompt-backdrop';
+
+    var wrap = document.createElement('div');
+    wrap.id = 'nelth-auth-prompt';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'false');
+    wrap.setAttribute('aria-label', (opts && opts.title) || 'Connexion requise');
+
+    var icon = document.createElement('div');
+    icon.className = 'ngap-icon';
+    icon.innerHTML = ICON_LOGIN;
+
+    var body = document.createElement('div');
+    body.className = 'ngap-body';
+
+    var title = document.createElement('p');
+    title.className = 'ngap-title';
+    title.textContent = (opts && opts.title) || 'Connexion requise';
+
+    var text = document.createElement('p');
+    text.className = 'ngap-text';
+    text.textContent =
+      (opts && opts.text) ||
+      'Créez un compte gratuit ou connectez-vous pour enregistrer vos discussions et débloquer toutes les fonctionnalités.';
+
+    var actions = document.createElement('div');
+    actions.className = 'ngap-actions';
 
     var signup = document.createElement('button');
     signup.type = 'button';
-    signup.className = 'nglb-btn nglb-btn--signup';
-    signup.textContent = 'Créer un compte';
+    signup.className = 'ngap-btn ngap-btn--signup';
+    signup.textContent = 'S\u2019inscrire';
     signup.addEventListener('click', function () {
       goAuth('signup');
     });
 
     var login = document.createElement('button');
     login.type = 'button';
-    login.className = 'nglb-btn nglb-btn--login';
+    login.className = 'ngap-btn ngap-btn--login';
     login.textContent = 'Se connecter';
     login.addEventListener('click', function () {
       goAuth('signin');
@@ -448,23 +567,95 @@
 
     var close = document.createElement('button');
     close.type = 'button';
-    close.className = 'nglb-close';
+    close.className = 'ngap-close';
     close.setAttribute('aria-label', 'Fermer');
     close.textContent = '×';
-    close.addEventListener('click', function () {
-      wrap.remove();
-    });
+    close.addEventListener('click', hideAuthPrompt);
 
+    wrap.appendChild(icon);
     wrap.appendChild(body);
     wrap.appendChild(close);
+
+    backdrop.addEventListener('click', hideAuthPrompt);
+    document.body.appendChild(backdrop);
     document.body.appendChild(wrap);
   }
 
+  /** Sélecteurs du bouton Imagine (rail + tiroir + liens #/images). */
+  var IMAGINE_HASH_RE = /^#\/images\/?$/;
+
+  function isImagineTarget(el) {
+    if (!el || !el.closest) return false;
+    return !!el.closest(
+      '#images-rail, #images-nav, a[href="#/images"], [aria-label="Images"], [aria-label="Imagine"]'
+    );
+  }
+
+  function guardImagineClicks() {
+    document.addEventListener(
+      'click',
+      function (e) {
+        if (!sessionInfo || !sessionInfo.guest) return;
+        if (!isImagineTarget(e.target)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        showAuthPrompt({
+          title: 'Imagine est réservé aux comptes',
+          text: 'La génération d\u2019images et de vidéos est réservée aux comptes. Créez un compte gratuit ou connectez-vous pour y accéder.',
+        });
+      },
+      true
+    );
+  }
+
+  // Deep-link résiduel (#/images posé avant la résolution de session) :
+  // un invité qui atterrit directement sur le hash Images ne doit pas
+  // ouvrir le studio — le hash est retiré avant le premier sync du pont.
+  function stripImagineHash() {
+    try {
+      if (IMAGINE_HASH_RE.test(window.location.hash || '')) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+    } catch (e) {
+      /* private mode */
+    }
+  }
+
   // ---------------------------------------------------------------------
-  // 3ter) Verrous UI invité (les refus RÉELS sont côté serveur — files.ts,
-  // retrieval.ts, images.ts 403 : ici on masque les contrôles pour éviter
-  // les culs-de-sac). Le SPA re-rend en permanence → ré-appliqué par le
-  // MutationObserver (les items du menu « + » n'existent que popover ouvert).
+  // 6) Page /auth — bouton « × » pour revenir à la page précédente
+  // ---------------------------------------------------------------------
+
+  function authCloseClick() {
+    if (window.history.length > 1) window.history.back();
+    else window.location.href = '/';
+  }
+
+  function syncAuthClose() {
+    if (!isAuthPage()) return;
+    var form = document.querySelector('form');
+    if (!form) return;
+    var host = form.parentElement;
+    if (!host || host.querySelector('#nelth-auth-x')) return;
+    // La carte du formulaire : position:relative pour ancrer le « × ».
+    var position = window.getComputedStyle(host).position;
+    if (position !== 'relative' && position !== 'absolute') host.style.position = 'relative';
+    ensureStyles();
+
+    var x = document.createElement('button');
+    x.type = 'button';
+    x.id = 'nelth-auth-x';
+    x.textContent = '×';
+    x.setAttribute('aria-label', 'Retour à la page précédente');
+    x.title = 'Retour';
+    x.addEventListener('click', authCloseClick);
+    host.appendChild(x);
+  }
+
+  // ---------------------------------------------------------------------
+  // 7) Verrous UI invité (les refus RÉELS sont côté serveur — files.ts,
+  //    retrieval.ts, images.ts 403 : ici on masque les contrôles pour éviter
+  //    les culs-de-sac). Le SPA re-rend en permanence → ré-appliqué par le
+  //    MutationObserver (les items du menu « + » n'existent que popover ouvert).
   // ---------------------------------------------------------------------
 
   /** Libellés d'attachement (menu « + »), préfixes EN + FR. */
@@ -517,7 +708,31 @@
     }
   }
 
-  // Réinjection après chaque re-render/route du SPA (le cluster est recréé).
+  // ---------------------------------------------------------------------
+  // 8) Navigation SPA — route changes (pushState/replaceState/popstate)
+  // ---------------------------------------------------------------------
+
+  function hookHistory() {
+    ['pushState', 'replaceState'].forEach(function (name) {
+      var orig = window.history[name];
+      if (typeof orig !== 'function') return;
+      window.history[name] = function () {
+        var result = orig.apply(this, arguments);
+        onRouteChange();
+        return result;
+      };
+    });
+    window.addEventListener('popstate', onRouteChange);
+    window.addEventListener('hashchange', onRouteChange);
+  }
+
+  function onRouteChange() {
+    applyRouteVisibility();
+    syncSidebar();
+    syncAuthClose();
+  }
+
+  // Ré-injection après chaque re-render/route du SPA (le cluster est recréé).
   function startObserving() {
     if (!('MutationObserver' in window) || !document.body) return;
     var scheduled = false;
@@ -527,16 +742,17 @@
       setTimeout(function () {
         scheduled = false;
         injectActions();
+        syncSidebar();
+        syncAuthClose();
         preselectSignupForm();
         lockGuestControls();
-        scheduleUsageFetch();
       }, 250);
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
   // ---------------------------------------------------------------------
-  // 4) Hygiène : déconnexion / connexion réussie → stash vidé
+  // 9) Hygiène : déconnexion / connexion réussie → stash vidé
   // ---------------------------------------------------------------------
 
   function startSessionWatch() {
@@ -576,7 +792,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // 5) /auth?form=signup → présélection de l'onglet « S'inscrire »
+  // 10) /auth?form=signup → présélection de l'onglet « S'inscrire »
   // ---------------------------------------------------------------------
 
   // Le build compilé d'Open WebUI n'exploite pas ?form= pour choisir l'onglet
@@ -633,20 +849,26 @@
   // ---------------------------------------------------------------------
 
   function boot() {
+    stripImagineHash();
+    guardImagineClicks();
+    hookHistory();
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () {
         injectActions();
+        syncSidebar();
+        syncAuthClose();
         preselectSignupForm();
         startObserving();
       });
     } else {
       injectActions();
+      syncSidebar();
+      syncAuthClose();
       preselectSignupForm();
       startObserving();
     }
     startSessionWatch();
     if (sessionInfo && sessionInfo.guest) {
-      startUsagePolling();
       lockGuestControls();
     }
   }
