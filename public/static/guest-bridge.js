@@ -233,10 +233,16 @@
 
       // ---- Mode invité : l'invité n'est PAS un compte ----
       // Liste de conversations masquée + badge de compte retiré (les deux
-      // variantes de sidebar : tiroir étendu + rail replié 42 px).
+      // variantes de sidebar : tiroir étendu + rail replié 42 px). Sélecteurs
+      // STRUCTURELS + les deux locales (EN « User menu » / FR « Menu
+      // utilisateur ») — l'avatar invité ne doit jamais s'afficher en bas.
       'html.nelth-guest #sidebar .overflow-y-auto > .relative{display:none !important;}',
       'html.nelth-guest #sidebar .sticky.bottom-0{display:none !important;}',
       'html.nelth-guest #sidebar button[aria-label="User menu"]{display:none !important;}',
+      'html.nelth-guest #sidebar button[aria-label="Menu utilisateur"]{display:none !important;}',
+      // Rail replié : la zone du bas (avatar) — l'invité n'y a AUCUN badge de
+      // compte (et PAS de bouton « Compte » sous Imagine).
+      'html.nelth-guest #sidebar > div:last-child{display:none !important;}',
       // Sélecteur de modèle : TOTALEMENT retiré pour l'invité.
       'html.nelth-guest #model-selector-model-button{display:none !important;}',
       'html.nelth-guest button[aria-label^="Selected model"]{display:none !important;}',
@@ -260,15 +266,6 @@
       '.ngcta-text{margin:0;font-size:12px;line-height:1.45;color:#6b7280;}',
       'html.dark .ngcta-text{color:#9ca3af;}',
       '.ngcta-actions{display:flex;gap:8px;flex-wrap:wrap;}',
-
-      // ---- Bouton connexion compact (rail replié 42 px) ----
-      '#nelth-guest-rail-login{display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0 4px;}',
-      '.ngrail-btn{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:10px;border:1px solid rgba(0,0,0,.12);background:transparent;color:#374151;cursor:pointer;transition:background-color .15s ease,border-color .15s ease;}',
-      '.ngrail-btn:hover{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.2);}',
-      'html.dark .ngrail-btn{border-color:rgba(255,255,255,.16);color:#e5e7eb;}',
-      'html.dark .ngrail-btn:hover{background:rgba(255,255,255,.08);}',
-      '.ngrail-btn svg{width:14px;height:14px;}',
-      '.ngrail-label{font-size:9.5px;line-height:1;color:#9ca3af;letter-spacing:.02em;}',
 
       // ---- Invite « Se connecter / S'inscrire » (clic Imagine, etc.) ----
       '#nelth-auth-prompt-backdrop{position:fixed;inset:0;z-index:119;background:rgba(0,0,0,.32);}',
@@ -435,36 +432,16 @@
     return host;
   }
 
-  /** Bouton compact du rail replié (42 px) — remplace l'avatar invité. */
-  function buildRailLogin() {
-    var host = document.createElement('div');
-    host.id = 'nelth-guest-rail-login';
-
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'ngrail-btn';
-    btn.setAttribute('aria-label', 'Se connecter à un compte Nelth-IA');
-    btn.title = 'Se connecter ou s\u2019inscrire — pour enregistrer vos discussions';
-    btn.innerHTML = ICON_LOGIN;
-    btn.addEventListener('click', function () {
-      goAuth('signin');
-    });
-
-    var label = document.createElement('span');
-    label.className = 'ngrail-label';
-    label.textContent = 'Compte';
-
-    host.appendChild(btn);
-    host.appendChild(label);
-    return host;
-  }
+  // Le bouton compact « Compte » du rail REPLIÉ est SUPPRIMÉ (correction
+  // utilisateur) : rien sous Imagine sur le rail fermé, et l'avatar du bas
+  // est masqué par la règle CSS `html.nelth-guest #sidebar > div:last-child`.
+  // Le tiroir OUVERT garde sa carte « Se connecter / S'inscrire ».
 
   /**
-   * Ré-injection après chaque re-render du SPA. Cibles :
-   *   • tiroir étendu : la zone défilante qui porte Folders/Chats
-   *     (l'invité n'a PAS de liste — la CSS la masque, la carte la remplace) ;
-   *   • rail replié : le conteneur du bouton Images (#images-rail) — le
-   *     bouton compact vient se poser juste après, à la place de l'avatar.
+   * Ré-injection après chaque re-render du SPA. Cible : le tiroir étendu —
+   * la zone défilante qui porte Folders/Chats (l'invité n'a PAS de liste :
+   * la CSS la masque, la carte la remplace). Le rail REPLIÉ n'est PAS
+   * modifié (aucun bouton « Compte », avatar du bas masqué par CSS).
    */
   function syncSidebar() {
     if (!sessionInfo || !sessionInfo.guest) return;
@@ -474,13 +451,6 @@
     if (scroll && !scroll.querySelector('#nelth-guest-cta')) {
       ensureStyles();
       scroll.appendChild(buildCtaCard());
-    }
-
-    // Rail replié — bouton compact après le bouton Images.
-    var rail = document.getElementById('images-rail');
-    if (rail && rail.parentElement && !rail.parentElement.querySelector('#nelth-guest-rail-login')) {
-      ensureStyles();
-      rail.parentElement.appendChild(buildRailLogin());
     }
   }
 
@@ -650,15 +620,12 @@
   /** Libellés d'attachement (menu « + »), préfixes EN + FR. */
   var GUEST_LOCK_PREFIX_RE =
     /^(upload|télévers|import|attach|joindre|attacher|capture|screenshot|caméra|camera|webpage|page web)/i;
-  /** Boutons du composeur verrouillés pour les invités (voix, intégrations). */
+  /** Boutons du composeur verrouillés pour les invités (intégrations — les
+   *  comptes). VOIX NON VERROUILLÉE (correction utilisateur) : le mode vocal
+   *  et la dictée restent disponibles aux invités. */
   var GUEST_LOCK_EXACT = [
     'integrations',
     'intégrations',
-    'voice input',
-    'saisie vocale',
-    'entrée vocale',
-    'voice mode',
-    'mode vocal',
   ];
 
   function labelOf(el) {
