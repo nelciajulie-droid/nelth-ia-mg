@@ -102,31 +102,43 @@ export function makeVoiceLlm(): VoiceLlmHandle {
     signal: AbortSignal
   ): Promise<{ text: string; truncated: boolean }> {
     if (engine === 'kilo') {
-      const res = await fetch(`${KILO_VOICE_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${KILO_API_KEY}`,
-          'user-agent': 'Nelth-AI/1.0 (+voice)',
-        },
-        body: JSON.stringify({
-          model: VOICE_LLM_MODEL,
-          messages: messages.map((m) => ({ role: m.role, content: m.content })),
-          stream: true,
-          // THINKING DISABLED — verified OpenRouter-style controls for this
-          // gateway family (see kilo-llm.ts buildBody).
-          reasoning: { enabled: false },
-          include_reasoning: false,
-          temperature: 0.6,
-          max_tokens: 900,
-        }),
-        signal,
-      });
-      if (!res.ok || !res.body) {
-        const detail = await res.text().catch(() => '');
-        throw new Error(`Kilo voice LLM ${res.status}: ${detail.slice(0, 160)}`);
+      try {
+        const res = await fetch(`${KILO_VOICE_BASE_URL}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${KILO_API_KEY}`,
+            'user-agent': 'Nelth-AI/1.0 (+voice)',
+          },
+          body: JSON.stringify({
+            model: VOICE_LLM_MODEL,
+            messages: messages.map((m) => ({ role: m.role, content: m.content })),
+            stream: true,
+            // THINKING DISABLED — verified OpenRouter-style controls for this
+            // gateway family (see kilo-llm.ts buildBody).
+            reasoning: { enabled: false },
+            include_reasoning: false,
+            temperature: 0.6,
+            max_tokens: 900,
+          }),
+          signal,
+        });
+        if (!res.ok || !res.body) {
+          const detail = await res.text().catch(() => '');
+          throw new Error(`Kilo voice LLM ${res.status}: ${detail.slice(0, 160)}`);
+        }
+        return await consumeSse(res.body, onToken, signal);
+      } catch (e: any) {
+        if (signal.aborted) throw e; // interruption — never masked
+        // The mandated model id is verified on api.kilo.ai/api/gateway/v1;
+        // hosts bound to the LEGACY gateway surface (or expired keys) can
+        // reject it — degrade transparently to the existing z-ai engine so
+        // the voice conversation never dies (reported via engine label).
+        console.warn('[voice] Kilo LLM unavailable, falling back to the built-in engine:', e?.message);
+        const { zaiChatCompletionStream } = await import('@/lib/zai-llm');
+        const body = await zaiChatCompletionStream({ messages, stream: true, thinking: 'disabled' });
+        return consumeSse(body, onToken, signal);
       }
-      return consumeSse(res.body, onToken, signal);
     }
 
     // Keyless fallback — the EXISTING z-ai engine (OpenAI SSE wire format),
