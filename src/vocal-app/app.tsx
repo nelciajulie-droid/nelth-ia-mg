@@ -64,6 +64,30 @@ const ERROR_MESSAGES: Record<string, string> = {
   unknown: 'Erreur de reconnaissance.',
 };
 
+/** Transient errors — the continuous engine restarts on its own; bound the
+ *  loop so a persistently failing recognizer never keeps the mic hot. */
+const MAX_TRANSIENT_ERRORS = 3;
+
+/** Raw reason under a classified VocalError — the browser error-event code
+ *  (language-not-supported, bad-grammar…) or the DOMException name
+ *  (InvalidStateError: recognition still running → double-start race). */
+function rawReason(vocalErr: VocalError | null): string {
+  const orig = (vocalErr?.original ?? null) as { error?: unknown; name?: unknown } | null;
+  if (orig && typeof orig.error === 'string' && orig.error) return orig.error;
+  if (orig && typeof orig.name === 'string' && orig.name) return orig.name;
+  return '';
+}
+
+/** Display message — classifyError types, with the raw reason for unknowns
+ *  (diagnosability instead of a bare "Erreur de reconnaissance."). */
+function messageFor(t: string, reason: string): string {
+  if (reason === 'language-not-supported')
+    return 'Langue non supportée par la reconnaissance vocale (essayez fr-FR ou en-US).';
+  if (reason === 'bad-grammar') return 'Grammaire vocale non supportée par le navigateur.';
+  const base = ERROR_MESSAGES[t] || ERROR_MESSAGES.unknown;
+  return t === 'unknown' && reason ? `${base} (${reason})` : base;
+}
+
 function detectLang(): string {
   // SPA locale (Open WebUI stores 'locale' in localStorage) → BCP 47 tag,
   // falling back to the browser language, then French (app default).
@@ -132,14 +156,14 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
   // Language — primitive arg (stable identity). Re-detected at each session
   // boundary so a mid-visit locale switch is honoured; a change rebuilds the
   // hook instance at a SAFE boundary (previous session already stopped).
-  const [lang, setLang] = React.useState<string>(() => detectLang());
+  const [dictLang, setDictLang] = React.useState<string>(() => detectLang());
 
   // useVocal(lang, grammars, maxAlternatives, continuous, interimResults)
   //   • grammars = null → stable (no rebuild churn);
   //   • continuous = true → long-form dictation across segments;
   //   • interimResults = true → live provisional transcripts;
   //   • engine omitted → the library's default WebSpeechEngine.
-  const [, vocalActions] = useVocal(lang, null, 1, true, true);
+  const [, vocalActions] = useVocal(dictLang, null, 1, true, true);
   const { subscribe, unsubscribe, isRecording, permissionState } = vocalActions;
 
   // The hook may recreate its actions object per render — capture it in a
@@ -162,6 +186,11 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
   const errorTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const pillTimerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const transientErrorsRef = React.useRef(0);
+  const invalidRetryDoneRef = React.useRef(false);
+
+  // Stable indirection — the InvalidStateError retry re-enters handleError.
+  const handleErrorRef = React.useRef<(err: unknown) => void>(() => undefined);
 
   const setPhaseSafe = React.useCallback((next: VocalPhase) => {
     phaseRef.current = next;
@@ -181,15 +210,67 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
 
   const handleError = React.useCallback(
     (err: unknown) => {
+      // Raw recognizer events are DOM Events: they ALL carry a `.type`
+      // (the event name, "error") — requiring `original` (present on every
+      // VocalError from classifyError, absent from DOM events) avoids
+      // misreading an event as a pre-classified error.
       const vocalErr: VocalError | null =
-        err && typeof err === 'object' && 'type' in err ? (err as VocalError) : classifyError(err);
-      if (vocalErr?.type === 'aborted') {
+        err && typeof err === 'object' && 'original' in err && 'type' in err
+          ? (err as VocalError)
+          : classifyError(err);
+      const t = vocalErr?.type ?? 'unknown';
+      const reason = rawReason(vocalErr);
+      if (t === 'aborted') {
         // Abort = user-initiated cancel (route change / hidden tab) — silent.
         setPhaseSafe('idle');
         setInterim('');
         return;
       }
-      setErrorMsg(ERROR_MESSAGES[vocalErr?.type ?? 'unknown'] || ERROR_MESSAGES.unknown);
+      if (t === 'unknown' && reason === 'InvalidStateError') {
+        // start() raced a recognizer still closing (double-start). The
+        // hook's isRecording is OPTIMISTIC (set true before the engine call)
+        // and stays stale-true through the rejection — unusable here. Retry
+        // ONCE after a beat; a second failure falls through to the generic
+        // error path. (open() is idle-gated: no start ever fires while a
+        // session is live, so an "already recording" rejection cannot leak
+        // a hot mic through this path.)
+        if (!invalidRetryDoneRef.current) {
+          invalidRetryDoneRef.current = true;
+          setTimeout(() => {
+            if (phaseRef.current !== 'starting') return;
+            actionsRef.current.start({}).catch((e: unknown) => handleErrorRef.current(e));
+          }, 500);
+          return;
+        }
+        invalidRetryDoneRef.current = false;
+      }
+      if (t === 'no-speech' || t === 'network' || t === 'unknown') {
+        // Transient — while a session is LIVE the continuous engine restarts
+        // by itself (verified in the @untemps/vocal dist): stay silent unless
+        // the errors persist (loop guard → graceful stop with a message).
+        // During 'starting' (a start() rejection) there is no live engine to
+        // self-heal → surface the error instead of a stuck pill.
+        if (phaseRef.current === 'listening' || phaseRef.current === 'error') {
+          transientErrorsRef.current += 1;
+          if (transientErrorsRef.current > MAX_TRANSIENT_ERRORS) {
+            transientErrorsRef.current = 0;
+            setErrorMsg(messageFor(t, reason));
+            setPhaseSafe('error');
+            setInterim('');
+            try {
+              actionsRef.current.stop(); // no hot-mic loop on persistent failure
+            } catch {
+              /* engine already down */
+            }
+            if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+            errorTimerRef.current = setTimeout(() => setPhaseSafe('idle'), 2600);
+          }
+          return;
+        }
+        // Fall through: start() rejection → generic error display below.
+      }
+      // Fatal microphone/recognition problems (permission, device, service).
+      setErrorMsg(messageFor(t, reason));
       setPhaseSafe('error');
       setInterim('');
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
@@ -197,6 +278,10 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
     },
     [setPhaseSafe]
   );
+
+  React.useEffect(() => {
+    handleErrorRef.current = handleError;
+  }, [handleError]);
 
   // -------------------------------------------------------------------------
   // Event subscriptions — the recognition lifecycle (speechstart/speechend,
@@ -234,6 +319,7 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
   );
 
   const handleRecognitionStart = React.useCallback(() => {
+    transientErrorsRef.current = 0; // engine alive — reset the loop guard
     setPhaseSafe('listening');
     setInterim('');
     setErrorMsg(null);
@@ -330,10 +416,20 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
     if (phaseRef.current !== 'idle') return;
     // Fresh session: re-detect locale (may rebuild the hook instance at a
     // safe boundary — the previous session is already stopped), reset keys.
-    setLang(detectLang());
+    setDictLang(detectLang());
     insertedKeysRef.current = new Set();
+    transientErrorsRef.current = 0;
+    invalidRetryDoneRef.current = false;
     setErrorMsg(null);
     setInterim('');
+
+    // Engine already live (e.g. a transient error path left it recording):
+    // resume tracking instead of a second start (InvalidStateError).
+    if (actionsRef.current.isRecording) {
+      setPhaseSafe('listening');
+      return;
+    }
+
     setPhaseSafe('starting');
 
     const controller = new AbortController();
@@ -382,6 +478,8 @@ export function DictationApp({ onOpen, onClose, onDispose, onState }: Props) {
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
     if (pillTimerRef.current) clearInterval(pillTimerRef.current);
+    transientErrorsRef.current = 0;
+    invalidRetryDoneRef.current = false;
     setPhaseSafe('idle');
   }, [setPhaseSafe]);
 

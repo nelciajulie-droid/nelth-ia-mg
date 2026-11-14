@@ -26,7 +26,7 @@
   if (window.__nelthVocalBridge) return;
   window.__nelthVocalBridge = true;
 
-  var BUILD = '20270114a1';
+  var BUILD = '20270114a2';
   var SCRIPT_URL = '/static/vocal/main.js?v=' + BUILD;
   var CSS_URL = '/static/vocal/app.css?v=' + BUILD;
   var ROOT_ID = 'nelth-vocal-root';

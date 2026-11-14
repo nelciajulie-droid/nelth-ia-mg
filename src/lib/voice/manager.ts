@@ -70,8 +70,18 @@ export type VoiceSession = {
   ended: boolean;
 };
 
-const sessions = new Map<string, VoiceSession>();
-const timers = new Map<string, ReturnType<typeof setTimeout>>();
+// Cross-route in-memory state — globalThis singleton. Turbopack dev can
+// instantiate @/lib/voice/manager separately per route bundle (session
+// created in one instance, events/turn looking into an empty Map → 404
+// "session not found" milliseconds after creation). Keying the registries on
+// globalThis guarantees ONE store per server process; production behaviour
+// is unchanged (same single-process semantics).
+const gStore = globalThis as typeof globalThis & {
+  __nelthVoiceSessions?: Map<string, VoiceSession>;
+  __nelthVoiceTimers?: Map<string, ReturnType<typeof setTimeout>>;
+};
+const sessions: Map<string, VoiceSession> = (gStore.__nelthVoiceSessions ??= new Map());
+const timers: Map<string, ReturnType<typeof setTimeout>> = (gStore.__nelthVoiceTimers ??= new Map());
 
 function genId(): string {
   return `v-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

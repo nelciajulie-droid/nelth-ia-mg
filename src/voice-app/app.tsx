@@ -63,6 +63,29 @@ const ERROR_MESSAGES: Record<string, string> = {
 /** Errors that stop the auto-restart loop (fatal microphone/recognition). */
 const FATAL_REC_ERRORS = new Set(['permission-denied', 'audio-capture', 'service-not-allowed']);
 
+/** Transient errors — bounded retries with backoff, then manual retry. */
+const MAX_TRANSIENT_RETRIES = 3;
+
+/** Raw reason under a classified VocalError — the browser error-event code
+ *  (language-not-supported, bad-grammar…) or the DOMException name
+ *  (InvalidStateError: recognition still running → double-start race). */
+function rawReason(vocalErr: VocalError | null): string {
+  const orig = (vocalErr?.original ?? null) as { error?: unknown; name?: unknown } | null;
+  if (orig && typeof orig.error === 'string' && orig.error) return orig.error;
+  if (orig && typeof orig.name === 'string' && orig.name) return orig.name;
+  return '';
+}
+
+/** Display message — classifyError types, with the raw reason for unknowns
+ *  (diagnosability instead of a bare "Erreur de reconnaissance."). */
+function messageFor(t: string, reason: string): string {
+  if (reason === 'language-not-supported')
+    return 'Langue non supportée par la reconnaissance vocale (essayez FR ou EN).';
+  if (reason === 'bad-grammar') return 'Grammaire vocale non supportée par le navigateur.';
+  const base = ERROR_MESSAGES[t] || ERROR_MESSAGES.unknown;
+  return t === 'unknown' && reason ? `${base} (${reason})` : base;
+}
+
 export function VoiceApp({ chatId, onClose }: Props) {
   const supported = React.useMemo(() => isSupported(), []);
 
@@ -95,6 +118,19 @@ export function VoiceApp({ chatId, onClose }: Props) {
   const localVadRef = React.useRef({ above: 0 });
   const retryRef = React.useRef<(() => void) | null>(null);
   const optionsRef = React.useRef<HTMLDivElement | null>(null);
+  // Current options for the expired-session recovery (avoid stale closures).
+  const languageRef = React.useRef<'fr' | 'en'>('fr');
+  const voiceIdRef = React.useRef('');
+  const speedRef = React.useRef(1);
+  const chatIdRef = React.useRef<string | null>(chatId);
+  React.useEffect(() => {
+    languageRef.current = language;
+    voiceIdRef.current = voiceId;
+    speedRef.current = speed;
+  }, [language, voiceId, speed]);
+  React.useEffect(() => {
+    chatIdRef.current = chatId;
+  }, [chatId]);
 
   // --- recognition state (useVocal) --------------------------------------
   const orbStateRef = React.useRef<OrbState>('idle');
@@ -103,6 +139,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
   const restartTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const recEpochRef = React.useRef(0);
   const sentKeysRef = React.useRef<Set<string>>(new Set());
+  const transientStreakRef = React.useRef(0);
 
   const setOrbStateSafe = React.useCallback((next: OrbState) => {
     orbStateRef.current = next;
@@ -175,7 +212,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
     }
   }, []);
 
-  const armListening = React.useCallback(() => {
+  const armListening = React.useCallback((delay = 350) => {
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     restartTimerRef.current = setTimeout(() => {
       restartTimerRef.current = null;
@@ -184,6 +221,9 @@ export function VoiceApp({ chatId, onClose }: Props) {
       const st = orbStateRef.current;
       if (st === 'thinking' || st === 'speaking' || st === 'connecting' || st === 'error') return;
       if (startSignalRef.current) return; // a start is already resolving
+      // Double-start guard: Chrome throws InvalidStateError (classified
+      // "unknown") when start() hits a recognizer that is still active.
+      if (actionsRef.current.isRecording) return;
       const controller = new AbortController();
       startSignalRef.current = controller;
       actionsRef.current.start({ signal: controller.signal }).then(() => {
@@ -192,7 +232,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
         startSignalRef.current = null;
         recErrorRef.current(err);
       });
-    }, 350);
+    }, delay);
   }, []);
 
   // -----------------------------------------------------------------------
@@ -200,9 +240,16 @@ export function VoiceApp({ chatId, onClose }: Props) {
   // -----------------------------------------------------------------------
   const handleRecError = React.useCallback(
     (err: unknown) => {
+      // Raw recognizer events are DOM Events: they ALL carry a `.type`
+      // (the event name, "error") — requiring `original` (present on every
+      // VocalError from classifyError, absent from DOM events) avoids
+      // misreading an event as a pre-classified error.
       const vocalErr: VocalError | null =
-        err && typeof err === 'object' && 'type' in err ? (err as VocalError) : classifyError(err);
+        err && typeof err === 'object' && 'original' in err && 'type' in err
+          ? (err as VocalError)
+          : classifyError(err);
       const t = vocalErr?.type ?? 'unknown';
+      const reason = rawReason(vocalErr);
       if (t === 'aborted') return; // user-initiated cancel — silent
       if (t === 'no-speech') {
         // Benign single-shot silence timeout → keep listening.
@@ -210,7 +257,30 @@ export function VoiceApp({ chatId, onClose }: Props) {
         armListening();
         return;
       }
-      setError(ERROR_MESSAGES[t] || ERROR_MESSAGES.unknown);
+      if (t === 'unknown' && reason === 'InvalidStateError') {
+        // Double-start race (recognizer still closing) — silent recovery with
+        // a bounded number of retries (a wedged engine must not loop forever).
+        transientStreakRef.current += 1;
+        setPartial('');
+        if (transientStreakRef.current <= MAX_TRANSIENT_RETRIES) {
+          armListening(700);
+        } else {
+          setError(messageFor(t, reason)); // manual retry via the error box
+        }
+        return;
+      }
+      if (t === 'network' || t === 'unknown') {
+        // Transient — bounded retries with backoff; past the cap the error
+        // stays displayed with a manual retry (button below the orb).
+        transientStreakRef.current += 1;
+        setError(messageFor(t, reason));
+        setPartial('');
+        if (transientStreakRef.current <= MAX_TRANSIENT_RETRIES) {
+          armListening(400 * 2 ** (transientStreakRef.current - 1));
+        }
+        return;
+      }
+      setError(messageFor(t, reason));
       setPartial('');
       if (FATAL_REC_ERRORS.has(t)) setOrbStateSafe('error');
     },
@@ -220,6 +290,10 @@ export function VoiceApp({ chatId, onClose }: Props) {
   React.useEffect(() => {
     recErrorRef.current = handleRecError;
   }, [handleRecError]);
+
+  // Breaks the submitTurn↔onEvent declaration cycle: onEvent is declared
+  // LATER in the component body — accessed through a ref (no TDZ).
+  const onEventRef = React.useRef<(ev: VoiceEvent) => void>(() => undefined);
 
   // -----------------------------------------------------------------------
   // Assistant turn — the FINAL transcript enters the EXISTING pipeline.
@@ -233,12 +307,36 @@ export function VoiceApp({ chatId, onClose }: Props) {
     setAnswer(text);
     answerRef.current = '';
     setOrbStateSafe('thinking');
-    postTurn(sid, text).catch((e: unknown) => {
+
+    const fail = (msg: string) => {
       turnBusyRef.current = false;
-      const msg = e instanceof Error ? e.message : 'Erreur d\'envoi du tour.';
       setError(msg);
       setOrbStateSafe('listening');
       armListening();
+    };
+
+    postTurn(sid, text).catch(async (e: unknown) => {
+      const msg = e instanceof Error ? e.message : 'Erreur d\'envoi du tour.';
+      // Session expirée (pause > 90 s) → session neuve + tour rejoué UNE
+      // fois (pipeline serveur inchangé — seule la session est relancée).
+      if (/session not found|expir/i.test(msg)) {
+        try {
+          const fresh = await createSession({
+            language: languageRef.current,
+            voice: voiceIdRef.current || undefined,
+            speed: speedRef.current,
+            chatId: sessionRef.current?.chatId ?? chatIdRef.current,
+          });
+          sessionRef.current = fresh;
+          eventsRef.current?.close();
+          eventsRef.current = openEventStream(fresh.sessionId, onEventRef.current);
+          await postTurn(fresh.sessionId, text);
+          return;
+        } catch {
+          /* fall through: the original failure is surfaced */
+        }
+      }
+      fail(msg);
     });
   }, [armListening, setOrbStateSafe]);
 
@@ -278,6 +376,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
 
   const handleRecognitionStart = React.useCallback(() => {
     recEpochRef.current += 1;
+    transientStreakRef.current = 0; // recognition alive again
     setPartial('');
     setError(null);
     setOrbStateSafe('listening');
@@ -396,6 +495,11 @@ export function VoiceApp({ chatId, onClose }: Props) {
     }
   }, [armListening, setOrbStateSafe, stopRecognition]);
 
+  // Keep the session-recovery ref pointed at the CURRENT handler.
+  React.useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
+
   // -----------------------------------------------------------------------
   // Start / stop — mic capture (level + barge-in) → session → SSE channel
   // → recognition. Single HTTP/SSE transport: STT is browser-side.
@@ -507,7 +611,9 @@ export function VoiceApp({ chatId, onClose }: Props) {
       stopRecognition();
       setPartial('');
     } else {
-      armListening();
+      // Extra delay: let the recognizer finish closing before restarting
+      // (double-start → InvalidStateError otherwise).
+      armListening(600);
     }
   };
 
@@ -530,14 +636,21 @@ export function VoiceApp({ chatId, onClose }: Props) {
 
   const leave = () => { void stop(); onClose?.(); };
 
-  // Belt-and-braces: tab hidden → stop recognition (mic never hot in bg).
+  // Belt-and-braces: tab hidden → park the mic; back to the tab → re-arm
+  // (the recognition loop must not stay dead after a background stay).
   React.useEffect(() => {
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') stopRecognition();
+      if (document.visibilityState === 'hidden') {
+        stopRecognition();
+      } else if (
+        liveRef.current && !mutedRef.current && !turnBusyRef.current && !speakingRef.current
+      ) {
+        armListening(150);
+      }
     };
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [stopRecognition]);
+  }, [stopRecognition, armListening]);
 
   // Close the options popover on outside tap.
   React.useEffect(() => {
@@ -634,11 +747,20 @@ export function VoiceApp({ chatId, onClose }: Props) {
           <div className="vv-error" role="alert">
             <AlertTriangle className="vv-error-icon" aria-hidden />
             <span>{micError ?? error}</span>
-            {(micError || !isLive) && (
-              <button type="button" className="vv-error-retry" onClick={() => retryRef.current?.()}>
-                <RotateCcw className="vv-error-retry-icon" aria-hidden /> Réessayer
-              </button>
-            )}
+            <button type="button" className="vv-error-retry" onClick={() => {
+              const micFailed = Boolean(micError);
+              setMicError(null);
+              setError(null);
+              if (!isLive || micFailed) {
+                retryRef.current?.(); // boot/microphone failure → full session retry
+                return;
+              }
+              // Recognition-level retry — the session stays live.
+              transientStreakRef.current = 0;
+              armListening(150);
+            }}>
+              <RotateCcw className="vv-error-retry-icon" aria-hidden /> Réessayer
+            </button>
           </div>
         )}
         {phase === 'requesting-mic' && !micError && !error && (
