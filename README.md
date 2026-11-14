@@ -63,7 +63,7 @@ src/lib/          pipeline chat v12 (SSE), Kilo LLM, retrieval/RAG, auth Firebas
 src/server/       routeurs portés de open_webui (chats, files, models, knowledge…)
 public/           build Open WebUI original (SvelteKit statique) + couche loader.js/custom.css
 prisma/           schéma 45 tables — Supabase Postgres (unique, local + prod)
-mini-services/    socket-service (temps réel, optionnel) + stt-service (STT sherpa-onnx :3032, mode vocal)
+mini-services/    socket-service (temps réel, optionnel)
 scripts/          superviseur serve.mjs, sélecteur Prisma prisma.mjs, utilitaires
 ```
 

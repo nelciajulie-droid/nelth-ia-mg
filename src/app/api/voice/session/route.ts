@@ -5,8 +5,7 @@ import { NextRequest } from 'next/server';
 import { buildCtx } from '@/server/http';
 import { createVoiceSession } from '@/lib/voice/manager';
 import { VOICES, voicesFor } from '@/lib/voice/voices';
-import { VOICE_DEFAULT_LANGUAGE, VOICE_VAD_SILENCE_MS, VOICE_INTERRUPTION_ENABLED, voiceLlmEngine } from '@/lib/voice/config';
-import { sttHealth } from '@/lib/voice/stt-client';
+import { VOICE_DEFAULT_LANGUAGE, VOICE_INTERRUPTION_ENABLED, voiceLlmEngine } from '@/lib/voice/config';
 
 /** POST /api/voice/session — create a voice session. */
 export async function POST(req: NextRequest) {
@@ -37,13 +36,9 @@ export async function POST(req: NextRequest) {
       providers: {
         llm: voiceLlmEngine(),
         tts: 'edge',
-        stt: (await sttHealth()).ok ? 'sherpa-onnx' : 'unavailable',
+        stt: 'web-speech (@untemps/react-vocal, browser)',
       },
       config: {
-        sampleRate: 16000,
-        pcm: 'int16',
-        chunkMs: 100,
-        vadSilenceMs: VOICE_VAD_SILENCE_MS,
         interruptionEnabled: VOICE_INTERRUPTION_ENABLED,
       },
     });
@@ -60,6 +55,10 @@ export async function GET() {
     defaultLanguage: VOICE_DEFAULT_LANGUAGE,
     voices: voicesFor('edge'),
     allVoices: VOICES,
-    providers: { llm: voiceLlmEngine(), tts: 'edge' },
+    providers: {
+      llm: voiceLlmEngine(),
+      tts: 'edge',
+      stt: 'web-speech (@untemps/react-vocal, browser)',
+    },
   });
 }

@@ -1,24 +1,15 @@
 /**
  * Voice event protocol — typed server→client events (SSE channel).
- * Client→server is plain HTTP: session / audio / interrupt / end.
+ *
+ * STT is CLIENT-side (@untemps/react-vocal, Web Speech API): interim /
+ * final transcripts and speech events live in the browser and NEVER ride
+ * this channel. The server side carries the assistant turn only:
+ * LLM tokens + Edge TTS audio + lifecycle.
  */
 
-export type VoiceVadEventType =
-  | 'vad.speech_started'
-  | 'vad.speech_ended'
-  | 'vad.silence_detected'
-  | 'vad.interruption_detected'
-  | 'vad.turn_completed';
-
 export type VoiceEvent =
-  | { type: 'session.ready'; sessionId: string; ts: number; payload: { language: string; voice: string; sttModel: string; llmModel: string; ttsProvider: string; chatId: string | null } }
-  | { type: 'vad.speech_started'; sessionId: string; ts: number }
-  | { type: 'vad.speech_ended'; sessionId: string; ts: number }
-  | { type: 'vad.silence_detected'; sessionId: string; ts: number }
+  | { type: 'session.ready'; sessionId: string; ts: number; payload: { language: string; voice: string; sttEngine: string; llmModel: string; ttsProvider: string; chatId: string | null } }
   | { type: 'vad.interruption_detected'; sessionId: string; ts: number }
-  | { type: 'vad.turn_completed'; sessionId: string; ts: number }
-  | { type: 'stt.partial'; sessionId: string; ts: number; payload: { text: string } }
-  | { type: 'stt.final'; sessionId: string; ts: number; payload: { text: string } }
   | { type: 'llm.started'; sessionId: string; ts: number; payload: { requestId: string; model: string } }
   | { type: 'llm.token'; sessionId: string; ts: number; payload: { text: string } }
   | { type: 'tts.started'; sessionId: string; ts: number; payload: { sequenceId: number; text: string } }

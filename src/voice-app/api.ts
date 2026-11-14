@@ -1,14 +1,14 @@
 /**
- * Voice API client — session + transports + interrupt + end.
+ * Voice API client — session + SSE events + turn + interrupt + end.
  *
- * TWO transports, one protocol:
- *   1. WebSocket (preferred) — /api/voice/ws carries audio uplink AND the
- *      event downlink in one bidirectional connection (Vercel WS Public
- *      Beta — Fluid Compute). Tried first with a short timeout.
- *   2. HTTP + SSE (fallback, the originally tested pipeline) — POST
- *      /api/voice/audio + GET /api/voice/events. Used whenever the WS
- *      upgrade is unavailable (e.g. local dev runtime returns 501) or the
- *      socket drops mid-session.
+ * Speech recognition runs IN THE BROWSER (@untemps/react-vocal — Web
+ * Speech API): microphone audio NEVER rides HTTP. The client sends only:
+ *   • POST /api/voice/session   — create the session;
+ *   • POST /api/voice/turn       — the FINAL transcript (never interim);
+ *   • POST /api/voice/interrupt  — barge-in;
+ *   • POST /api/voice/end        — leave;
+ * and receives every assistant event (llm.token / tts.audio_chunk /
+ * assistant.finished / errors) on the single SSE channel below.
  */
 
 import type { VoiceEvent } from '@/lib/voice/protocol';
@@ -20,14 +20,14 @@ export type SessionInfo = {
   speed: number;
   chatId: string | null;
   providers: { llm: string; tts: string; stt: string };
-  config: { sampleRate: number; pcm: string; chunkMs: number; vadSilenceMs: number; interruptionEnabled: boolean };
+  config: { interruptionEnabled: boolean };
 };
 
 export type VoiceCatalogue = {
   languages: string[];
   defaultLanguage: string;
   voices: { id: string; label: string; language: 'fr' | 'en'; gender: string; provider: string }[];
-  stt: { ok: boolean; runtime?: string; languages?: { key: string; model: string }[] };
+  stt: string;
 };
 
 async function readError(res: Response): Promise<string> {
@@ -61,108 +61,22 @@ export function openEventStream(sessionId: string, onEvent: (ev: VoiceEvent) => 
   es.onmessage = (m) => {
     try {
       onEvent(JSON.parse(m.data) as VoiceEvent);
-    } catch { /* malformed frame dropped */ }
+    } catch {
+      /* malformed frame dropped */
+    }
   };
   return { close: () => es.close() };
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket transport (preferred) — bidirectional audio + events.
-// ---------------------------------------------------------------------------
-
-export type VoiceSocket = {
-  sendAudio: (pcm: Int16Array) => void;
-  sendInterrupt: () => void;
-  sendEnd: () => void;
-  close: () => void;
-};
-
-/** Await the bidirectional socket; resolves to null when the upgrade fails
- *  or never completes (dev runtime answers 501) → the caller keeps the
- *  HTTP+SSE pipeline (openEventStream + postAudio). Mid-session drops
- *  downgrade via onDowngrade. */
-export async function openVoiceSocket(
-  sessionId: string,
-  onEvent: (ev: VoiceEvent) => void,
-  onDowngrade?: (reason: string) => void,
-  timeoutMs = 3500
-): Promise<VoiceSocket | null> {
-  if (typeof WebSocket === 'undefined') return null;
-  let ws: WebSocket;
-  try {
-    ws = new WebSocket(`/api/voice/ws?session=${encodeURIComponent(sessionId)}`);
-  } catch {
-    return null;
-  }
-  const pending: string[] = [];
-
-  const ready = new Promise<boolean>((resolve) => {
-    let settled = false;
-    const fail = () => {
-      if (settled) return;
-      settled = true;
-      try { ws.close(); } catch { /* noop */ }
-      resolve(false);
-    };
-    ws.onmessage = (m) => {
-      try {
-        const ev = JSON.parse(String(m.data)) as VoiceEvent;
-        if (ev && (ev as any).type === 'ws.ready') {
-          if (settled) { onEvent(ev); return; }
-          settled = true;
-          while (pending.length) {
-            const frame = pending.shift()!;
-            try { ws.send(frame); } catch { /* closing */ }
-          }
-          resolve(true);
-          return;
-        }
-        onEvent(ev);
-      } catch { /* malformed frame dropped */ }
-    };
-    ws.onerror = fail;
-    ws.onclose = () => {
-      if (settled) { onDowngrade?.('ws-closed'); return; } // mid-session drop
-      fail(); // never established → SSE fallback
-    };
-    setTimeout(fail, timeoutMs);
-  });
-
-  const ok = await ready;
-  if (!ok) return null;
-
-  const queueOrSend = (frame: string) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      try { ws.send(frame); return; } catch { /* closing */ }
-    }
-    if (pending.length < 64) pending.push(frame); // bounded buffer (reconnect edge)
-  };
-
-  return {
-    sendAudio: (pcm: Int16Array) => {
-      const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-      // btoa over chunked string conversion (robust for large arrays).
-      let bin = '';
-      const step = 0x8000;
-      for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + step)) as unknown as number[]);
-      queueOrSend(JSON.stringify({ type: 'audio', pcm: btoa(bin) }));
-    },
-    sendInterrupt: () => queueOrSend(JSON.stringify({ type: 'interrupt' })),
-    sendEnd: () => queueOrSend(JSON.stringify({ type: 'end' })),
-    close: () => {
-      try { ws.close(); } catch { /* already closed */ }
-    },
-  };
-}
-
-export async function postAudio(sessionId: string, pcm: Int16Array): Promise<void> {
-  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-  await fetch(`/api/voice/audio?session=${encodeURIComponent(sessionId)}`, {
+/** Submit a FINAL transcript (never an interim) into the assistant pipeline. */
+export async function postTurn(sessionId: string, text: string): Promise<void> {
+  const res = await fetch(`/api/voice/turn?session=${encodeURIComponent(sessionId)}`, {
     method: 'POST',
-    body: new Blob([bytes as unknown as BlobPart]),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
     credentials: 'same-origin',
-    keepalive: false,
-  }).catch(() => undefined); // transient network hiccups never break the session
+  });
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 export async function postInterrupt(sessionId: string): Promise<void> {

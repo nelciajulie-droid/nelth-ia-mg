@@ -5,13 +5,14 @@ export const maxDuration = 300;
 import { NextRequest } from 'next/server';
 import { buildCtx } from '@/server/http';
 import { getVoiceSession, subscribe } from '@/lib/voice/manager';
-import { STT_MODEL, VOICE_LLM_MODEL } from '@/lib/voice/config';
+import { VOICE_LLM_MODEL } from '@/lib/voice/config';
 import type { VoiceEvent } from '@/lib/voice/protocol';
 
 /**
  * GET /api/voice/events?session=… — the server→client event channel (SSE).
- * Every event (vad / stt.partial / stt.final / llm.token / tts.audio_chunk /
- * assistant.finished / errors) rides this single stream.
+ * Every event (llm.token / tts.audio_chunk / assistant.finished / errors)
+ * rides this single stream. STT events are CLIENT-side (Web Speech) and
+ * never appear here.
  */
 export async function GET(req: NextRequest) {
   const ctx = await buildCtx(req as unknown as Request, 'voice/events', {});
@@ -35,8 +36,8 @@ export async function GET(req: NextRequest) {
         }
       };
       // Replay-anchors: fresh subscribers start from the live stream (the
-      // UI re-syncs its transcript from stt.partial snapshots anyway).
-      send({ type: 'session.ready', sessionId: session.id, ts: Date.now(), payload: { language: session.language, voice: session.voice, sttModel: STT_MODEL, llmModel: VOICE_LLM_MODEL, ttsProvider: 'edge', chatId: session.chatId } } as VoiceEvent);
+      // UI re-syncs its transcript from the local recognition state anyway).
+      send({ type: 'session.ready', sessionId: session.id, ts: Date.now(), payload: { language: session.language, voice: session.voice, sttEngine: 'web-speech (@untemps/react-vocal)', llmModel: VOICE_LLM_MODEL, ttsProvider: 'edge', chatId: session.chatId } } as VoiceEvent);
       unsubscribe = subscribe(session, send);
       heartbeat = setInterval(() => {
         try {

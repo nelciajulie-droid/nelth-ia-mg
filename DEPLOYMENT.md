@@ -183,40 +183,41 @@ Copier `.env.example` → `.env`. Les valeurs marquées **obligatoires** doivent
 | `APP_PORT` | ⬜ | Port de l'app (défaut `3000`) |
 | `SOCKET_SERVICE_PORT` | ⬜ | Port interne socket.io (défaut `3001`) |
 
-### Mode vocal temps réel (overlay « Mode vocal » — STT auto-hébergé)
+### Mode vocal temps réel (overlay « Mode vocal » — STT navigateur)
 
-Le mode vocal conversationnel (orbe plein duplex) s'appuie sur **trois moteurs
+Le mode vocal conversationnel (orbe plein duplex) s'appuie sur **trois étages
 sans aucun repli de fournisseur** :
 
 | Étage | Moteur | Où il tourne |
 |---|---|---|
-| STT streaming | `mini-services/stt-service` — sherpa-onnx **nemotron-3.5-asr-streaming-0.6b** (export k2-fsa officiel, INT8) + VAD Silero | **auto-hébergé** sur un hôte joignable publiquement (VPS/serveur perso), port `3032` |
+| STT | **@untemps/react-vocal** (librairie officielle) — Web Speech API du navigateur, `useVocal` + `WebSpeechEngine` par défaut, AUCUN STT serveur | navigateur (Chrome / Edge pleinement supportés) |
 | LLM vocal | `nvidia/nemotron-3.5-super-vl:free` via **Kilo Gateway** | Vercel (réutilise `KILO_GATEWAY_API_KEY`) |
 | TTS | **Edge TTS** (`node-edge-tts`, voix `fr-FR-DeniseNeural`, etc.) | Vercel — HTTPS sortant direct |
 
-Déployer le service STT (une fois, sur l'hôte public) :
+Flux : la transcription FINALE (jamais l'interim) part en
+`POST /api/voice/turn` → LLM Kilo en streaming + synthèse Edge TTS par
+phrases, le tout remonté par SSE `/api/voice/events`. La capture micro locale
+sert uniquement à l'animation de l'orbe et au barge-in (VAD d'énergie).
 
-```bash
-cd mini-services/stt-service
-bun install && bun run dev        # écoute sur :3032, télécharge les modèles au 1ᵉʳ boot
-# derrière Caddy/nginx : stt.votre-domaine.tld → 127.0.0.1:3032 (TLS + secret)
-```
-
-Puis dans l'environnement Vercel (Production) :
+Variables Vercel (Production) — **aucune variable STT** :
 
 | Variable | Valeur | Rôle |
 |---|---|---|
-| `STT_REMOTE_URL` | `https://stt.votre-domaine.tld` | URL publique du service STT |
-| `STT_AUTH_SECRET` | secret partagé | header `x-stt-secret` (optionnel mais recommandé) |
+| `KILO_GATEWAY_API_KEY` | clé Kilo (déjà requise pour le chat) | LLM vocal |
 | `VOICE_LLM_MODEL` | défaut : `nvidia/nemotron-3.5-super-vl:free` | modèle LLM vocal |
 | `VOICE_DEFAULT_LANGUAGE` | défaut : `fr` | langue par défaut de l'overlay |
 
-**Comportement sans repli (important)** : si `STT_REMOTE_URL` n'est pas
-configuré ou si l'hôte est injoignable, l'overlay affiche « Service de
-reconnaissance vocale indisponible » et **aucune bascule fournisseur n'a lieu** —
-ni pour le STT, ni pour le LLM (sans clé Kilo : erreur de configuration claire),
-ni pour le TTS. C'est le comportement voulu : service débranché → le mode
-vocal le dit honnêtement, il ne route jamais vers un autre fournisseur.
+**Compatibilité navigateur** : la reconnaissance repose sur la Web Speech
+API — Chrome et Edge la supportent complètement. Firefox ne l'expose pas
+(reconnaissance indisponible, message clair affiché par l'overlay via
+`isSupported()`). Safari/iOS offrent un support partiel — l'overlay
+s'adapte ou signale l'erreur, jamais de micro muet silencieux.
+
+**Comportement sans repli (important)** : navigateur sans Web Speech →
+l'overlay affiche « La reconnaissance vocale n'est pas supportée par ce
+navigateur » et n'active pas le micro ; sans clé Kilo → erreur de
+configuration claire ; Edge TTS en échec → message « aucune bascule
+automatique ». Aucun étage ne route JAMAIS vers un autre fournisseur.
 
 ### Moteurs intégrés audio + images (zéro configuration, sans aucun SDK)
 

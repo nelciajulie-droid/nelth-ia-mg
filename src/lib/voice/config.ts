@@ -1,22 +1,11 @@
 /**
- * Voice server configuration — every environment variable documented
- * (mission §18). Secrets NEVER reach the browser.
+ * Voice server configuration — every environment variable documented.
+ * Secrets NEVER reach the browser.
+ *
+ * STT: NONE on the server. Speech recognition runs in the browser via
+ * @untemps/react-vocal (default WebSpeechEngine — Web Speech API); there
+ * is no remote STT URL, secret or model to configure anymore.
  */
-
-/** Remote streaming STT service (sherpa-onnx host). Next.js forwards PCM
- * server-to-server; the browser never performs inference. */
-export const STT_REMOTE_URL = (process.env.STT_REMOTE_URL || 'http://127.0.0.1:3032').replace(/\/+$/, '');
-
-/** Shared secret between the Vercel backend and the STT host. */
-export const STT_AUTH_SECRET = process.env.STT_AUTH_SECRET || '';
-
-/** Mandated STT model — nvidia/nemotron-3.5-asr-streaming-0.6b, now REALLY
- *  served by the remote STT host through the OFFICIAL k2-fsa export
- *  (560ms INT8, scripts/nemo/nemotron-3.5-asr-streaming-0.6b). The
- *  previously tested zipformers remain available via STT_ENGINE=zipformer
- *  on the service host. */
-export const STT_MODEL = process.env.STT_MODEL || 'nvidia/nemotron-3.5-asr-streaming-0.6b';
-export const STT_MODEL_PRECISION = process.env.STT_MODEL_PRECISION || 'int8';
 
 /** Mandated voice LLM: NVIDIA Nemotron through the Kilo gateway. */
 export const VOICE_LLM_MODEL = process.env.VOICE_LLM_MODEL || 'nvidia/nemotron-3.5-super-vl:free';
@@ -44,12 +33,10 @@ export const VOICE_TTS_PITCH = process.env.VOICE_TTS_PITCH || '+0Hz';
 
 /** Hard session caps (security & resources). */
 export const VOICE_MAX_SESSION_DURATION_SEC = Math.max(60, Number(process.env.VOICE_MAX_SESSION_DURATION) || 1800);
-export const VOICE_MAX_AUDIO_SIZE = Math.max(1_000_000, Number(process.env.VOICE_MAX_AUDIO_SIZE) || 200_000_000);
 /** Max pending TTS segments in the bounded queue (backpressure). */
 export const VOICE_TTS_QUEUE_MAX = 5;
 
-/** VAD end-of-turn silence (ms) and interruption behaviour. */
-export const VOICE_VAD_SILENCE_MS = Math.max(200, Number(process.env.VOICE_VAD_SILENCE_MS) || 750);
+/** Interruption behaviour (browser-side energy barge-in). */
 export const VOICE_INTERRUPTION_ENABLED = process.env.VOICE_INTERRUPTION_ENABLED !== 'false';
 
 /** Which engine serves the voice LLM right now (diagnostics only). */

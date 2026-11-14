@@ -1,16 +1,14 @@
 /**
- * Voice audio engine (browser side) — microphone capture + playback.
+ * Voice audio engine (browser side) — microphone level meter + playback.
  *
- * CAPTURE: getUserMedia (echoCancellation/noiseSuppression/autoGain) →
- * AudioContext@16 kHz → AudioWorklet PCM16 publisher (~100 ms frames).
- * The worklet is created from an inline Blob URL (no build artifact).
- * A lightweight energy detector on the same samples drives the BARGE-IN
- * (user speech while the assistant speaks) → interrupt endpoint. This is
- * signal processing only — NO inference in the browser (mission §1).
+ * CAPTURE (visualisation ONLY): getUserMedia (echoCancellation/
+ * noiseSuppression/autoGain) → AudioWorklet energy detector → orb level
+ * + local BARGE-IN VAD (user speech while the assistant speaks) →
+ * interrupt endpoint. Speech recognition itself is handled by
+ * @untemps/react-vocal (Web Speech API) — NO PCM ever leaves the browser.
  *
  * PLAYBACK: ordered queue of complete MP3 segments (each tts.audio_chunk
- * family shares one sequenceId; a segment is independently decodable —
- * mission §9). Stale sequenceIds after an interruption are rejected.
+ * family shares one sequenceId; a segment is independently decodable).
  */
 
 export type CaptureHandle = {
@@ -50,8 +48,6 @@ registerProcessor('pcm-publisher', PcmPublisher);
 `;
 
 export type CaptureEvents = {
-  /** 100 ms PCM16 frame (Int16Array, transferred). */
-  onFrame: (pcm: Int16Array) => void;
   /** Fast RMS-ish indicator (0..1) — orb + local barge-in VAD. */
   onLevel: (level: number) => void;
 };
@@ -75,7 +71,6 @@ export async function startCapture(evts: CaptureEvents): Promise<CaptureHandle> 
   const node = new AudioWorkletNode(context, 'pcm-publisher', { numberOfOutputs: 0 });
   node.port.onmessage = (e) => {
     const data = e.data;
-    if (data.pcm) evts.onFrame(data.pcm as Int16Array);
     if (typeof data.tick === 'number') evts.onLevel(data.tick);
   };
   src.connect(node); // worklet has 0 outputs → no speakers feedback

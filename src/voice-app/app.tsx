@@ -6,20 +6,31 @@
  * cast en haut à droite qui ouvre les options (langue, voix, vitesse,
  * transcription, stop lecture).
  *
- * Toute la logique testée est conservée : capture micro plein duplex,
- * double transport (WebSocket bidirectionnel → repli HTTP+SSE), VAD local
- * barge-in, interruption, file de lecture TTS, mute, relance, erreurs.
+ * SPEECH RECOGNITION — @untemps/react-vocal (useVocal hook, default
+ * WebSpeechEngine, NO custom engine, NO server STT):
+ *   • single-shot recognition per listening window (interim results ON);
+ *   • interim transcripts → provisional display ONLY (never submitted);
+ *   • final transcript → POST /api/voice/turn (EXISTING pipeline: Kilo
+ *     LLM streaming + Edge TTS sentence chunks over SSE);
+ *   • recognition pauses while the assistant speaks (no speaker echo in
+ *     the recognizer); the local energy VAD keeps the BARGE-IN alive and
+ *     the mic capture NEVER stops (orb level + animation);
+ *   • isSupported() gate: browsers without the Web Speech API get a clear
+ *     error — never a silently nonfunctional microphone button;
+ *   • errors classified through the library's classifyError().
+ *
  * States (machine inchangée) : idle → connecting → listening ⇄ thinking ⇄
- * speaking — le micro ne s'arrête JAMAIS (full duplex).
+ * speaking — le niveau du micro anime l'orbe en continu.
  */
 
 import * as React from 'react';
 import { Mic, MicOff, X, Cast, Gauge, VolumeX, Subtitles, AlertTriangle, RotateCcw, Loader2 } from 'lucide-react';
+import { useVocal, classifyError, isSupported, type VocalError } from '@untemps/react-vocal';
 import type { VoiceEvent } from '@/lib/voice/protocol';
 import { PlaybackQueue, startCapture, type CaptureHandle } from './audio';
 import {
-  createSession, openEventStream, openVoiceSocket, postAudio, postInterrupt, postEnd, fetchCatalogue,
-  type SessionInfo, type VoiceCatalogue, type VoiceSocket,
+  createSession, openEventStream, postTurn, postInterrupt, postEnd, fetchCatalogue,
+  type SessionInfo, type VoiceCatalogue,
 } from './api';
 
 type OrbState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error';
@@ -38,7 +49,23 @@ const SR_STATE_LABELS: Record<OrbState, string> = {
   error: 'Erreur',
 };
 
+/** FR messages per VocalError.type (classifyError contract). */
+const ERROR_MESSAGES: Record<string, string> = {
+  'permission-denied': 'Micro bloqué — autorisez le microphone dans les réglages du navigateur.',
+  'no-speech': 'Aucune voix détectée.',
+  network: 'Erreur réseau de reconnaissance.',
+  'audio-capture': 'Micro inaccessible.',
+  'service-not-allowed': 'Service de reconnaissance non autorisé par le navigateur.',
+  aborted: 'Reconnaissance interrompue.',
+  unknown: 'Erreur de reconnaissance.',
+};
+
+/** Errors that stop the auto-restart loop (fatal microphone/recognition). */
+const FATAL_REC_ERRORS = new Set(['permission-denied', 'audio-capture', 'service-not-allowed']);
+
 export function VoiceApp({ chatId, onClose }: Props) {
+  const supported = React.useMemo(() => isSupported(), []);
+
   const [phase, setPhase] = React.useState<'boot' | 'requesting-mic' | 'live' | 'ended'>('boot');
   const [orbState, setOrbState] = React.useState<OrbState>('idle');
   const [level, setLevel] = React.useState(0);
@@ -53,7 +80,6 @@ export function VoiceApp({ chatId, onClose }: Props) {
   const [voiceId, setVoiceId] = React.useState<string>('');
   const [speed, setSpeed] = React.useState(1);
   const [interruptedCount, setInterruptedCount] = React.useState(0);
-  const [transport, setTransport] = React.useState<'ws' | 'sse' | null>(null);
   const [showOptions, setShowOptions] = React.useState(false);
   const [showTranscript, setShowTranscript] = React.useState(false);
   const [speaking, setSpeaking] = React.useState(false);
@@ -61,7 +87,6 @@ export function VoiceApp({ chatId, onClose }: Props) {
   const sessionRef = React.useRef<SessionInfo | null>(null);
   const captureRef = React.useRef<CaptureHandle | null>(null);
   const eventsRef = React.useRef<{ close: () => void } | null>(null);
-  const socketRef = React.useRef<VoiceSocket | null>(null);
   const playbackRef = React.useRef<PlaybackQueue | null>(null);
   const mutedRef = React.useRef(false);
   const liveRef = React.useRef(false);
@@ -70,6 +95,44 @@ export function VoiceApp({ chatId, onClose }: Props) {
   const localVadRef = React.useRef({ above: 0 });
   const retryRef = React.useRef<(() => void) | null>(null);
   const optionsRef = React.useRef<HTMLDivElement | null>(null);
+
+  // --- recognition state (useVocal) --------------------------------------
+  const orbStateRef = React.useRef<OrbState>('idle');
+  const turnBusyRef = React.useRef(false);
+  const startSignalRef = React.useRef<AbortController | null>(null);
+  const restartTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recEpochRef = React.useRef(0);
+  const sentKeysRef = React.useRef<Set<string>>(new Set());
+
+  const setOrbStateSafe = React.useCallback((next: OrbState) => {
+    orbStateRef.current = next;
+    setOrbState(next);
+  }, []);
+
+  // BCP 47 tag for the recognizer — primitive arg, stable per language
+  // (a change rebuilds the hook instance at a SAFE boundary: the previous
+  // recognition session is already stopped when a turn is in flight).
+  const recLang = React.useMemo(() => (language === 'en' ? 'en-US' : 'fr-FR'), [language]);
+
+  // useVocal(lang, grammars, maxAlternatives, continuous, interimResults)
+  //   • grammars = null → stable (no rebuild churn);
+  //   • continuous = false → single-shot per listening window: ONE final
+  //     per utterance, the engine ends by itself (no speaker-echo turns);
+  //   • interimResults = true → live provisional transcripts;
+  //   • engine omitted → the library's default WebSpeechEngine.
+  const [, vocalActions] = useVocal(recLang, null, 1, false, true);
+  const { subscribe, unsubscribe } = vocalActions;
+
+  // The hook may recreate its actions object per render — capture it in a
+  // ref so our imperative callbacks keep STABLE identities (no repeated
+  // recognition initialization per render, no duplicate subscriptions).
+  const actionsRef = React.useRef(vocalActions);
+  React.useEffect(() => {
+    actionsRef.current = vocalActions;
+  }, [vocalActions]);
+
+  // Breaks the start↔error callback cycle with a stable indirection.
+  const recErrorRef = React.useRef<(err: unknown) => void>(() => undefined);
 
   // -----------------------------------------------------------------------
   // Local barge-in VAD (signal processing ONLY — no inference): sustained
@@ -85,53 +148,200 @@ export function VoiceApp({ chatId, onClose }: Props) {
       localVadRef.current.above += 1;
       if (localVadRef.current.above >= 3) {
         localVadRef.current.above = 0;
-        const sock = socketRef.current;
         const sid = sessionRef.current?.sessionId;
-        if (sock) sock.sendInterrupt();
-        else if (sid) void postInterrupt(sid);
+        if (sid) void postInterrupt(sid);
       }
     } else {
       localVadRef.current.above = Math.max(0, localVadRef.current.above - 1);
     }
   }, []);
 
-  const handleFrame = React.useCallback((pcm: Int16Array) => {
-    if (mutedRef.current) return;
-    const sock = socketRef.current;
-    if (sock) { sock.sendAudio(pcm); return; }
-    const sid = sessionRef.current?.sessionId;
-    if (sid) void postAudio(sid, pcm);
+  // -----------------------------------------------------------------------
+  // Recognition control — start/stop with guards (no mic leak, no double
+  // start; AbortSignal cancels a start still resolving, e.g. permission
+  // prompt open when the user leaves). Refs ONLY → stable identities.
+  // -----------------------------------------------------------------------
+  const stopRecognition = React.useCallback(() => {
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    startSignalRef.current?.abort();
+    startSignalRef.current = null;
+    try {
+      actionsRef.current.stop();
+    } catch {
+      /* engine already down */
+    }
+  }, []);
+
+  const armListening = React.useCallback(() => {
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null;
+      if (!liveRef.current || mutedRef.current || turnBusyRef.current || speakingRef.current) return;
+      if (playbackRef.current?.playing) return; // assistant audio still flowing
+      const st = orbStateRef.current;
+      if (st === 'thinking' || st === 'speaking' || st === 'connecting' || st === 'error') return;
+      if (startSignalRef.current) return; // a start is already resolving
+      const controller = new AbortController();
+      startSignalRef.current = controller;
+      actionsRef.current.start({ signal: controller.signal }).then(() => {
+        startSignalRef.current = null;
+      }).catch((err: unknown) => {
+        startSignalRef.current = null;
+        recErrorRef.current(err);
+      });
+    }, 350);
   }, []);
 
   // -----------------------------------------------------------------------
-  // Event channel — one handler for BOTH transports (WS + SSE share the
-  // VoiceEvent wire format).
+  // Classified recognition errors — the library's classifyError contract.
+  // -----------------------------------------------------------------------
+  const handleRecError = React.useCallback(
+    (err: unknown) => {
+      const vocalErr: VocalError | null =
+        err && typeof err === 'object' && 'type' in err ? (err as VocalError) : classifyError(err);
+      const t = vocalErr?.type ?? 'unknown';
+      if (t === 'aborted') return; // user-initiated cancel — silent
+      if (t === 'no-speech') {
+        // Benign single-shot silence timeout → keep listening.
+        setPartial('');
+        armListening();
+        return;
+      }
+      setError(ERROR_MESSAGES[t] || ERROR_MESSAGES.unknown);
+      setPartial('');
+      if (FATAL_REC_ERRORS.has(t)) setOrbStateSafe('error');
+    },
+    [armListening, setOrbStateSafe]
+  );
+
+  React.useEffect(() => {
+    recErrorRef.current = handleRecError;
+  }, [handleRecError]);
+
+  // -----------------------------------------------------------------------
+  // Assistant turn — the FINAL transcript enters the EXISTING pipeline.
+  // Interim transcripts never reach this path (provisional display only).
+  // -----------------------------------------------------------------------
+  const submitTurn = React.useCallback((text: string) => {
+    const sid = sessionRef.current?.sessionId;
+    if (!sid || turnBusyRef.current || !liveRef.current) return;
+    turnBusyRef.current = true;
+    setPartial('');
+    setAnswer(text);
+    answerRef.current = '';
+    setOrbStateSafe('thinking');
+    postTurn(sid, text).catch((e: unknown) => {
+      turnBusyRef.current = false;
+      const msg = e instanceof Error ? e.message : 'Erreur d\'envoi du tour.';
+      setError(msg);
+      setOrbStateSafe('listening');
+      armListening();
+    });
+  }, [armListening, setOrbStateSafe]);
+
+  // -----------------------------------------------------------------------
+  // Recognition event subscriptions — result (interim/final), start, end,
+  // speechstart, speechend, error. Stable handlers; when the hook rebuilds
+  // its actions object (language change) the effect resubscribes to the NEW
+  // engine instance and drops the old listeners — never duplicated.
+  // -----------------------------------------------------------------------
+  const handleResult = React.useCallback(
+    (event: unknown, transcript: unknown) => {
+      if (orbStateRef.current !== 'listening') return;
+      const evt = event as
+        | { resultIndex?: number; results?: Record<number, { isFinal?: boolean }> }
+        | undefined;
+      const idx = typeof evt?.resultIndex === 'number' ? evt.resultIndex : -1;
+      const isFinal = idx >= 0 ? Boolean(evt?.results?.[idx]?.isFinal) : true;
+      const text = String(transcript ?? '');
+
+      if (!isFinal) {
+        // Provisional text → transcript display ONLY. Never submitted.
+        setPartial(text);
+        return;
+      }
+
+      // FINAL → submit EXACTLY once (dedupe by recognition epoch + index
+      // + text — the engine never delivers the same final twice).
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const key = `${recEpochRef.current}:${idx}:${trimmed}`;
+      if (sentKeysRef.current.has(key)) return;
+      sentKeysRef.current.add(key);
+      submitTurn(trimmed);
+    },
+    [submitTurn]
+  );
+
+  const handleRecognitionStart = React.useCallback(() => {
+    recEpochRef.current += 1;
+    setPartial('');
+    setError(null);
+    setOrbStateSafe('listening');
+  }, [setOrbStateSafe]);
+
+  const handleRecognitionEnd = React.useCallback(() => {
+    // Single-shot engine ended: either a final was delivered (turn in
+    // flight → the turn lifecycle restarts recognition) or silence
+    // timeout → re-arm listening.
+    setPartial('');
+    if (turnBusyRef.current || !liveRef.current || mutedRef.current) return;
+    armListening();
+  }, [armListening]);
+
+  const handleSpeechStart = React.useCallback(() => {
+    // The level meter animates the orb; nothing else to do.
+  }, []);
+  const handleSpeechEnd = React.useCallback(() => {
+    /* kept for lifecycle parity */
+  }, []);
+
+  React.useEffect(() => {
+    subscribe('result', handleResult);
+    subscribe('error', handleRecError);
+    subscribe('start', handleRecognitionStart);
+    subscribe('end', handleRecognitionEnd);
+    subscribe('speechstart', handleSpeechStart);
+    subscribe('speechend', handleSpeechEnd);
+
+    return () => {
+      unsubscribe('result', handleResult);
+      unsubscribe('error', handleRecError);
+      unsubscribe('start', handleRecognitionStart);
+      unsubscribe('end', handleRecognitionEnd);
+      unsubscribe('speechstart', handleSpeechStart);
+      unsubscribe('speechend', handleSpeechEnd);
+    };
+  }, [
+    subscribe,
+    unsubscribe,
+    handleResult,
+    handleRecError,
+    handleRecognitionStart,
+    handleRecognitionEnd,
+    handleSpeechStart,
+    handleSpeechEnd,
+  ]);
+
+  // -----------------------------------------------------------------------
+  // Event channel (SSE) — assistant turn events from the EXISTING pipeline.
   // -----------------------------------------------------------------------
   const onEvent = React.useCallback((ev: VoiceEvent) => {
     const p = (ev as any).payload;
     switch (ev.type) {
-      case 'vad.speech_started':
-        setOrbState((s) => (s === 'listening' ? 'listening' : s));
-        break;
-      case 'stt.partial':
-        setPartial(String(p?.text ?? ''));
-        break;
-      case 'stt.final':
-        setPartial('');
-        setAnswer(String(p?.text ?? ''));
-        answerRef.current = '';
-        setOrbState('thinking');
-        break;
       case 'llm.started':
         setStreamingAnswer('');
-        setOrbState('thinking');
+        setOrbStateSafe('thinking');
         break;
       case 'llm.token':
         answerRef.current += String(p?.text ?? '');
         setStreamingAnswer(answerRef.current);
         break;
       case 'tts.started':
-        setOrbState('speaking');
+        setOrbStateSafe('speaking');
         speakingRef.current = true;
         setSpeaking(true);
         playbackRef.current?.resume();
@@ -143,7 +353,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
         playbackRef.current?.segmentDone(Number(p?.sequenceId));
         break;
       case 'tts.degraded':
-        setError(`Audio de repli activé (${String(p?.reason ?? '')})`);
+        setError(String(p?.reason ?? 'Synthèse vocale indisponible — aucune bascule automatique.'));
         break;
       case 'vad.interruption_detected':
       case 'assistant.interrupted':
@@ -151,44 +361,57 @@ export function VoiceApp({ chatId, onClose }: Props) {
         speakingRef.current = false;
         setSpeaking(false);
         setInterruptedCount((n) => n + 1);
-        setOrbState('listening');
+        setOrbStateSafe('listening');
+        turnBusyRef.current = false;
+        armListening();
         break;
       case 'assistant.finished':
         setStreamingAnswer('');
         setAnswer(String(p?.text ?? ''));
         speakingRef.current = false;
         setSpeaking(false);
-        setOrbState('listening');
+        setOrbStateSafe('listening');
+        turnBusyRef.current = false;
         if (p?.chatId && sessionRef.current) sessionRef.current.chatId = String(p.chatId);
+        armListening();
         break;
       case 'session.error': {
         const msg = String(p?.message ?? 'Erreur');
         setError(msg);
-        if (!p?.recoverable) setOrbState('error');
+        const stage = String(p?.stage ?? '');
+        if (stage === 'llm') {
+          // Turn failed before audio: re-arm the microphone.
+          turnBusyRef.current = false;
+          setOrbStateSafe('listening');
+          armListening();
+        }
+        if (!p?.recoverable) setOrbStateSafe('error');
         break;
       }
       case 'session.ended':
         setPhase('ended');
         liveRef.current = false;
+        stopRecognition();
         break;
     }
-  }, []);
+  }, [armListening, setOrbStateSafe, stopRecognition]);
 
   // -----------------------------------------------------------------------
-  // Start / stop — WebSocket first, HTTP+SSE fallback (tested pipeline).
+  // Start / stop — mic capture (level + barge-in) → session → SSE channel
+  // → recognition. Single HTTP/SSE transport: STT is browser-side.
   // -----------------------------------------------------------------------
-  const downgradeToSse = React.useCallback((sid: string) => {
-    socketRef.current = null;
-    if (eventsRef.current) return; // already downgraded
-    eventsRef.current = openEventStream(sid, onEvent);
-    setTransport('sse');
-    setError('Connexion directe interrompue — canal de secours activé.');
-  }, [onEvent]);
-
   const start = React.useCallback(async () => {
     setError(null);
     setMicError(null);
-    setOrbState('connecting');
+    setOrbStateSafe('connecting');
+
+    if (!supported) {
+      // Web Speech API unavailable → clear report, NO session, NO dead mic.
+      setOrbStateSafe('error');
+      setError('La reconnaissance vocale n\'est pas supportée par ce navigateur (Web Speech API requise — Chrome ou Edge recommandés).');
+      return;
+    }
+
     try {
       const cat = catalogue ?? (await fetchCatalogue());
       setCatalogue(cat);
@@ -197,37 +420,43 @@ export function VoiceApp({ chatId, onClose }: Props) {
       setVoiceId((v) => v || cat.voices.find((x) => x.language === lang)?.id || cat.voices[0]?.id || '');
 
       setPhase('requesting-mic');
-      const capture = await startCapture({ onFrame: handleFrame, onLevel: handleLevel });
+      const capture = await startCapture({ onLevel: handleLevel });
       captureRef.current = capture;
 
       const session = await createSession({ language: lang, voice: voiceId || undefined, speed, chatId });
       sessionRef.current = session;
 
-      playbackRef.current = new PlaybackQueue({ onSpeakingChange: (sp) => { if (!sp) setTimeout(() => setOrbState((s) => (s === 'speaking' ? 'listening' : s)), 80); } });
+      playbackRef.current = new PlaybackQueue({
+        onSpeakingChange: (sp) => {
+          if (!sp) {
+            setTimeout(() => {
+              if (orbStateRef.current === 'speaking') setOrbStateSafe('listening');
+            }, 80);
+            // Playback drained and the turn already closed → mic resumes.
+            if (!turnBusyRef.current) armListening();
+          }
+        },
+      });
 
-      // Transport 1 — bidirectional WebSocket (Vercel Public Beta).
-      const sock = await openVoiceSocket(session.sessionId, onEvent, () => downgradeToSse(session.sessionId));
-      socketRef.current = sock;
-      if (sock) setTransport('ws');
-      else {
-        // Transport 2 — HTTP + SSE (the tested pipeline).
-        eventsRef.current = openEventStream(session.sessionId, onEvent);
-        setTransport('sse');
-      }
+      eventsRef.current = openEventStream(session.sessionId, onEvent);
 
       liveRef.current = true;
       setPhase('live');
-      setOrbState('listening');
+      setOrbStateSafe('listening');
+      turnBusyRef.current = false;
+      sentKeysRef.current = new Set();
+      armListening();
     } catch (e: any) {
-      setOrbState('error');
+      setOrbStateSafe('error');
       const msg = e?.message ?? String(e);
       if (/permission|denied|notallowed/i.test(msg)) setMicError('Micro refusé — autorisez le microphone dans votre navigateur.');
       else if (/not\s*found|no\s*device/i.test(msg)) setMicError('Aucun micro détecté sur cet appareil.');
       else setError(msg);
+      stopRecognition();
       captureRef.current?.close();
       captureRef.current = null;
     }
-  }, [catalogue, voiceId, speed, chatId, handleFrame, handleLevel, onEvent, downgradeToSse]);
+  }, [catalogue, voiceId, speed, chatId, supported, handleLevel, onEvent, armListening, setOrbStateSafe, stopRecognition]);
 
   React.useEffect(() => {
     retryRef.current = start;
@@ -235,30 +464,36 @@ export function VoiceApp({ chatId, onClose }: Props) {
 
   const stop = React.useCallback(async () => {
     liveRef.current = false;
+    turnBusyRef.current = false;
+    stopRecognition();
     eventsRef.current?.close();
     eventsRef.current = null;
-    const sock = socketRef.current;
-    socketRef.current = null;
     playbackRef.current?.stop();
     speakingRef.current = false;
     const sid = sessionRef.current?.sessionId;
-    if (sock) { sock.sendEnd(); sock.close(); }
-    if (sid && !sock) await postEnd(sid).catch(() => undefined);
+    if (sid) await postEnd(sid).catch(() => undefined);
     await captureRef.current?.close();
     captureRef.current = null;
     setPhase('ended');
-    setOrbState('idle');
+    setOrbStateSafe('idle');
     setLevel(0);
-    setTransport(null);
-  }, []);
+    setPartial('');
+  }, [setOrbStateSafe, stopRecognition]);
 
   React.useEffect(() => {
     void start();
     return () => {
       liveRef.current = false;
+      stopRecognition();
+      try {
+        // Full engine teardown — no microphone leak after leaving the
+        // voice screen (same dispose contract as the composer dictation).
+        actionsRef.current.abort();
+        actionsRef.current.clean();
+      } catch {
+        /* best effort */
+      }
       eventsRef.current?.close();
-      socketRef.current?.close();
-      socketRef.current = null;
       playbackRef.current?.stop();
       captureRef.current?.close();
     };
@@ -268,16 +503,21 @@ export function VoiceApp({ chatId, onClose }: Props) {
     const next = !muted;
     setMuted(next);
     mutedRef.current = next;
+    if (next) {
+      stopRecognition();
+      setPartial('');
+    } else {
+      armListening();
+    }
   };
 
   const stopSpeaking = () => {
-    const sock = socketRef.current;
     const sid = sessionRef.current?.sessionId;
-    if (sock) sock.sendInterrupt();
-    else if (sid) void postInterrupt(sid);
+    if (sid) void postInterrupt(sid);
     playbackRef.current?.stop();
     speakingRef.current = false;
-    setOrbState('listening');
+    setSpeaking(false);
+    setOrbStateSafe('listening');
   };
 
   const restart = () => {
@@ -289,6 +529,15 @@ export function VoiceApp({ chatId, onClose }: Props) {
   };
 
   const leave = () => { void stop(); onClose?.(); };
+
+  // Belt-and-braces: tab hidden → stop recognition (mic never hot in bg).
+  React.useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stopRecognition();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [stopRecognition]);
 
   // Close the options popover on outside tap.
   React.useEffect(() => {
@@ -362,7 +611,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
             </button>
           </div>
           <div className="vv-pop-meta">
-            {transport && <span>{transport === 'ws' ? 'WebSocket' : 'HTTP+SSE'}</span>}
+            <span>Web Speech (react-vocal)</span>
             {interruptedCount > 0 && <span>{interruptedCount} interruption{interruptedCount > 1 ? 's' : ''}</span>}
           </div>
         </div>
@@ -400,7 +649,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
         )}
 
         {/* Transcription — hidden by default (design: no text), toggled from
-            the options popover. */}
+            the options popover. Interim text stays PROVISIONAL here. */}
         {showTranscript && (
           <div className="vv-transcript" role="log" aria-live="polite">
             <div className="vv-partial" data-empty={!partial}>{partial || ' '}</div>
@@ -416,7 +665,7 @@ export function VoiceApp({ chatId, onClose }: Props) {
 
       {/* Bottom-center — two light-gray circles: mic (mute) + × (leave). */}
       <div className="vv-controls">
-        <button type="button" className={`vv-ctl ${muted ? 'vv-ctl-muted' : ''}`} onClick={toggleMute} disabled={!isLive}
+        <button type="button" className={`vv-ctl ${muted ? 'vv-ctl-muted' : ''}`} onClick={toggleMute} disabled={!isLive || !supported}
           aria-label={muted ? 'Réactiver le micro' : 'Couper le micro'} title={muted ? 'Réactiver le micro' : 'Muet'}>
           {muted ? <MicOff className="vv-ctl-icon" aria-hidden /> : <Mic className="vv-ctl-icon" aria-hidden />}
         </button>

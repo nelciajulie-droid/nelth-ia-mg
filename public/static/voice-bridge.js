@@ -12,9 +12,10 @@
  *      NelthVoice) monte DANS la zone centrale — la SIDEBAR reste montée
  *      et visible (exigence mission §12 / utilisateur).
  *   3. Mobile : le bouton « × » de l'overlay ramène au chat (unmount).
- *   4. Le bundle gère micro → POST /api/voice/audio (PCM16 16k mono) et la
- *      SSE /api/voice/events ; AUCUNE inférence navigateur (STT/LLM/TTS
- *      distants — voir src/lib/voice/*).
+ *   4. Le bundle gère la reconnaissance Web Speech (@untemps/react-vocal)
+ *      côté navigateur → POST /api/voice/turn (transcription FINALE) ; LLM
+ *      Kilo + Edge TTS restent distants (src/lib/voice/*) et arrivent par
+ *      SSE /api/voice/events.
  *
  * Verrou invité : le mode vocal est OUVERT aux invités (correction
  * utilisateur) — aucune invite de connexion ici.
@@ -24,7 +25,7 @@
   if (window.__nelthVoiceBridge) return;
   window.__nelthVoiceBridge = true;
 
-  var BUILD = '20270109b1';
+  var BUILD = '20271114a1';
   var SCRIPT_URL = '/static/voice/main.js?v=' + BUILD;
   var CSS_URL = '/static/voice/app.css?v=' + BUILD;
   var OVERLAY_ID = 'nelth-voice-overlay';
