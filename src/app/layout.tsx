@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   keywords: ["Open WebUI", "LLM", "chat", "RAG", "Next.js", "TypeScript", "Ollama", "OpenAI"],
   authors: [{ name: "Open WebUI TS Port" }],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/favicon.png",
   },
   openGraph: {
     title: "Open WebUI — TS",

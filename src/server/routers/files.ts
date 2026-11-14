@@ -218,7 +218,7 @@ async function processUploadedFile(
     const sttSupported = await configGet<string[]>('audio.stt.supported_content_types', []);
     /** Audio types to transcribe-and-index (Python honors the configured
      *  STT list; unconfigured, the TS port transcribes every audio/* type
-     *  through the built-in engine — see src/lib/audio-zai.ts). */
+     *  through the built-in engine — see src/lib/audio-builtin.ts). */
     const audioIndexable = (ct: string | null): boolean => {
       if (!ct) return false;
       const list = (sttSupported ?? []).filter(Boolean);
@@ -248,8 +248,8 @@ async function processUploadedFile(
       // the transcript (Python: transcribes then indexes when the type is
       // STT-supported; failures mark the file failed without failing the
       // upload response).
-      const { sttZaiTranscribe } = await import('@/lib/audio-zai');
-      const transcript = await sttZaiTranscribe({ bytes });
+      const { sttBuiltinTranscribe } = await import('@/lib/audio-builtin');
+      const transcript = await sttBuiltinTranscribe({ bytes });
       if (transcript.trim()) {
         await indexFile(user, { file_id: fileItem.id, content: transcript });
       }

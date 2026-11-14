@@ -1,21 +1,20 @@
 /**
  * TTS providers — server-side synthesis, per-sentence segments.
  *
- * PRIMARY (mandated §5): node-edge-tts — Microsoft Edge online TTS via
+ * SOLE PROVIDER (mandated §5): node-edge-tts — Microsoft Edge online TTS via
  * outbound WebSocket from the server; `streamAudio(text)` yields MP3
  * Buffers progressively (first audio leaves while the LLM still streams).
  * Each segment is a COMPLETE MP3 file → independently decodable in the
  * browser (mission §9).
  *
- * Fallback: the built-in z-ai SDK TTS (mp3, non-streaming per segment) —
- * used where Edge TTS rejects the host egress (this sandbox is IP-rate-
- * limited 429; Vercel egress is clean) or on provider failure, so the voice
- * experience still works end-to-end. Failures emit `tts.degraded` and the
- * assistant text always stays available (mission §19-F).
+ * NO fallback provider: on Edge TTS failure the failure is reported
+ * (`tts.degraded` / `session.error`) and the assistant text always stays
+ * available (mission §19-F) — the app NEVER silently routes to another
+ * provider.
  */
 
 import { EdgeTTS } from 'node-edge-tts';
-import { VOICE_TTS_PROVIDER, VOICE_TTS_RATE, VOICE_TTS_PITCH } from './config';
+import { VOICE_TTS_RATE, VOICE_TTS_PITCH } from './config';
 
 export type TtsSegment = { audioBase64: string; bytes: number };
 
@@ -46,32 +45,11 @@ export class EdgeTtsProvider {
   }
 }
 
-export class ZaiTtsProvider {
-  readonly name = 'zai';
-  constructor(private voice = 'tongtong', private speed = 1.0) {}
-
-  async *synthesize(text: string): AsyncGenerator<Buffer> {
-    const ZAI = (await import('z-ai-web-dev-sdk')).default;
-    const zai = await ZAI.create();
-    const response = await zai.audio.tts.create({
-      input: text.slice(0, 1024),
-      voice: this.voice,
-      speed: this.speed,
-      response_format: 'mp3',
-      stream: false,
-    });
-    const buffer = Buffer.from(new Uint8Array(await response.arrayBuffer()));
-    if (buffer.length > 0) yield buffer;
-  }
-}
-
-export type TtsProvider = EdgeTtsProvider | ZaiTtsProvider;
+export type TtsProvider = EdgeTtsProvider;
 
 export function makeTtsProvider(providerName: string, voice: string, opts: { rate?: string; speed?: number } = {}): TtsProvider {
-  if (providerName === 'zai') {
-    const zaiVoice = voice.startsWith('zai:') ? voice.slice(4) : 'tongtong';
-    return new ZaiTtsProvider(zaiVoice, opts.speed ?? 1.0);
-  }
+  // Edge TTS is the ONLY provider — any other value falls back to it.
+  void providerName;
   return new EdgeTtsProvider(voice, opts.rate ?? VOICE_TTS_RATE);
 }
 

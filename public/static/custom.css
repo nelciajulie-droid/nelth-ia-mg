@@ -5,7 +5,7 @@
 
 /* ── Chat responses ──────────────────────────────────────────────────────────
  * Hide the model name label shown at the top of assistant responses
- * (e.g. "Z.AI GLM-4 Plus") so replies start directly with their content.
+ * (e.g. "Nelth-3.5") so replies start directly with their content.
  * (The render block was also removed from the compiled frontend; this rule
  * stays as a safety net for any other render path.)
  * ──────────────────────────────────────────────────────────────────────────── */

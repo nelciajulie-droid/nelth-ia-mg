@@ -3,7 +3,7 @@ import { HttpError } from '../http';
 import { env, ERROR_MESSAGES, DEFAULT_USER_PERMISSIONS } from '@/lib/constants';
 import { configGet, configSet } from '@/lib/config';
 import { hasPermission } from '@/lib/access-control';
-import { ttsZaiSpeak, sttZaiTranscribe, ZAI_TTS_VOICES, ZAI_TTS_MODEL_ID } from '@/lib/audio-zai';
+import { ttsBuiltinSpeak, sttBuiltinTranscribe, BUILTIN_TTS_VOICES, BUILTIN_TTS_MODEL_ID } from '@/lib/audio-builtin';
 
 /**
  * Port of open_webui/routers/audio/__init__.py (v0.12.5) — /api/v1/audio/*.
@@ -11,7 +11,7 @@ import { ttsZaiSpeak, sttZaiTranscribe, ZAI_TTS_VOICES, ZAI_TTS_MODEL_ID } from 
  * Deviations (documented):
  *   • The Python-local Whisper STT / transformers TTS pipelines cannot be
  *     bundled; the default engine '' instead selects the built-in zero-config
- *     z-ai engine (src/lib/audio-zai.ts) — voice features work out of the box
+ *     engine (src/lib/audio-builtin.ts) — voice features work out of the box
  *     exactly like the original's local pipelines did.
  *   • The explicit 'transformers' engine name keeps the slim 503 error (the
  *     Python pipeline itself is not portable).
@@ -285,12 +285,12 @@ async function ttsTransformers(): Promise<Response> {
 /** Built-in zero-config engine (TS-port extension — replaces the Python-local
  *  transformers/Whisper pipelines that ran with the default engine '').
  *  Long text is chunked at sentence boundaries and spoken as one continuous
- *  mp3 track (see src/lib/audio-zai.ts). */
-async function ttsZai(payload: Record<string, any>): Promise<Response> {
+ *  mp3 track (see src/lib/audio-builtin.ts). */
+async function ttsBuiltin(payload: Record<string, any>): Promise<Response> {
   const input = typeof payload.input === 'string' ? payload.input : '';
   if (!input.trim()) err(400, 'Text is required for speech synthesis');
   try {
-    const { bytes, contentType } = await ttsZaiSpeak({
+    const { bytes, contentType } = await ttsBuiltinSpeak({
       input,
       voice: typeof payload.voice === 'string' ? payload.voice : null,
       speed: payload.speed ?? null,
@@ -316,7 +316,10 @@ async function ttsOpenaiRealtime(payload: Record<string, any>): Promise<Response
 }
 
 const TTS_ENGINES: Record<string, (payload: Record<string, any>) => Promise<Response>> = {
-  zai: ttsZai,
+  // Legacy 'zai' config value (saved by earlier builds) keeps resolving to
+  // the built-in engine — Google Translate TTS, NOT any z.ai provider.
+  zai: ttsBuiltin,
+  builtin: ttsBuiltin,
   openai: ttsOpenai,
   'openai-realtime': ttsOpenaiRealtime,
   elevenlabs: ttsElevenlabs,
@@ -342,14 +345,14 @@ async function getAvailableModels(): Promise<Array<Record<string, string>>> {
   const engine = await configGet<string>('audio.tts.engine', '');
   const availableModels: Array<Record<string, string>> = [];
 
-  if (engine === '' || engine === 'zai') {
+  if (engine === '' || engine === 'zai' || engine === 'builtin') {
     // Built-in zero-config engine (default) — model fixed by the engine.
-    availableModels.push({ id: ZAI_TTS_MODEL_ID });
+    availableModels.push({ id: BUILTIN_TTS_MODEL_ID });
   } else if (engine === 'openai') {
     const apiKey = (await configGet<string>('audio.tts.openai.api_key', OPENAI_API_KEY)) ?? '';
     if (!apiKey.trim()) {
       // Key-less selection → built-in engine model (see /speech resolution).
-      availableModels.push({ id: ZAI_TTS_MODEL_ID });
+      availableModels.push({ id: BUILTIN_TTS_MODEL_ID });
     } else {
       const baseUrl = await configGet<string>('audio.tts.openai.api_base_url', OPENAI_API_BASE_URL);
       if (!baseUrl.startsWith('https://api.openai.com')) {
@@ -405,9 +408,9 @@ async function getAvailableModels(): Promise<Array<Record<string, string>>> {
 async function getAvailableVoices(): Promise<Record<string, string>> {
   const engine = await configGet<string>('audio.tts.engine', '');
 
-  if (engine === '' || engine === 'zai') {
+  if (engine === '' || engine === 'zai' || engine === 'builtin') {
     // Built-in zero-config engine (default).
-    return { ...ZAI_TTS_VOICES };
+    return { ...BUILTIN_TTS_VOICES };
   }
 
   if (engine === 'openai-realtime') {
@@ -419,7 +422,7 @@ async function getAvailableVoices(): Promise<Record<string, string>> {
     const apiKey = (await configGet<string>('audio.tts.openai.api_key', OPENAI_API_KEY)) ?? '';
     if (!apiKey.trim()) {
       // Key-less selection → built-in engine voices (see /speech resolution).
-      return { ...ZAI_TTS_VOICES };
+      return { ...BUILTIN_TTS_VOICES };
     }
     const baseUrl = await configGet<string>('audio.tts.openai.api_base_url', OPENAI_API_BASE_URL);
     if (!baseUrl.startsWith('https://api.openai.com')) {
@@ -534,7 +537,7 @@ export const routes: Route[] = [
       const form = await ctx.body<Record<string, any>>();
       const currentTtsEngine = await configGet<string>('audio.tts.engine', '');
 
-      // Engine '' selects the built-in zero-config engine (src/lib/audio-zai.ts)
+      // Engine '' selects the built-in zero-config engine (src/lib/audio-builtin.ts)
       // so it is always a valid choice; only the Python-local transformers
       // pipeline stays unavailable in this runtime.
       if (form?.tts?.ENGINE === 'transformers' && currentTtsEngine !== 'transformers') {
@@ -601,9 +604,9 @@ export const routes: Route[] = [
       const openaiKey = (await configGet<string>('audio.tts.openai.api_key', OPENAI_API_KEY)) ?? '';
       const effectiveEngine =
         engine === '' || ((engine === 'openai' || engine === 'openai-realtime') && !openaiKey.trim())
-          ? 'zai'
+          ? 'builtin'
           : engine;
-      const handler = effectiveEngine === 'zai' ? ttsZai : TTS_ENGINES[effectiveEngine];
+      const handler = TTS_ENGINES[effectiveEngine];
       if (!handler) err(400, `Unsupported TTS engine: ${engine}`);
       return handler(payload);
     },
@@ -667,11 +670,11 @@ export const routes: Route[] = [
       const engine = await configGet<string>('audio.stt.engine', '');
       const audioBytes = Buffer.from(await fileField.arrayBuffer());
 
-      if (engine === '' || engine === 'zai') {
+      if (engine === '' || engine === 'zai' || engine === 'builtin') {
         // Built-in zero-config engine (TS-port extension) — replaces the
         // Python-local Whisper pipeline that ran with the default engine ''.
         try {
-          const text = await sttZaiTranscribe({ bytes: audioBytes });
+          const text = await sttBuiltinTranscribe({ bytes: audioBytes });
           return ctx.json({ text, filename });
         } catch (e) {
           err(500, `Error transcribing chunk: ${e instanceof Error ? e.message : String(e)}`);

@@ -1930,7 +1930,6 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     isKiloModel,
     kiloModelWantsThinking,
     kiloAvailable,
-    kiloFallbackActive,
     KILO_GATEWAY_BASE_URL,
     KILO_GATEWAY_API_KEY,
     KILO_REASONING_MODEL_ID,
@@ -1951,10 +1950,6 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   if (isTH && !tokenharborAvailable()) {
     return json({ detail: `Model ${modelId} not found (TokenHarbor gateway not configured)` }, 404);
   }
-  // Keyless fallback: no gateway key → the built-in z-ai engine answers in
-  // place of the gateway (callUpstream synthesizes the OpenAI-shaped upstream
-  // Response locally; the route/url below stay unused in that mode).
-  const kiloFallback = isKilo && kiloFallbackActive();
   const route: ModelRoute | null = isKilo
     ? { type: 'openai', model: modelId, baseUrl: KILO_GATEWAY_BASE_URL, apiKey: KILO_GATEWAY_API_KEY }
     : isTH
@@ -2163,44 +2158,6 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       ? AbortSignal.any([callTimeout, taskSignal])
       : callTimeout;
   };
-  /** Abortable wrapper for engines that don't take a signal (the keyless
-   *  z-ai fallback): errors the stream when the budget fires so the reader
-   *  loop sees the same AbortError a gateway fetch would. */
-  const signalGuardedStream = (
-    src: ReadableStream<Uint8Array>,
-    signal: AbortSignal
-  ): ReadableStream<Uint8Array> =>
-    new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const onAbort = () => {
-          try {
-            controller.error(new DOMException('The operation was aborted due to timeout', 'AbortError'));
-          } catch { /* already errored/closed */ }
-        };
-        if (signal.aborted) {
-          onAbort();
-          return;
-        }
-        signal.addEventListener('abort', onAbort, { once: true });
-        const reader = src.getReader();
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            controller.enqueue(value);
-          }
-          controller.close();
-        } catch (e) {
-          try { controller.error(e); } catch { /* already errored */ }
-        } finally {
-          signal.removeEventListener('abort', onAbort);
-          try { reader.cancel(); } catch { /* best effort */ }
-        }
-      },
-      cancel(reason) {
-        try { src.cancel(reason); } catch { /* best effort */ }
-      },
-    });
   // Gateway tail guard — fixes the strict-gateway 400
   //   {"error":{"message":"The last message must have role=user.",…}}
   // Some OpenAI-compatible gateways (TokenHarbor / Nelth-4.0_Flash,
@@ -2248,41 +2205,15 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     body: Record<string, any>,
     signalOverride?: AbortSignal
   ): Promise<Response> =>
-    kiloFallback
-      ? (async () => {
-          // z-ai engine bridge: same two models, OpenAI-compatible Response —
-          // reasoning flags map onto the SDK's thinking switch.
-          const payload = withGatewaySafeTail(body);
-          const { zaiUpstreamResponse } = await import('@/lib/zai-llm');
-          const signal = upstreamSignal();
-          const res = await zaiUpstreamResponse({
-            messages: payload.messages ?? [],
-            stream: payload.stream === true,
-            temperature: payload.temperature,
-            top_p: payload.top_p,
-            max_tokens: payload.max_tokens,
-            thinking:
-              payload.reasoning?.enabled === true || payload.include_reasoning === true
-                ? 'enabled'
-                : 'disabled',
-          });
-          if (payload.stream === true && res.body) {
-            return new Response(signalGuardedStream(res.body, signal), {
-              status: res.status,
-              headers: res.headers,
-            });
-          }
-          return res;
-        })()
-      : (() => {
-          const payload = withGatewaySafeTail(body);
-          return fetch(url, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(payload),
-            signal: signalOverride ?? upstreamSignal(),
-          });
-        })();
+    (() => {
+      const payload = withGatewaySafeTail(body);
+      return fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: signalOverride ?? upstreamSignal(),
+      });
+    })();
 
   /**
    * Self-healing output ceiling (« max tokens infinie »). The pinned
@@ -4277,15 +4208,6 @@ async function generateChatTitle(route: ModelRoute, messages: { role: string; co
     const last2 = messages.filter((m) => m.role !== 'system').slice(-2);
     const history = last2.map((m) => `${m.role === 'assistant' ? 'assistant' : 'user'}: ${m.content}`).join('\n');
     const prompt = TITLE_TEMPLATE.replace('{{MESSAGES:END:2}}', history.slice(0, 4000));
-
-    // Keyless fallback: the direct helper bridges to the z-ai engine when
-    // the Kilo gateway is not configured.
-    {
-      const { isKiloModel, kiloFallbackActive, kiloGenerateTitle } = await import('@/lib/kilo-llm');
-      if (route.type === 'openai' && isKiloModel(route.model) && kiloFallbackActive()) {
-        return await kiloGenerateTitle(prompt);
-      }
-    }
 
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     const url = route.type === 'openai' ? `${route.baseUrl.replace(/\/+$/, '')}/chat/completions` : `${route.baseUrl}/api/chat`;

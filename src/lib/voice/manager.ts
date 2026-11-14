@@ -34,7 +34,6 @@ import {
   VOICE_MAX_SESSION_DURATION_SEC,
   VOICE_MAX_AUDIO_SIZE,
   VOICE_TTS_QUEUE_MAX,
-  VOICE_TTS_PROVIDER,
   VOICE_DEFAULT_LANGUAGE,
   VOICE_INTERRUPTION_ENABLED,
   VOICE_VAD_SILENCE_MS,
@@ -178,7 +177,7 @@ export async function createVoiceSession(
     voice,
     sttModel: STT_MODEL,
     llmModel: llm.model,
-    ttsProvider: VOICE_TTS_PROVIDER === 'zai' ? 'zai' : 'edge',
+    ttsProvider: 'edge',
     chatId,
   }));
   return session;
@@ -215,8 +214,12 @@ export async function ingestAudio(session: VoiceSession, pcm: Uint8Array): Promi
       const stt = await sttCreateSession(session.language, VOICE_VAD_SILENCE_MS);
       session.sttSessionId = stt.id;
     } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error('[voice] STT session creation failed:', reason);
       emit(session, voiceEvent('session.error', session.id, {
-        stage: 'stt', message: 'Service de reconnaissance vocale indisponible.', recoverable: true,
+        stage: 'stt',
+        message: `Service de reconnaissance vocale indisponible (${reason.slice(0, 140)}).`,
+        recoverable: true,
       }));
       return;
     }
@@ -319,7 +322,7 @@ async function runAssistantTurn(session: VoiceSession, userText: string): Promis
   const abort = new AbortController();
   session.assistantTurn = abort;
   const chunker = new SentenceChunker();
-  const tts = makeTtsProvider(VOICE_TTS_PROVIDER, session.voice, { speed: session.speed });
+  const tts = makeTtsProvider('edge', session.voice, { speed: session.speed });
 
   emit(session, voiceEvent('llm.started', session.id, { requestId, model: llm.model }));
 
@@ -344,27 +347,11 @@ async function runAssistantTurn(session: VoiceSession, userText: string): Promis
       emit(session, voiceEvent('tts.segment_completed', session.id, { sequenceId }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'échec TTS';
-      // Edge TTS rate-limit/egress block → degrade ONCE to the z-ai engine
-      // for the rest of the session (text remains available mission §19-F).
-      if (!ttsDegraded && /429|rate|forbidden|websocket|ECONN/i.test(msg)) {
-        ttsDegraded = true;
-        emit(session, voiceEvent('tts.degraded', session.id, { provider: 'zai', reason: 'Edge TTS indisponible — basculement automatique.' }));
-        // Re-synthesize this segment on the fallback engine immediately.
-        try {
-          const zai = makeTtsProvider('zai', session.voice, { speed: session.speed });
-          let n = 0;
-          for await (const buf of zai.synthesize(text)) {
-            if (abort.signal.aborted) return;
-            n += 1;
-            emit(session, voiceEvent('tts.audio_chunk', session.id, {
-              sequenceId, seq: n, audioBase64: buf.toString('base64'), format: 'mp3',
-            }));
-          }
-          emit(session, voiceEvent('tts.segment_completed', session.id, { sequenceId }));
-          return;
-        } catch { /* give up on audio for this segment — text survives */ }
-      }
+      // Edge TTS failure — NO fallback provider: report once, text remains
+      // available (mission §19-F).
       if (!ttsDegraded) {
+        ttsDegraded = true;
+        emit(session, voiceEvent('tts.degraded', session.id, { provider: 'edge', reason: `Edge TTS indisponible (${msg.slice(0, 120)}) — aucune bascule automatique.` }));
         emit(session, voiceEvent('session.error', session.id, { stage: 'tts', message: 'Synthèse vocale indisponible — la réponse reste affichée.', recoverable: true }));
       }
     } finally {

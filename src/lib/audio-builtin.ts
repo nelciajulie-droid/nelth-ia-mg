@@ -1,11 +1,11 @@
 /**
- * Built-in zero-config TTS/STT engines — standalone HTTP implementation (no SDK).
+ * Built-in zero-config TTS/STT engines — standalone HTTP implementation.
  *
  * Open WebUI v0.12.5 ships local Whisper STT + local transformers TTS, so
  * voice features (mic input, read-aloud) work with zero configuration. This
  * port cannot bundle those Python pipelines; instead the same zero-config
- * behaviour is provided by plain HTTPS calls — no sandbox SDK involved, the
- * engine works on any host (local, Docker, bare metal):
+ * behaviour is provided by plain HTTPS calls — no provider SDK involved,
+ * the engine works on any host (local, Docker, bare metal):
  *
  *   • TTS — POST /api/v1/audio/speech with engine '' (default) speaks any
  *     text through the public Google Translate voice endpoint (keyless,
@@ -29,7 +29,7 @@ import { KILO_GATEWAY_BASE_URL, KILO_GATEWAY_API_KEY } from '@/lib/kilo-llm';
  * Voices exposed by the built-in TTS engine — friendly keys mapping to
  * Google Translate language codes (surfaced in the audio settings).
  */
-export const ZAI_TTS_VOICES: Record<string, string> = {
+export const BUILTIN_TTS_VOICES: Record<string, string> = {
   french: 'fr',
   english: 'en',
   spanish: 'es',
@@ -45,10 +45,10 @@ export const ZAI_TTS_VOICES: Record<string, string> = {
 };
 
 /** Built-in TTS model id surfaced in the audio settings model list. */
-export const ZAI_TTS_MODEL_ID = 'zai-tts';
+export const BUILTIN_TTS_MODEL_ID = 'builtin-tts';
 
 /** Built-in STT model id surfaced in the audio settings model list. */
-export const ZAI_STT_MODEL_ID = 'zai-asr';
+export const BUILTIN_STT_MODEL_ID = 'builtin-asr';
 
 /** Endpoint limit per Google TTS request (safe margin below ~200). */
 const TTS_MAX_CHARS = 190;
@@ -104,7 +104,7 @@ function clampSpeed(speed: unknown): number {
  */
 function normalizeVoice(voice: unknown, text: string): string {
   const v = typeof voice === 'string' ? voice.trim().toLowerCase() : '';
-  if (v in ZAI_TTS_VOICES) return ZAI_TTS_VOICES[v];
+  if (v in BUILTIN_TTS_VOICES) return BUILTIN_TTS_VOICES[v];
   if (/^[a-z]{2}(-[a-z]{2})?$/i.test(v)) return v;
   // Auto-detect: accented Latin characters → French, otherwise English.
   return /[àâæçéèêëîïôœùûüÿ]/i.test(text) ? 'fr' : 'en';
@@ -163,7 +163,7 @@ async function fetchTtsChunk(chunk: string, lang: string, idx: number, total: nu
  * are chunked at sentence boundaries and the MP3 frames are concatenated
  * into one continuous track (browsers merge frames seamlessly).
  */
-export async function ttsZaiSpeak(params: {
+export async function ttsBuiltinSpeak(params: {
   input: string;
   voice?: string | null;
   speed?: number | string | null;
@@ -244,7 +244,7 @@ async function transcodeToWav(bytes: Buffer): Promise<Buffer | null> {
  * the browser mic, m4a, mp4…) are transcoded to WAV via ffmpeg when the
  * binary is available on the host.
  */
-export async function sttZaiTranscribe(file: {
+export async function sttBuiltinTranscribe(file: {
   bytes: Buffer;
 }): Promise<string> {
   if (!file.bytes?.length) throw new Error('Audio file is required for transcription');

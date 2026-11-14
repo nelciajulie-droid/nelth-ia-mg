@@ -27,10 +27,9 @@ export const KILO_VOICE_BASE_URL = (
   'https://api.kilo.ai/api/gateway/v1'
 ).replace(/\/+$/, '');
 
-/** TTS provider: edge (node-edge-tts, mandated primary) | zai (built-in
- * keyless fallback for hosts where Edge TTS is rate-limited, e.g. this
- * sandbox egress). */
-export const VOICE_TTS_PROVIDER = (process.env.VOICE_TTS_PROVIDER || (KILO_API_KEY ? 'edge' : 'edge')).toLowerCase();
+/** TTS provider: edge ONLY (node-edge-tts, mandated primary — no fallback
+ *  provider is ever used). */
+export const VOICE_TTS_PROVIDER = 'edge';
 
 /** Default language for the voice UI. */
 export const VOICE_DEFAULT_LANGUAGE = process.env.VOICE_DEFAULT_LANGUAGE || 'fr';
@@ -54,8 +53,8 @@ export const VOICE_VAD_SILENCE_MS = Math.max(200, Number(process.env.VOICE_VAD_S
 export const VOICE_INTERRUPTION_ENABLED = process.env.VOICE_INTERRUPTION_ENABLED !== 'false';
 
 /** Which engine serves the voice LLM right now (diagnostics only). */
-export function voiceLlmEngine(): 'kilo-nemotron' | 'kilo-gateway' | 'zai-fallback' {
-  if (!KILO_API_KEY) return 'zai-fallback';
+export function voiceLlmEngine(): 'kilo-nemotron' | 'kilo-gateway' | 'kilo-unconfigured' {
+  if (!KILO_API_KEY) return 'kilo-unconfigured';
   if (KILO_API_KEY === process.env.KILO_GATEWAY_API_KEY) return 'kilo-gateway';
   return 'kilo-nemotron';
 }

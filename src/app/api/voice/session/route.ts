@@ -5,7 +5,7 @@ import { NextRequest } from 'next/server';
 import { buildCtx } from '@/server/http';
 import { createVoiceSession } from '@/lib/voice/manager';
 import { VOICES, voicesFor } from '@/lib/voice/voices';
-import { VOICE_TTS_PROVIDER, VOICE_DEFAULT_LANGUAGE, VOICE_VAD_SILENCE_MS, VOICE_INTERRUPTION_ENABLED, voiceLlmEngine } from '@/lib/voice/config';
+import { VOICE_DEFAULT_LANGUAGE, VOICE_VAD_SILENCE_MS, VOICE_INTERRUPTION_ENABLED, voiceLlmEngine } from '@/lib/voice/config';
 import { sttHealth } from '@/lib/voice/stt-client';
 
 /** POST /api/voice/session — create a voice session. */
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       chatId: session.chatId,
       providers: {
         llm: voiceLlmEngine(),
-        tts: VOICE_TTS_PROVIDER === 'zai' ? 'zai' : 'edge',
+        tts: 'edge',
         stt: (await sttHealth()).ok ? 'sherpa-onnx' : 'unavailable',
       },
       config: {
@@ -58,8 +58,8 @@ export async function GET() {
   return Response.json({
     languages: ['fr', 'en'],
     defaultLanguage: VOICE_DEFAULT_LANGUAGE,
-    voices: voicesFor(VOICE_TTS_PROVIDER),
+    voices: voicesFor('edge'),
     allVoices: VOICES,
-    providers: { llm: voiceLlmEngine(), tts: VOICE_TTS_PROVIDER },
+    providers: { llm: voiceLlmEngine(), tts: 'edge' },
   });
 }

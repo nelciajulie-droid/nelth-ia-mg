@@ -53,7 +53,8 @@ export const KILO_REASONING_MODEL_DESCRIPTION = '';
 /**
  * Legacy GLM model ids (removed engine) → Kilo gateway equivalents, so chats
  * created with the old built-in models keep working on the new ones.
- */: Record<string, string> = {
+ */
+const LEGACY_MODEL_MAP: Record<string, string> = {
   'zai-glm-4-plus': KILO_MODEL_ID,
   'zai-glm-reasoning': KILO_REASONING_MODEL_ID,
 };
@@ -134,35 +135,8 @@ function buildBody(params: KiloChatParams): Record<string, any> {
 /** Non-streaming chat completion → OpenAI-compatible JSON object. */
 export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
   const timeoutMs = Math.max(1_000, Math.min(params.timeoutMs ?? 285_000, 285_000));
-  // Keyless fallback: the built-in z-ai engine answers in place of the
-  // gateway (same wire format — decisions, titles, autocompletions…).
-  // Same time budget: the SDK has NO timeout of its own and rate-limits
-  // (429) under parallel load — without the race a stuck SDK call hangs
-  // the caller for minutes.
-  if (kiloFallbackActive()) {
-    const { zaiChatCompletion } = await import('@/lib/zai-llm');
-    const thinking = params.thinking ?? kiloModelWantsThinking(params.model ?? KILO_MODEL_ID);
-    const work = zaiChatCompletion({
-      messages: params.messages,
-      stream: false,
-      temperature: params.temperature,
-      top_p: params.top_p,
-      max_tokens: params.max_tokens,
-      thinking: thinking ? 'enabled' : 'disabled',
-    });
-    work.catch(() => {}); // the loser of the race must not surface as unhandled
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const budget = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`z-ai completion exceeded its ${timeoutMs}ms budget`)),
-        timeoutMs
-      );
-    });
-    try {
-      return await Promise.race([work, budget]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+  if (!KILO_GATEWAY_API_KEY) {
+    throw new Error('Kilo gateway is not configured (KILO_GATEWAY_API_KEY missing) — no fallback provider is used');
   }
   const res = await fetch(kiloChatUrl(), {
     method: 'POST',

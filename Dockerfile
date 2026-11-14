@@ -34,7 +34,7 @@ RUN bun run vercel-build
 
 # ── Runtime ──────────────────────────────────────────────────────────────
 # ffmpeg : transcodage des captures micro navigateur (webm/opus → wav)
-#         pour le moteur de transcription intégré (voir src/lib/audio-zai.ts).
+#         pour le moteur de transcription intégré (voir src/lib/audio-builtin.ts).
 FROM oven/bun:1 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*

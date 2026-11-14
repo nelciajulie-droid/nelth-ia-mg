@@ -186,8 +186,7 @@ Copier `.env.example` → `.env`. Les valeurs marquées **obligatoires** doivent
 ### Moteurs intégrés audio + images (zéro configuration, sans aucun SDK)
 
 La voix et les images fonctionnent à l'installation, comme dans l'original,
-en pur HTTPS (aucune dépendance au SDK du sandbox — `z-ai-web-dev-sdk`
-est retiré du `package.json`) :
+en pur HTTPS — **aucun SDK fournisseur** n'est utilisé :
 
 - **Lecture à voix haute (TTS)** — moteur intégré par défaut (`audio.tts.engine`
   = `""`) via l'endpoint vocal public Google Translate **sans clé** : 12 voix
@@ -215,7 +214,7 @@ Cette session a activé ce qui restait hors service :
 
 | Fonctionnalité | État | Détail |
 |---|---|---|
-| Lecture à voix haute (TTS) | ✅ autonome | `/api/v1/audio/speech` → MP3 via endpoint vocal public Google Translate **sans clé** (`src/lib/audio-zai.ts`) ; moteurs externes openai/elevenlabs/azure/mistral conservés |
+| Lecture à voix haute (TTS) | ✅ autonome | `/api/v1/audio/speech` → MP3 via endpoint vocal public Google Translate **sans clé** (`src/lib/audio-builtin.ts`) ; moteurs externes openai/elevenlabs/azure/mistral conservés |
 | Saisie vocale (STT) | ✅ autonome | `/api/v1/audio/transcriptions` via **modèle omni gratuit** du Kilo Gateway + transcodage ffmpeg (webm→wav) ; proxys **deepgram / azure / mistral** portés |
 | Fichiers audio → RAG | ✅ activé | Upload audio transcrit puis indexé — interrogeable dans le chat (comportement Python) |
 | Génération d'images | ✅ autonome | `/api/v1/images/generations` → JPEG réel via endpoint public **Pollinations sans clé** (`src/lib/image-generation.ts`), persisté dans le pipeline fichiers |

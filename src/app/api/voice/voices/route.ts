@@ -4,7 +4,7 @@ export const runtime = 'nodejs';
 import { NextRequest } from 'next/server';
 import { buildCtx } from '@/server/http';
 import { voicesFor } from '@/lib/voice/voices';
-import { VOICE_TTS_PROVIDER, VOICE_DEFAULT_LANGUAGE } from '@/lib/voice/config';
+import { VOICE_DEFAULT_LANGUAGE } from '@/lib/voice/config';
 import { sttHealth } from '@/lib/voice/stt-client';
 
 /** GET /api/voice/voices — catalogue + live capabilities for the UI. */
@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
   return Response.json({
     languages: ['fr', 'en'],
     defaultLanguage: VOICE_DEFAULT_LANGUAGE,
-    voices: voicesFor(VOICE_TTS_PROVIDER),
+    voices: voicesFor('edge'),
     stt: { ok: stt.ok, runtime: stt.runtime, languages: stt.languages },
   });
 }
