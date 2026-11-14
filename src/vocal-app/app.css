@@ -1,0 +1,144 @@
+/*
+ * Vocal app styles — dictation status pill ONLY (no microphone button).
+ *
+ * Scoped classes (nvl-*) exclusively: no global utilities leak into the SPA
+ * cascade. Light + dark themes follow the host SPA (html.dark).
+ * Purple accent = the established Nelth active-voice color family
+ * (#7c3aed) — the same visual language as the voice-mode hijack.
+ */
+
+.nvl-pill {
+  position: fixed;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 440px;
+  padding: 7px 12px 7px 10px;
+  border-radius: 9999px;
+  border: 1px solid rgba(124, 58, 237, 0.28);
+  background: #ffffff;
+  color: #3f3f46;
+  font-size: 12.5px;
+  line-height: 1.35;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  animation: nvl-in 0.16s ease;
+  pointer-events: auto;
+}
+
+html.dark .nvl-pill {
+  background: #1b1c1f;
+  border-color: rgba(167, 139, 250, 0.35);
+  color: #d4d4d8;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+@keyframes nvl-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Pulsing status dot — purple (listening), bright while speech detected. */
+.nvl-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: #7c3aed;
+  animation: nvl-pulse 1.4s ease-in-out infinite;
+}
+
+html.dark .nvl-dot {
+  background: #a78bfa;
+}
+
+.nvl-dot.nvl-live {
+  background: #913aeb;
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.18);
+  animation-duration: 0.7s;
+}
+
+.nvl-dot.nvl-error {
+  background: #dc2626;
+  animation: none;
+}
+
+html.dark .nvl-dot.nvl-error {
+  background: #ef4444;
+}
+
+@keyframes nvl-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Live transcript / status text — clamped to 2 lines with ellipsis. */
+.nvl-text {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-variant-emoji: text;
+  word-break: break-word;
+}
+
+.nvl-text.nvl-text-error {
+  color: #b91c1c;
+}
+
+html.dark .nvl-text.nvl-text-error {
+  color: #fca5a5;
+}
+
+/* Stop affordance (NOT a microphone button — the native dicter stays the
+ * sole mic control). Subtle, keyboard-accessible. */
+.nvl-stop {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 9999px;
+  background: rgba(124, 58, 237, 0.12);
+  color: #6d28d9;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.nvl-stop:hover {
+  background: rgba(124, 58, 237, 0.22);
+  color: #5b21b6;
+}
+
+.nvl-stop:focus-visible {
+  outline: 2px solid #7c3aed;
+  outline-offset: 2px;
+}
+
+html.dark .nvl-stop {
+  background: rgba(167, 139, 250, 0.16);
+  color: #c4b5fd;
+}
+
+html.dark .nvl-stop:hover {
+  background: rgba(167, 139, 250, 0.28);
+  color: #ddd6fe;
+}

@@ -140,6 +140,14 @@
                      retour au chat. Aucune inférence navigateur — voir
                      voice-bridge.js + src/lib/voice/* + mini-services/stt-service. -->
                 <script src="/static/voice-bridge.js?v=20270109b1" defer></script>
+                <!-- Dictée du composeur (@untemps/react-vocal, useVocal — Web
+                     Speech natif navigateur) : détourne le bouton « Dicter »
+                     EXISTANT (#voice-input-button) — aucun second bouton.
+                     Interim → pilule de statut au-dessus du composeur ;
+                     final → insertion dans #chat-input (jamais envoyé au
+                     LLM automatiquement). isSupported() faux → comportement
+                     natif conservé. Voir vocal-bridge.js + src/vocal-app/. -->
+                <script src="/static/vocal-bridge.js?v=20270114a1" defer></script>
                 <!-- custom.css v=20270106a1 — sidebar desktop dans le flux flex
                      persistant (position:static md+) : plus aucun recouvrement
                      de la zone centrale, cascade max-width immunisée. -->

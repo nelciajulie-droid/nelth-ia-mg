@@ -62,6 +62,10 @@ type ModelSpec = {
   key: string;
   dir: string;
   files: Record<string, string>; // local filename → download URL
+  /** Optional official tarball: when the release publishes one archive (not
+   *  individual files — the nemotron case), download + extract it instead of
+   *  fetching the files map (which 404s for nemotron releases). */
+  tarball?: string;
   encoder: string;
   decoder: string;
   joiner: string;
@@ -83,12 +87,8 @@ const MODELS: ModelSpec[] = [
     ? [{
         key: 'nemotron',
         dir: 'models/nemotron',
-        files: {
-          'encoder.int8.onnx': `${NEMOTRON_URL}/encoder.int8.onnx`,
-          'decoder.int8.onnx': `${NEMOTRON_URL}/decoder.int8.onnx`,
-          'joiner.int8.onnx': `${NEMOTRON_URL}/joiner.int8.onnx`,
-          'tokens.txt': `${NEMOTRON_URL}/tokens.txt`,
-        },
+        files: {}, // the release hosts ONE tarball — no individual asset/ paths
+        tarball: `${NEMOTRON_URL}.tar.bz2`,
         encoder: 'encoder.int8.onnx',
         decoder: 'decoder.int8.onnx',
         joiner: 'joiner.int8.onnx',
@@ -135,16 +135,66 @@ const MODELS: ModelSpec[] = [
 const SILERO_LOCAL = join(ROOT, 'models/silero_vad.onnx');
 
 async function download(url: string, dest: string): Promise<void> {
+  // STREAMED to disk (Bun FileSink) — a 453 MB tarball buffered in RAM
+  // (res.arrayBuffer) killed the process on constrained hosts.
   const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error(`download failed ${res.status}: ${url}`);
-  const bytes = Buffer.from(await res.arrayBuffer());
-  const { writeFile } = await import('node:fs/promises');
-  await writeFile(dest, bytes);
+  if (!res.ok || !res.body) throw new Error(`download failed ${res.status}: ${url}`);
+  const writer = Bun.file(dest).writer({ highWaterMark: 1 << 20 });
+  const reader = res.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) await writer.write(value);
+    }
+  } finally {
+    await writer.end();
+  }
+}
+
+/** Download + extract an official release tarball, then move the expected
+ *  model files into the spec dir. Idempotent: skipped when files exist. */
+async function ensureTarball(spec: ModelSpec): Promise<void> {
+  const dir = join(ROOT, spec.dir);
+  mkdirSync(dir, { recursive: true });
+  const needed = [spec.encoder, spec.decoder, spec.joiner, spec.tokens];
+  const allPresent = needed.every((f) => existsSync(join(dir, f)) && statSync(join(dir, f)).size > 0);
+  if (allPresent) return;
+
+  const tarballPath = join(ROOT, 'models', `${spec.key}-download.tar.bz2`);
+  console.log(`[stt] downloading ${spec.tarball} …`);
+  await download(spec.tarball!, tarballPath);
+
+  const extractDir = join(ROOT, 'models', `${spec.key}-extract`);
+  mkdirSync(extractDir, { recursive: true });
+  // GNU tar: -xjf (bzip2), strip nothing — archives contain a top-level dir.
+  const proc = Bun.spawnSync(['tar', '-xjf', tarballPath, '-C', extractDir]);
+  if (proc.exitCode !== 0) {
+    throw new Error(`tar extract failed: ${proc.stderr.toString().slice(0, 200)}`);
+  }
+  // Move files from the extracted tree (whatever depth) into the spec dir.
+  const { readdirSync, cpSync, rmSync } = await import('node:fs');
+  const walk = (d: string) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (needed.includes(entry.name)) cpSync(p, join(dir, entry.name));
+    }
+  };
+  walk(extractDir);
+  rmSync(extractDir, { recursive: true, force: true });
+  rmSync(tarballPath, { force: true });
+  const ok = needed.every((f) => existsSync(join(dir, f)) && statSync(join(dir, f)).size > 0);
+  if (!ok) throw new Error(`tarball did not contain the expected files for ${spec.key}`);
 }
 
 async function ensureModels(): Promise<void> {
   mkdirSync(join(ROOT, 'models'), { recursive: true });
   for (const spec of MODELS) {
+    if (spec.tarball) {
+      await ensureTarball(spec);
+      continue;
+    }
     mkdirSync(join(ROOT, spec.dir), { recursive: true });
     for (const [name, url] of Object.entries(spec.files)) {
       const dest = join(ROOT, spec.dir, name);

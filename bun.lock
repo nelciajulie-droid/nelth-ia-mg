@@ -41,6 +41,7 @@
         "@reactuses/core": "^6.0.5",
         "@tanstack/react-query": "^5.82.0",
         "@tanstack/react-table": "^8.21.3",
+        "@untemps/react-vocal": "^2.0.19",
         "@vercel/functions": "3.11.2",
         "bcryptjs": "^3.0.3",
         "cheerio": "^1.2.0",
@@ -856,6 +857,12 @@
     "@unrs/resolver-binding-win32-ia32-msvc": ["@unrs/resolver-binding-win32-ia32-msvc@1.11.1", "https://registry.npmjs.com/@unrs/resolver-binding-win32-ia32-msvc/-/resolver-binding-win32-ia32-msvc-1.11.1.tgz", { "os": "win32", "cpu": "ia32" }, "sha512-DCEI6t5i1NmAZp6pFonpD5m7i6aFrpofcp4LA2i8IIq60Jyo28hamKBxNrZcyOwVOZkgsRp9O2sXWBWP8MnvIQ=="],
 
     "@unrs/resolver-binding-win32-x64-msvc": ["@unrs/resolver-binding-win32-x64-msvc@1.11.1", "https://registry.npmjs.com/@unrs/resolver-binding-win32-x64-msvc/-/resolver-binding-win32-x64-msvc-1.11.1.tgz", { "os": "win32", "cpu": "x64" }, "sha512-lrW200hZdbfRtztbygyaq/6jP6AKE8qQN2KvPcJ+x7wiD038YtnYtZ82IMNJ69GJibV7bwL3y9FgK+5w/pYt6g=="],
+
+    "@untemps/react-vocal": ["@untemps/react-vocal@2.0.19", "", { "dependencies": { "@untemps/vocal": "^2.3.5" }, "peerDependencies": { "fuse.js": ">=7.0.0", "react": ">=16.14.0", "react-dom": ">=16.14.0", "typescript": ">=6.0.0" }, "optionalPeers": ["fuse.js", "typescript"] }, "sha512-pFC2RA98N0MhE/PMk13kIu5kWQBLPwQ4PJRDWpPUpL02lbAzkkWAw6cMHaYRVMGeoBCWLI8KA8/SsValRvl/RA=="],
+
+    "@untemps/user-permissions-utils": ["@untemps/user-permissions-utils@2.2.22", "", {}, "sha512-9CnKA3A5702ts/p+n2tlXUSOAiQDCtnHQ9m45v3KASDydZoa2grSJtkmmCvlChEe6V8fKft5pENTej73oxUyxw=="],
+
+    "@untemps/vocal": ["@untemps/vocal@2.3.5", "", { "dependencies": { "@untemps/user-permissions-utils": "^2.2.3" }, "peerDependencies": { "typescript": ">=6.0.0" }, "optionalPeers": ["typescript"] }, "sha512-MR59cgFRhyIxpKxh/fKgsnAZx3WBKcDvFVMWJJdoiQJevUrAOGQX6JpK7hSX9CJOA8bIAZptBOuFa7NmhCjFog=="],
 
     "@vercel/cli-config": ["@vercel/cli-config@0.4.0", "", { "dependencies": { "xdg-app-paths": "5.1.0", "zod": "^4.6.6" } }, "sha512-7+DnWjfcHA/u2FjiPMknhlqZFmJZZq1qS5ziIxNH+3zNBo2U4NQjkJABKDGMZlLBlBLK94RXuA2dceC4SCFumA=="],
 
