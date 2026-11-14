@@ -183,6 +183,41 @@ Copier `.env.example` → `.env`. Les valeurs marquées **obligatoires** doivent
 | `APP_PORT` | ⬜ | Port de l'app (défaut `3000`) |
 | `SOCKET_SERVICE_PORT` | ⬜ | Port interne socket.io (défaut `3001`) |
 
+### Mode vocal temps réel (overlay « Mode vocal » — STT auto-hébergé)
+
+Le mode vocal conversationnel (orbe plein duplex) s'appuie sur **trois moteurs
+sans aucun repli de fournisseur** :
+
+| Étage | Moteur | Où il tourne |
+|---|---|---|
+| STT streaming | `mini-services/stt-service` — sherpa-onnx **nemotron-3.5-asr-streaming-0.6b** (export k2-fsa officiel, INT8) + VAD Silero | **auto-hébergé** sur un hôte joignable publiquement (VPS/serveur perso), port `3032` |
+| LLM vocal | `nvidia/nemotron-3.5-super-vl:free` via **Kilo Gateway** | Vercel (réutilise `KILO_GATEWAY_API_KEY`) |
+| TTS | **Edge TTS** (`node-edge-tts`, voix `fr-FR-DeniseNeural`, etc.) | Vercel — HTTPS sortant direct |
+
+Déployer le service STT (une fois, sur l'hôte public) :
+
+```bash
+cd mini-services/stt-service
+bun install && bun run dev        # écoute sur :3032, télécharge les modèles au 1ᵉʳ boot
+# derrière Caddy/nginx : stt.votre-domaine.tld → 127.0.0.1:3032 (TLS + secret)
+```
+
+Puis dans l'environnement Vercel (Production) :
+
+| Variable | Valeur | Rôle |
+|---|---|---|
+| `STT_REMOTE_URL` | `https://stt.votre-domaine.tld` | URL publique du service STT |
+| `STT_AUTH_SECRET` | secret partagé | header `x-stt-secret` (optionnel mais recommandé) |
+| `VOICE_LLM_MODEL` | défaut : `nvidia/nemotron-3.5-super-vl:free` | modèle LLM vocal |
+| `VOICE_DEFAULT_LANGUAGE` | défaut : `fr` | langue par défaut de l'overlay |
+
+**Comportement sans repli (important)** : si `STT_REMOTE_URL` n'est pas
+configuré ou si l'hôte est injoignable, l'overlay affiche « Service de
+reconnaissance vocale indisponible » et **aucune bascule fournisseur n'a lieu** —
+ni pour le STT, ni pour le LLM (sans clé Kilo : erreur de configuration claire),
+ni pour le TTS. C'est le comportement voulu : service débranché → le mode
+vocal le dit honnêtement, il ne route jamais vers un autre fournisseur.
+
 ### Moteurs intégrés audio + images (zéro configuration, sans aucun SDK)
 
 La voix et les images fonctionnent à l'installation, comme dans l'original,
