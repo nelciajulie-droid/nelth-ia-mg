@@ -1,8 +1,7 @@
 /**
  * Built-in Kilo AI Gateway LLM engine (chat completions) — TS-port extension.
  *
- * Replaces the earlier z-ai-web-dev-sdk GLM engine. Two free models are
- * exposed through the OpenAI-compatible Kilo AI Gateway
+ * Two free models are exposed through the OpenAI-compatible Kilo AI Gateway
  * (https://ai-gateway.kilo.ai/api/v1 — auth: `Bearer KILO_GATEWAY_API_KEY`):
  *
  *   1. dots-studio/dots-3-note-preview:free  — standard chat model
@@ -17,9 +16,9 @@
  * Open WebUI v0.12.5 `output` items that the compiled frontend renders as
  * the collapsible "Thinking… / Thought for N seconds" block.
  *
- * Without a gateway key the SAME interface is served by the built-in z-ai
- * SDK engine (see kiloFallbackActive) — callers never need to care which
- * engine is live.
+ * NO fallback provider: without KILO_GATEWAY_API_KEY the engine is simply
+ * unavailable (`kiloAvailable()` → false, models unlisted, completions
+ * 404) — the app NEVER silently routes to another provider.
  */
 
 /** Kilo AI Gateway base URL (OpenAI-compatible routes under /api/v1). */
@@ -30,20 +29,13 @@ export const KILO_GATEWAY_BASE_URL =
 export const KILO_GATEWAY_API_KEY = process.env.KILO_GATEWAY_API_KEY || '';
 
 /**
- * Keyless fallback engine: when no gateway key is configured, the built-in
- * z-ai SDK engine (lib/zai-llm.ts) serves the SAME two models without any
- * key — local development and self-hosted installs get a working chat out
- * of the box. The gateway stays the primary path wherever
- * KILO_GATEWAY_API_KEY is set (Vercel, Docker, VPS…).
+ * True when the built-in models can be served — the Kilo gateway key MUST
+ * be configured. There is NO keyless fallback: without a key the models are
+ * unlisted and completions return a configuration error (never another
+ * provider).
  */
-export function kiloFallbackActive(): boolean {
-  return KILO_GATEWAY_API_KEY.length === 0;
-}
-
-/** True when the built-in models can be served (gateway key OR keyless
- *  z-ai fallback) — the model selector always lists them. */
 export function kiloAvailable(): boolean {
-  return true;
+  return KILO_GATEWAY_API_KEY.length > 0;
 }
 
 /** Built-in standard chat model — Kilo gateway Dots3-Note Preview, shown as "Nelth-3.5". */
@@ -61,8 +53,7 @@ export const KILO_REASONING_MODEL_DESCRIPTION = '';
 /**
  * Legacy GLM model ids (removed engine) → Kilo gateway equivalents, so chats
  * created with the old built-in models keep working on the new ones.
- */
-const LEGACY_MODEL_MAP: Record<string, string> = {
+ */: Record<string, string> = {
   'zai-glm-4-plus': KILO_MODEL_ID,
   'zai-glm-reasoning': KILO_REASONING_MODEL_ID,
 };
