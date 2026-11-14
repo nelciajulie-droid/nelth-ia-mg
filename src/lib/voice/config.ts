@@ -5,7 +5,7 @@
 
 /** Remote streaming STT service (sherpa-onnx host). Next.js forwards PCM
  * server-to-server; the browser never performs inference. */
-export const STT_REMOTE_URL = (process.env.STT_REMOTE_URL || 'http://127.0.0.1:3031').replace(/\/+$/, '');
+export const STT_REMOTE_URL = (process.env.STT_REMOTE_URL || 'http://127.0.0.1:3032').replace(/\/+$/, '');
 
 /** Shared secret between the Vercel backend and the STT host. */
 export const STT_AUTH_SECRET = process.env.STT_AUTH_SECRET || '';

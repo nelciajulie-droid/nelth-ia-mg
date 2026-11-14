@@ -43,7 +43,9 @@ import { join, dirname } from 'node:path';
 // @ts-ignore — native addon without type declarations
 import * as sherpa from 'sherpa-onnx-node';
 
-const PORT = Number(process.env.STT_PORT || 3031);
+// Port 3032 — 3031 is taken by tokenharbor-mock (sandbox boot stack); the
+// Next.js voice config default follows this change (src/lib/voice/config.ts).
+const PORT = Number(process.env.STT_PORT || 3032);
 const AUTH_SECRET = process.env.STT_AUTH_SECRET || '';
 const ROOT = dirname(new URL(import.meta.url).pathname);
 
