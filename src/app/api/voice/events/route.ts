@@ -5,6 +5,7 @@ export const maxDuration = 300;
 import { NextRequest } from 'next/server';
 import { buildCtx } from '@/server/http';
 import { getVoiceSession, subscribe } from '@/lib/voice/manager';
+import { STT_MODEL, VOICE_LLM_MODEL } from '@/lib/voice/config';
 import type { VoiceEvent } from '@/lib/voice/protocol';
 
 /**
@@ -35,7 +36,7 @@ export async function GET(req: NextRequest) {
       };
       // Replay-anchors: fresh subscribers start from the live stream (the
       // UI re-syncs its transcript from stt.partial snapshots anyway).
-      send({ type: 'session.ready', sessionId: session.id, ts: Date.now(), payload: { language: session.language, voice: session.voice, sttModel: '', llmModel: '', ttsProvider: '', chatId: session.chatId } } as VoiceEvent);
+      send({ type: 'session.ready', sessionId: session.id, ts: Date.now(), payload: { language: session.language, voice: session.voice, sttModel: STT_MODEL, llmModel: VOICE_LLM_MODEL, ttsProvider: 'edge', chatId: session.chatId } } as VoiceEvent);
       unsubscribe = subscribe(session, send);
       heartbeat = setInterval(() => {
         try {
