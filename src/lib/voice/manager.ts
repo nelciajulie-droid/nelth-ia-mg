@@ -32,7 +32,7 @@ import { voiceEvent, type VoiceEvent } from './protocol';
 import {
   VOICE_MAX_SESSION_DURATION_SEC,
   VOICE_DEFAULT_LANGUAGE,
-  VOICE_INTERRUPTION_ENABLED,
+  VOICE_TTS_QUEUE_MAX,
 } from './config';
 import { makeVoiceLlm } from './llm';
 import { SentenceChunker } from './chunker';
