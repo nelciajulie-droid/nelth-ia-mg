@@ -104,10 +104,14 @@ export function detectVideoFormat(text: string): {
  * continuity over any time limit). The Vercel invocation window (route
  * maxDuration 300s) is the only physical ceiling; in dev nothing cuts a
  * running batch. Guards that still fire: batch error, poll exhaustion
- * (MAX_POLL_BLIPS consecutive failures — a dead gateway), and the
- * fast-submit retry below (a quick 502 left no server-side job).
+ * (MAX_POLL_BLIPS consecutive failures — a dead gateway), and the submit
+ * retry below (ANY failure that never yielded a batchId — timeout aborts,
+ * 502 blips, cold-start slow rejects — left no server-side job, so a
+ * resubmit is always safe).
  */
-/** A submit that fails fast (<20s) left no server-side job → retry at once. */
+/** A submit that fails with a batchId in hand costs a real server job — only
+ * a FAST such failure (<20s) is retried; slow ones break (the batch may
+ * exist server-side even though its id never reached us). */
 const FAST_SUBMIT_FAIL_MS = 20_000;
 const MAX_SUBMIT_ATTEMPTS = 3;
 const POLL_INTERVAL_MS = 4_000;
@@ -217,12 +221,18 @@ export async function generateVideo(
   let lastFailure: unknown = null;
 
   for (let attempt = 0; attempt < MAX_SUBMIT_ATTEMPTS; attempt++) {
-    // Only the SUBMIT is retried, and only on fast failures — a slow failure
-    // or a batch already accepted leaves the retry loop (the poll phase
-    // handles its own transient blips). No global wall clock: each attempt
-    // polls its batch to completion however long the render takes.
+    // Only the SUBMIT is retried, and only when no batchId was obtained —
+    // a submit that never returned a batchId left NO server-side job, so a
+    // resubmit is always safe whatever the wall-clock said (timeouts,
+    // cold-start slow rejects, network blips included). A batch already
+    // accepted is never re-rolled — only its polling continues (the poll
+    // phase handles its own transient blips). No global wall clock: each
+    // attempt polls its batch to completion however long the render takes.
 
     const submitStartedAt = Date.now();
+    // Flips true the moment a batchId is in hand — the boundary between
+    // "safe to resubmit" and "must not resubmit".
+    let batchObtained = false;
     try {
       options.onPhase?.('sending');
       const batchId = options.sourceImage
@@ -235,6 +245,7 @@ export async function generateVideo(
               variations: 1,
             })
           ).batchId;
+      batchObtained = true;
 
       options.onPhase?.('rendering');
       const urls = await waitForVibesVideo(batchId);
@@ -252,18 +263,23 @@ export async function generateVideo(
     } catch (e) {
       lastFailure = e;
       // Poll-phase terminal failures (batch error / poll exhaustion) are
-      // NOT retried — the subject was likely refused; only fast submit blips
+      // NOT retried — the subject was likely refused; only submit blips
       // restart.
       if (e instanceof Error && e.message.startsWith('Video generation')) {
         console.error('[video-generation] batch failed:', e.message);
         break;
       }
-      const fast = Date.now() - submitStartedAt < FAST_SUBMIT_FAIL_MS;
-      if (!fast) {
-        console.error('[video-generation] submit failed (slow — no retry):', e);
-        break;
+      // No batchId → no server-side job → resubmitting is always safe,
+      // whatever the wall-clock said (a timeout abort guarantees the
+      // gateway never answered; a slow reject just means cold start).
+      if (batchObtained) {
+        const fast = Date.now() - submitStartedAt < FAST_SUBMIT_FAIL_MS;
+        if (!fast) {
+          console.error('[video-generation] submit failed (slow — no retry):', e);
+          break;
+        }
       }
-      console.warn(`[video-generation] fast submit blip (attempt ${attempt + 1}) — retrying`);
+      console.warn(`[video-generation] submit blip (attempt ${attempt + 1}) — retrying`);
       if (attempt < MAX_SUBMIT_ATTEMPTS - 1) {
         try {
           options.onRetry?.(attempt + 1, MAX_SUBMIT_ATTEMPTS);
@@ -315,6 +331,9 @@ export async function generateVideos(
 
   for (let attempt = 0; attempt < MAX_SUBMIT_ATTEMPTS; attempt++) {
     const submitStartedAt = Date.now();
+    // Same boundary as generateVideo: retry is always safe while no batchId
+    // was obtained (see the singular path for the rationale).
+    let batchObtained = false;
     try {
       options.onPhase?.('sending');
       const { batchId } = await vibesGenerateVideo({
@@ -323,6 +342,7 @@ export async function generateVideos(
         resolution: options.resolution,
         variations: wanted,
       });
+      batchObtained = true;
 
       options.onPhase?.('rendering');
       const urls = await waitForVibesVideo(batchId);
@@ -348,12 +368,15 @@ export async function generateVideos(
         console.error('[video-generation] batch failed:', e.message);
         break;
       }
-      const fast = Date.now() - submitStartedAt < FAST_SUBMIT_FAIL_MS;
-      if (!fast) {
-        console.error('[video-generation] submit failed (slow — no retry):', e);
-        break;
+      // No batchId → no server-side job → resubmitting is always safe.
+      if (batchObtained) {
+        const fast = Date.now() - submitStartedAt < FAST_SUBMIT_FAIL_MS;
+        if (!fast) {
+          console.error('[video-generation] submit failed (slow — no retry):', e);
+          break;
+        }
       }
-      console.warn(`[video-generation] fast submit blip (attempt ${attempt + 1}) — retrying`);
+      console.warn(`[video-generation] submit blip (attempt ${attempt + 1}) — retrying`);
       if (attempt < MAX_SUBMIT_ATTEMPTS - 1) {
         try {
           options.onRetry?.(attempt + 1, MAX_SUBMIT_ATTEMPTS);

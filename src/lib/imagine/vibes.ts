@@ -98,7 +98,10 @@ export async function vibesGenerateVideo(input: {
       variations: Math.min(Math.max(input.variations ?? 1, 1), 4),
       poll: false, // OUR poller drives the batch to completion
     },
-    30_000
+    // Observed cold-start submits take ~20-25s (the gateway spins its video
+    // backend on demand) — 30s cut submissions apart mid-flight. 60s keeps
+    // ~2.5x headroom over the observed worst case.
+    60_000
   );
   if (!data?.batchId) throw new Error(data?.error || 'No batchId returned by the video gateway');
   return { batchId: data.batchId };
@@ -224,7 +227,8 @@ export async function vibesAnimateVideo(input: {
         prompt: input.source.prompt ?? 'Uploaded image',
       },
     },
-    30_000
+    // Same cold-start reality as /videos/generate — see there.
+    60_000
   );
   const batchId = data?.batchId || data?.batch?.id || data?.id;
   if (!batchId) throw new Error(data?.error || 'No batchId returned by the animate endpoint');
