@@ -533,14 +533,26 @@ async function runVibesImageGeneration(
     // (runVibesImageGroup) — le paramètre natif « variations » de la
     // passerelle couvre toute l'action en une seule fois.
     await setItemMeta(item.id, { phase: 'sending' });
-    const results = await vibes.vibesGenerateImages({
-      prompt: effectivePrompt,
-      aspectRatio: plan.aspectRatio,
-      variations: 1,
-    });
-    if (!results.length) throw new Error('La génération a échoué.');
-    await setItemMeta(item.id, { phase: 'generating' });
-    imageUrl = results[0].url;
+    // Étiquette honnête : l'appel image vibes est SYNCHRONE — le rendu
+    // tourne côté serveur PENDANT l'appel. Après 3s d'« envoi » le libellé
+    // bascule en « generating » pour que l'attente se lise comme la
+    // génération qu'elle est réellement, et non comme un envoi bloqué.
+    let labelTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      labelTimer = setTimeout(() => {
+        void setItemMeta(item.id, { phase: 'generating' }).catch(() => undefined);
+      }, 3_000);
+      const results = await vibes.vibesGenerateImages({
+        prompt: effectivePrompt,
+        aspectRatio: plan.aspectRatio,
+        variations: 1,
+      });
+      if (!results.length) throw new Error('La génération a échoué.');
+      await setItemMeta(item.id, { phase: 'generating' });
+      imageUrl = results[0].url;
+    } finally {
+      if (labelTimer) clearTimeout(labelTimer);
+    }
   }
 
   await persistVibesImage(user, item, plan, imageUrl);
@@ -619,30 +631,47 @@ async function runVibesImageGroup(
     );
 
     broadcastPhase('sending');
-    const results = await vibes.vibesGenerateImages({
-      prompt: effectivePrompt,
-      aspectRatio: plan.aspectRatio,
-      variations: requested,
-    });
-    if (!results.length) throw new Error('La génération a échoué.');
-    broadcastPhase('generating');
+    // Étiquette honnête — même raison que le chemin individuel : l'appel
+    // synchrone EST le rendu. Après 3s d'« envoi » le libellé bascule en
+    // « generating » (le timer se clear dès que la réponse arrive).
+    let labelTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      labelTimer = setTimeout(() => broadcastPhase('generating'), 3_000);
+      const results = await vibes.vibesGenerateImages({
+        prompt: effectivePrompt,
+        aspectRatio: plan.aspectRatio,
+        variations: requested,
+      });
+      if (!results.length) throw new Error('La génération a échoué.');
+      broadcastPhase('generating'); // redondant si le timer a déjà basculé — inoffensif
 
-    for (let index = 0; index < items.length; index++) {
-      const result: { url: string } | undefined = results[index];
-      if (result) {
-        try {
-          await persistVibesImage(user, items[index], plan, result.url);
-        } catch (err) {
-          await failItem(items[index], plan, err);
+      // Persistance des images rendues en PARALLÈLE — chaque ligne est une
+      // chaîne indépendante (clean watermark + download + écriture fichier) ;
+      // un lot de 4 payait 4x le temps séquentiel APRÈS la génération elle-même.
+      const persistable = items
+        .map((item, index) => ({ item, result: results[index] }))
+        .filter((entry) => entry.result);
+      const persisted = await Promise.allSettled(
+        persistable.map((entry) => persistVibesImage(user, entry.item, plan, entry.result!.url))
+      );
+      for (let i = 0; i < persistable.length; i++) {
+        if (persisted[i].status === 'rejected') {
+          await failItem(persistable[i].item, plan, persisted[i].reason);
         }
-      } else {
-        // Ligne orpheline (le moteur a rendu moins d'images que demandé) →
-        // génération individuelle, comme avant.
-        console.log(
-          `[imagine] groupe V2 : ${results.length}/${requested} image(s) rendues — ligne ${index + 1} en génération individuelle`
-        );
-        await runOneGeneration(user, items[index], plan);
       }
+
+      // Lignes orphelines (le moteur a rendu moins d'images que demandé) →
+      // génération individuelle, comme avant — séquentiel, après le lot.
+      for (let index = 0; index < items.length; index++) {
+        if (!results[index]) {
+          console.log(
+            `[imagine] groupe V2 : ${results.length}/${requested} image(s) rendues — ligne ${index + 1} en génération individuelle`
+          );
+          await runOneGeneration(user, items[index], plan);
+        }
+      }
+    } finally {
+      if (labelTimer) clearTimeout(labelTimer);
     }
   } catch {
     // Action de groupe morte → repli intégral une-par-une.
@@ -901,18 +930,28 @@ async function runVideoGroup(
       onPhase: broadcastPhase,
     });
 
+    // Persistance des vidéos rendues en PARALLÈLE — chaque ligne est une
+    // écriture indépendante (fichier ~3 Mo + ligne DB) ; un lot de 4 payait
+    // 4x le temps séquentuel APRÈS le téléchargement du batch. Les lignes
+    // orphelines restent traitées une-par-une ensuite, comme avant.
+    const persistable = items
+      .map((item, index) => ({ item, video: videos[index] }))
+      .filter((entry) => entry.video);
+    const persisted = await Promise.allSettled(
+      persistable.map((entry) =>
+        persistGeneratedMedia(user, entry.item, plan, entry.video!.bytes, entry.video!.contentType, {
+          provider: 'vibes',
+          model: 'nelth-v2-video',
+        })
+      )
+    );
+    for (let i = 0; i < persistable.length; i++) {
+      if (persisted[i].status === 'rejected') {
+        await failItem(persistable[i].item, plan, persisted[i].reason);
+      }
+    }
     for (let index = 0; index < items.length; index++) {
-      const video: { bytes: Buffer; contentType: string } | undefined = videos[index];
-      if (video) {
-        try {
-          await persistGeneratedMedia(user, items[index], plan, video.bytes, video.contentType, {
-            provider: 'vibes',
-            model: 'nelth-v2-video',
-          });
-        } catch (err) {
-          await failItem(items[index], plan, err);
-        }
-      } else {
+      if (!videos[index]) {
         console.log(
           `[imagine] groupe vidéo : ${videos.length}/${requested} vidéo(s) rendues — ligne ${index + 1} en génération individuelle`
         );

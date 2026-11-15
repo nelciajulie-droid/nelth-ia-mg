@@ -226,6 +226,28 @@ const VIDEO_ENGAGE_RE = new RegExp(
   'i'
 );
 
+/**
+ * Explicit animate-an-existing-visual phrasing — used ONLY by the fast path
+ * below: when the video engagement net owns the turn AND this pattern
+ * matches, the decision carries animate=true so the caller feeds the
+ * conversation's most recent image into image→video (parity with the
+ * classifier's animate=true — without it, "anime cette image" would degrade
+ * to a context-free text→video).
+ */
+const ANIMATE_FAST_RE = new RegExp(
+  [
+    '\\banime(?:r|z|-moi|\\s+(?:cette?|cet|ce|la|le|l[’\']| ça|ca|moi|image|photo|dessin))\\b|\\banimates?|animate\\b|\\banimated\\b',
+    '\\b(?:fais|fait|mets|met)\\s+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
+    '\\b(?:fais|fait|mets|met)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b[^\\n]{0,20}?\\s(?:[çc]a|ceci|cela|cette?|la|le|l[’\'])\\b',
+    '\\b(?:make|put)\\s+(?:it|this|that)\\s+(?:move|in\\s+motion)\\b',
+    // conversion d'un visuel EXISTANT (« convertis cette image en gif »,
+    // « transforme la photo en vidéo », visuel + « en gif / en vidéo »)
+    '\\b(?:convertis|convertit|convertissez|transform(?:e|es|ez)?)\\b[^\\n]{0,40}?(?:image|photo|dessin|illustration|visuel)s?\\b',
+    '\\b(?:image|photo|dessin|illustration|visuel)s?\\b[^\\n]{0,30}?\\ben\\s+(?:gifs?|jifs?|vid[ée]os?)\\b',
+  ].join('|'),
+  'i'
+);
+
 // ---------------------------------------------------------------------------
 // Lexical search safety net (verbatim from auto-web-search.ts)
 // ---------------------------------------------------------------------------
@@ -508,6 +530,62 @@ export async function decideAutoEngagement(
   }
   if (lastUserIdx < 0) return NO_ENGAGEMENT;
   const targetText = String(messages[lastUserIdx].content ?? '');
+
+  // ---- FAST PATH (pre-classifier): the engagement nets at the bottom of
+  // ---- this function are fully deterministic. When one of them
+  // ---- unambiguously owns the turn AND no guard (SVG / code deliverable /
+  // ---- explicit search command) competes, the classifier call is pure
+  // ---- added latency in front of the gateway submission — up to 8s before
+  // ---- « génère une vidéo de chat » even reaches the video engine, on every
+  // ---- obvious generation turn. Skipping it starts the generation that
+  // ---- much sooner; every ambiguous case still gets the classifier. Routing
+  // ---- parity is exact: the fast path fires ONLY when the post-parse nets
+  // ---- (running with a null classifier decision) would fire too — same
+  // ---- guards, same order, same VIDEO > IMAGE priority. The only
+  // ---- degradation: the model's content-inferred aspectRatio (9:16 for a
+  // ---- dancing person) falls back to the format keyword / 16:9 default —
+  // ---- an EXPLICIT user format request still wins downstream.
+  {
+    const svg = SVG_REQUEST_RE.test(targetText);
+    const imageWords = IMAGE_WORD_RE.test(targetText);
+    const videoWords = VIDEO_WORD_RE.test(targetText);
+    // Same jeu-video carve-out as the post-parse guard: « crée un jeu vidéo »
+    // is CODE; a real moving-artifact signal riding along keeps media alive.
+    const jeuVideo = /\bjeux?\s+vid[ée]o\b/i.test(targetText);
+    const otherVideoSignal =
+      /\b(?:gifs?|jifs?|clips?|animations?|anim\w*|reels?|stories?|tiktoks?|court[ -]?m[ée]trages?|bandes?[ -]?annonces?|trailer?s?)\b/i.test(
+        targetText
+      );
+    const codeGuard =
+      CODE_DELIVERABLE_RE.test(targetText) &&
+      !imageWords &&
+      (!videoWords || (jeuVideo && !otherVideoSignal));
+    const searchCommand = SEARCH_COMMAND_RE.test(targetText);
+    // Nets fire only when NO engine is already engaged — with the classifier
+    // skipped both start false, so the FIRST net in the post-parse order
+    // wins: gif → video → image (priority VIDEO > IMAGE kept).
+    const videoNet = VIDEO_ENGAGE_RE.test(targetText);
+    const imageNet = IMAGE_ENGAGE_RE.test(targetText);
+    const gifNet = GIF_REQUEST_RE.test(targetText);
+    if (!svg && !codeGuard && !searchCommand && (videoNet || gifNet || imageNet)) {
+      const fast: AutoEngagementDecision = { ...NO_ENGAGEMENT };
+      if (videoNet || gifNet) {
+        fast.video = true;
+        // Explicit animate phrasing → image→video with the conversation's
+        // most recent visual (the classifier's animate=true parity).
+        fast.animate = ANIMATE_FAST_RE.test(targetText);
+      } else {
+        fast.image = true;
+      }
+      console.log(
+        '[auto-engage] fast path — deterministic net decided the turn (classifier skipped, ' +
+          (fast.video ? 'video' : 'image') +
+          (fast.animate ? ' + animate' : '') +
+          ')'
+      );
+      return fast;
+    }
+  }
 
   // Compact transcript: last 6 turns, user/assistant ONLY (system prompts —
   // capability blocks, misspell hints — never pollute the routing decision),

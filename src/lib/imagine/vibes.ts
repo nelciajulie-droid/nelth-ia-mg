@@ -335,7 +335,11 @@ export async function vibesEnhancePrompt(prompt: string): Promise<{ prompt: stri
     const data = await vibesFetch<{ enhanced_prompt?: string; fallback?: boolean }>(
       '/api/prompts/enhance',
       { prompt },
-      25_000
+      // 8s — l'enhance est du sucre OPTIONNEL devant l'appel d'édition : le
+      // gateway déployé y répond 404 (fallback immédiat), mais si l'endpoint
+      // revenait lentement, 25s d'attente morte avant CHAQUE édition serait
+      // intenable. 8s couvre un rewrite de prompt ; au-delà, prompt brut.
+      8_000
     );
     const enhanced = typeof data.enhanced_prompt === 'string' ? data.enhanced_prompt.trim() : '';
     if (!enhanced) return { prompt, fallback: true };

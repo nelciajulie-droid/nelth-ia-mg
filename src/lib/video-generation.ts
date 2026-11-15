@@ -348,17 +348,17 @@ export async function generateVideos(
       const urls = await waitForVibesVideo(batchId);
 
       options.onPhase?.('finalizing');
-      // CDN URLs expire fast — download as many as possible, in order; one
-      // failed download does not void the rest of the batch.
+      // CDN URLs expire fast — the downloads are INDEPENDENT CDN fetches, so
+      // they run in PARALLEL (a 4-video batch used to pay 4x the sequential
+      // download time at ~3 Mo each); the batch order is preserved by index
+      // and one failed download never voids the rest.
+      const settled = await Promise.allSettled(urls.map((url) => downloadVibesVideo(url)));
       const videos: GeneratedVideo[] = [];
       let lastErr: unknown = new Error('The video service produced no downloadable video');
-      for (const url of urls) {
+      for (const outcome of settled) {
         if (videos.length >= wanted) break;
-        try {
-          videos.push(await downloadVibesVideo(url));
-        } catch (e) {
-          lastErr = e;
-        }
+        if (outcome.status === 'fulfilled') videos.push(outcome.value);
+        else lastErr = outcome.reason;
       }
       if (videos.length) return videos;
       lastFailure = lastErr;
