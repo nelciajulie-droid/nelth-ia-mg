@@ -1188,6 +1188,48 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
   const lastUserContent = (): string =>
     [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
 
+  // ---- Media-continuation probe (deterministic, zero-latency). Two
+  // ---- production bugs it closes:
+  // ----  1. A STICKY WEB-SEARCH TOGGLE used to bypass the ENTIRE auto
+  // ----     image/video engagement (the `else if` below) — after generating
+  // ----     an image, "changer le vetement" / "animer cette photo" fell to a
+  // ----     plain chat turn and the model refused ("Je ne peux pas…"). A
+  // ----     deterministic media directive now outranks the search: the turn
+  // ----     diverts into the auto engagement (media never needs search
+  // ----     context — priority already stated below).
+  // ----  2. The auto-decision PRE-GATE vocabulary (image nouns / draw verbs /
+  // ----     questions) misses the natural edit follow-ups ("changer le
+  // ----     vetement", "enlève le chapeau", "une autre version") — the
+  // ----     machinery was skipped entirely. A media directive now forces the
+  // ----     machinery ON (the fast-path nets decide it without a classifier
+  // ----     call, so no latency is added).
+  const attachedImageThisTurn: boolean = (() => {
+    try {
+      const lastFormMessage = Array.isArray(form.messages)
+        ? form.messages[form.messages.length - 1]
+        : null;
+      const files = [
+        ...(Array.isArray(userMessage?.files) ? userMessage.files : []),
+        ...(Array.isArray(lastFormMessage?.files) ? lastFormMessage.files : []),
+      ];
+      return files.some((f: any) => f?.type === 'image' && (f?.url || f?.id));
+    } catch {
+      return false;
+    }
+  })();
+  let forcedMediaTurn: 'video' | 'image' | 'edit' | null = null;
+  try {
+    const { deterministicMediaTurn } = await import('@/lib/chat/auto-engage');
+    forcedMediaTurn = deterministicMediaTurn(llmMessages, { attachedImage: attachedImageThisTurn });
+    if (forcedMediaTurn) {
+      console.log(
+        `[v12-flow] deterministic media probe → ${forcedMediaTurn} (search toggle bypassed, machinery forced on)`
+      );
+    }
+  } catch {
+    /* probe failure → the standard paths keep their exact behavior */
+  }
+
   const webSearchAllowed = async (): Promise<boolean> => {
     // MODE INVITÉ: live web search is locked for guests (ChatGPT parity —
     // logged-out visitors get direct model answers only). Blocks BOTH the
@@ -1401,7 +1443,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
   let autoVideoAnimate = false;
   let autoVideoRatio: '16:9' | '1:1' | '9:16' | undefined;
 
-  if (wantsWebSearch) {
+  // MEDIA OUTRANKS A STICKY SEARCH TOGGLE: a deterministic media directive
+  // (forcedMediaTurn) skips the search branch entirely — the turn belongs to
+  // the video/image engine (which never consumes search context), and the
+  // previous behavior sent "animer cette photo" on a searched plain-chat
+  // turn that ended in a refusal.
+  if (wantsWebSearch && !forcedMediaTurn) {
     if (await webSearchAllowed()) {
       const query = lastUserContent();
       if (query) await performWebSearch(query, 'Recherche web en cours');
@@ -1462,7 +1509,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         'i'
       );
       const needsAutoDecision =
-        AUTO_GATE_RE.test(query) || query.trim().length > 140 || /\b(dessine|g[eé]n[eè]re|cr[eé]e|fais(?:-en)?|montre)\b/i.test(query);
+        AUTO_GATE_RE.test(query) || query.trim().length > 140 || /\b(dessine|g[eé]n[eè]re|cr[eé]e|fais(?:-en)?|montre)\b/i.test(query) || forcedMediaTurn !== null;
       if (!needsAutoDecision) {
         console.log('[v12-flow] auto decisions SKIPPED (trivial turn pre-gate) — streaming immediately');
       } else {
@@ -1500,7 +1547,9 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       const videoAutoGuest = videoAutoOn && !guestSession;
       const decisionsWork =
         imageAutoGuest || searchAutoOn || videoAutoGuest
-          ? import('@/lib/chat/auto-engage').then((m) => m.decideAutoEngagement(llmMessages))
+          ? import('@/lib/chat/auto-engage').then((m) =>
+              m.decideAutoEngagement(llmMessages, { attachedImage: attachedImageThisTurn })
+            )
           : Promise.resolve(null);
       let decision: any = null;
       try {
@@ -1792,8 +1841,19 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // ("fais-le en bleu", "make it blue"…) and the user attached nothing,
     // the conversation's most recent generated image becomes the
     // image-to-image source — the edit transforms the ACTUAL previous visual
-    // instead of re-rolling from a context-free prompt.
-    if (autoImageEdit && sourceImages.length === 0 && isSavedChatId(chatId) && userMessageId) {
+    // instead of re-rolling from a context-free prompt. The toggle-ON turn
+    // gets the same source: the image tool is engaged but the auto decision
+    // does not run for it (imageAutoGuest excludes toggle turns), so an edit
+    // phrasing ("changer le vetement") used to text→image a garbage prompt —
+    // the deterministic probe (forcedMediaTurn === 'edit') feeds the previous
+    // visual here too.
+    const toggleEditFollowup = form.features?.image_generation === true && forcedMediaTurn === 'edit';
+    if (
+      (autoImageEdit || toggleEditFollowup) &&
+      sourceImages.length === 0 &&
+      isSavedChatId(chatId) &&
+      userMessageId
+    ) {
       try {
         const chat = await getChatById(chatId);
         const map = ((chat?.chat as any)?.history as any)?.messages;

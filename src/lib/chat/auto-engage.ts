@@ -42,6 +42,14 @@ import { kiloChatCompletion } from '@/lib/kilo-llm';
  *     the two confusion zones (volatile-vs-stable facts, media-vs-code /
  *     imagine-visual vs creative-writing) so its raw accuracy rises on
  *     exactly the turns the nets cannot decide;
+ *   • IMAGE-EDIT CONTINUATION net (NEW — the reported production bug:
+ *     "je génère une image puis je dis ‹changer le vetement› / ‹animer
+ *     cette photo›, il répond je ne peux pas"): the natural follow-up
+ *     phrasings carry no image noun and no draw verb, so the v12 pre-gate
+ *     skipped the machinery and the turn fell to a plain chat refusal. An
+ *     explicit edit directive + the recent-generated-image trace in the
+ *     conversation now engages the IMAGE engine deterministically with
+ *     edit=true (image→image on the previous visual);
  *   • TRUNCATION-TOLERANT parsing: the free gateway model sometimes prefixes
  *     prose or cuts the JSON mid-way — the known keys are recovered by regex
  *     instead of discarding the whole answer;
@@ -219,8 +227,8 @@ const VIDEO_ENGAGE_RE = new RegExp(
     // "fais bouger cette photo", "animate this image") — BOTH word orders:
     // "fais ça bouger" and the reversed "fais bouger ça" are correct French.
     '\\banime(?:r|z|-moi|\\s+(?:cette?|cet|ce|la|le|l[’\']|ça|ca|moi|image|photo|dessin))\\b|\\banimates?|animate\\b|\\banimated\\b',
-    '\\b(?:fais|fait|mets|met)\\s+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
-    '\\b(?:fais|fait|mets|met)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b[^\\n]{0,20}?\\s(?:[çc]a|ceci|cela|cette?|la|le|l[’\'])\\b',
+    '\\b(?:fais|fait|mets|met)\\b[\\s-]+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\b[\\s-]+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
+    '\\b(?:fais|fait|mets|met)\\b[\\s-]+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b[^\\n]{0,20}?[\\s-](?:[çc]a|ceci|cela|cette?|la|le|l[’\'])\\b',
     '\\b(?:make|put)\\s+(?:it|this|that)\\s+(?:move|in\\s+motion)\\b',
   ].join('|'),
   'i'
@@ -237,8 +245,8 @@ const VIDEO_ENGAGE_RE = new RegExp(
 const ANIMATE_FAST_RE = new RegExp(
   [
     '\\banime(?:r|z|-moi|\\s+(?:cette?|cet|ce|la|le|l[’\']| ça|ca|moi|image|photo|dessin))\\b|\\banimates?|animate\\b|\\banimated\\b',
-    '\\b(?:fais|fait|mets|met)\\s+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
-    '\\b(?:fais|fait|mets|met)\\s+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b[^\\n]{0,20}?\\s(?:[çc]a|ceci|cela|cette?|la|le|l[’\'])\\b',
+    '\\b(?:fais|fait|mets|met)\\b[\\s-]+(?:[çc]a|ceci|cela|la|le|l[’\']|cette?)\\b[\\s-]+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b',
+    '\\b(?:fais|fait|mets|met)\\b[\\s-]+(?:bouger|en\\s+mouvement|en\\s+vid[ée]o)\\b[^\\n]{0,20}?[\\s-](?:[çc]a|ceci|cela|cette?|la|le|l[’\'])\\b',
     '\\b(?:make|put)\\s+(?:it|this|that)\\s+(?:move|in\\s+motion)\\b',
     // conversion d'un visuel EXISTANT (« convertis cette image en gif »,
     // « transforme la photo en vidéo », visuel + « en gif / en vidéo »)
@@ -247,6 +255,173 @@ const ANIMATE_FAST_RE = new RegExp(
   ].join('|'),
   'i'
 );
+
+// ---------------------------------------------------------------------------
+// IMAGE-EDIT CONTINUATION vocabulary — the reported production bug: after a
+// generated image, the natural follow-ups ("changer le vetement", "enlève le
+// chapeau", "mets la robe en vert", "une autre version", "animer cette
+// photo") carried NO image noun / draw verb / question mark, so the v12
+// pre-gate SKIPPED the whole decision machinery and the chat model answered
+// "Je ne peux pas modifier d'images…". These nets make the continuation
+// deterministic: an explicit edit directive + a recent visual in the
+// conversation (the llm_content trace every image turn persists) engages the
+// IMAGE engine with edit=true (image→image) — no classifier call, zero
+// added latency, and immune to a cold/queued free gateway (which routinely
+// blows the 6.5s classifier budget and used to fail the turn open → refusal).
+// ---------------------------------------------------------------------------
+
+/**
+ * Question/explanation phrasings are NOT edit directives — "comment changer
+ * le vetement" asks for INSTRUCTIONS (plain chat), "montre-moi comment
+ * dessiner" wants a how-to. The edit net backs off; the classifier keeps the
+ * turn (and would answer image=false on the question anyway).
+ */
+const EDIT_QUESTION_RE = new RegExp(
+  [
+    '^\\s*(?:comment|how\\s+to|how\\s+do|how\\s+can|pourquoi|why|o[uù]|where|qui|who|quoi|what|quel(?:le|s)?|which|combien|c\\s*[\'’]?est\\s+comment)\\b',
+    '\\b(?:comment|how\\s+to|how\\s+do|how\\s+can|explique(?:r|z|moi)?|apprends?|enseigne|tuto(?:riel)?s?|astuce|instructions?)\\b',
+  ].join('|'),
+  'i'
+);
+
+/** Edit verbs (fr + en, misspellings tolerated via stems). */
+const EDIT_VERB =
+  '(?:chang\\w+|modifi\\w+|[ée]dit\\w+|retouch\\w+|enl[èe]v\\w+|retir\\w+|ajout\\w+|rajout\\w+|mets?|mettre|mettons|fais|fait|refais|refait|refaire|rends?|rendre|transform\\w+|convertis|convertissez|convertir|passe|passes|passer|arrang\\w+|rectifi\\w+|corrige\\w*|am[ée]lior\\w+|actualis\\w+|rafr[ai]ch\\w+|r[ée]g[ée]n[èe]r\\w+|modify|modif\\w+|edit\\w+|remov\\w+|delet\\w+|add\\w*|put|putting|make|making|turn|turning|swap\\w*|replac\\w+|redo\\w*|fix\\w*|updat\\w+|adjust\\w+|alter\\w+)';
+
+/** Visual-attribute nouns the directive may target (fr + en). */
+const EDIT_ATTRIBUTE =
+  '(?:v[êe]tements?|vetements?|robes?|chemises?|habits?|tenues?|pulls?|vestes?|pantalons?|jupes?|shorts?|costumes?|souliers?|chaussures?|baskets?|couleurs?|teintes?|styles?|th[èe]mes?|fonds?|arri[èe]re-?plans?|d[ée]cors?|cheveux|coiffures?|barbe|moustaches?|chapeaux?|casquettes?|lunettes?|masques?|maquillages?|peau|teint|yeux|sourire|expressions?|visages?|[âa]ges?|tailles?|silhouettes?|poses?|postures?|gestes?|positions?|angles?|cadres?|cadrag\\w+|zooms?|contextes?|ambiances?|atmosph[èe]res?|saisons?|heures?|lumi[èe]res?|[ée]clairages?|ombres?|contrastes?|saturation|flous?|nettet[ée]|textes?|l[ée]gendes?|titres?|inscriptions?|formats?|orientations?|dimensions?|ratios?|outfit|clothes|clothing|dress(?:es)?|shirts?|pants?|shoes?|hair|hairstyles?|hats?|caps?|glasses|masks?|makeups?|skins?|eyes?|smiles?|expressions?|faces?|ages?|sizes?|poses?|postures?|gestures?|frames?|framing|backgrounds?|lightings?|lights?|shadows?|contrasts?|colors?|colours?|styles?|themes?|texts?|titles?|captions?|formats?|orientations?|dimensions?|ratios?)';
+
+/**
+ * Explicit edit/iteration directive — ONE of:
+ *  1. edit verb + bare pronoun (+ optional complement or end of message):
+ *     "fais-le en bleu", "change-la", "rends-le plus grand", "make it blue",
+ *     "mets ça" — the pronoun must NOT be followed by a NOUN ("mets le rhum"
+ *     is an article, not an edit);
+ *  2. edit verb + visual-attribute noun nearby: "changer le vetement",
+ *     "enlève le chapeau", "change la couleur", "mets la robe en vert",
+ *     "remove the background";
+ *  3. reiteration idioms: "une autre version", "même chose mais",
+ *     "encore une fois", "same but", "another version";
+ *  4. English make/turn + it/this/that + anything: "make it pop",
+ *     "turn it sideways";
+ *  5. conversion idioms: "mets en noir et blanc", "passe en vertical";
+ *  6. edit verb + dans/sur + l'image/photo: "ajoute un chien dans l'image",
+ *     "mets un texte sur l'image".
+ */
+const EDIT_DIRECTIVE_RE = new RegExp(
+  [
+    // 1) verb + bare pronoun, pronoun followed by a complement, a trailing
+    //    politeness token, or the end of message
+    `\\b${EDIT_VERB}\\b(?:\\s*-\\s*|\\s+)(?:moi\\s+|nous\\s+)?(?:le|la|les|l['’]|[çc]a|ca|ceci|cela|en|it|this|that|them)\\b(?:\\s+(?:en|in|into|plus|moins|aussi|plutôt|maintenant|tr[èe]s|trop|un\\s+peu|beaucoup|more|less|bigger|smaller|taller|shorter|darker|brighter|younger|older|again)\\b|\\s+(?:stp|svp|please|merci|pla[îi]t)\\b\\s*[.!?,;…]*\\s*$|\\s*[.!?,;…]*\\s*$)`,
+    // 2) verb + visual-attribute noun within 40 chars
+    `\\b${EDIT_VERB}\\b[^\\n]{0,40}?\\b${EDIT_ATTRIBUTE}\\b`,
+    // 3) reiteration idioms
+    '\\b(?:une?\\s+autre\\s+(?:version|variante|d[ée]clinaison|interpr[ée]tation)|autres?\\s+(?:versions?|variantes?)|nouvelles?\\s+(?:versions?|variantes?)|(?:encore|again)\\s+une?\\s+fois|m[êe]me\\s+(?:chose|image|photo)\\s+mais|same\\s+(?:but|thing)\\b[^\\n]{0,30}\\bbut\\b|another\\s+(?:version|one|take|variant|pass))\\b',
+    // 4) make/turn + it/this/that + complement word
+    '\\b(?:make|turn)\\s+(?:it|this|that)\\s+\\S+',
+    // 5) conversion idioms (en + format/color outcome)
+    `\\b(?:passe|passes|passer|mets?|mettre|convertis|convertissez|convertir|transform\\w+|fais|fait|chang\\w+|modifi\\w+)\\b[^\\n]{0,30}?\\ben\\s+(?:noir\\s+et\\s+blanc|n[ée]gatif|sepias?|vertical\\w*|horizontal\\w*|carr[ée]?|format\\s+\\w+|(?:16|9|1)\\s*:\\s*(?:9|16|1))\\b`,
+    // 6) edit verb + dans/sur + image/photo (add/remove INSIDE the visual) —
+    //    "l image" (fast-typing, missing apostrophe) tolerated
+    `\\b${EDIT_VERB}\\b[^\\n]{0,50}?(?:dans|sur|à)\\s+(?:l['’  ]|la|le|ce|cette|the|this)\\s?(?:images?|photos?|visuels?|dessins?)\\b`,
+  ].join('|'),
+  'i'
+);
+
+/**
+ * Recent-generated-visual trace — every image/video turn persists a natural
+ * assistant sentence as meta.llm_content ("Voici l'image générée (f). Dites-moi
+ * si vous souhaitez des ajustements." / "Voici la nouvelle version de l'image…"),
+ * and legacy turns synthesize the same shape in messageContent(). Seeing that
+ * trace in the recent window means the conversation HOLDS an editable visual.
+ */
+const RECENT_IMAGE_TRACE_RE =
+  /\bvoici\b[^\n]{0,80}?\bimages?\b|\bimages?\s+g[ée]n[ée]r[ée]e|\b(?:nouvelle|autre)\s+version\s+de\s+l['’]?image|\bvoici\b[^\n]{0,80}?\bphotos?\b/i;
+
+/** True when the recent conversation window carries a generated-visual trace. */
+export function hasRecentImageTrace(messages: { role: string; content: string }[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== 'assistant' && m?.role !== 'user') continue;
+    if (RECENT_IMAGE_TRACE_RE.test(String(m.content ?? ''))) return true;
+  }
+  return false;
+}
+
+/** Latest user-message text of a transcript ('' when none). */
+function latestUserText(messages: { role: string; content: string }[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') return String(messages[i].content ?? '');
+  }
+  return '';
+}
+
+/**
+ * True when THIS turn is an explicit IMAGE-EDIT ITERATION on a visual already
+ * present — edit directive phrasing AND (a recent generated image in the
+ * conversation OR an image attached to this message). Consumption: the v12
+ * pre-gate (run the machinery instead of skipping to plain chat) and section
+ * 3.5 (feed the previous image as the image→image source on toggle turns).
+ */
+export function isEditIterationOn(
+  messages: { role: string; content: string }[],
+  opts?: { attachedImage?: boolean }
+): boolean {
+  const targetText = latestUserText(messages);
+  if (!targetText || EDIT_QUESTION_RE.test(targetText)) return false;
+  const visualPresent = opts?.attachedImage === true || hasRecentImageTrace(messages);
+  if (!visualPresent) return false;
+  return EDIT_DIRECTIVE_RE.test(targetText);
+}
+
+/**
+ * Deterministic media probe — NO classifier call, pure nets. Answers "which
+ * engine owns this turn" for the UNAMBIGUOUS phrasings only:
+ *  • 'video' — video/GIF engagement net or explicit animate phrasing;
+ *  • 'edit'  — edit directive + visual present (image→image continuation);
+ *  • 'image' — fresh static-visual creation net;
+ *  • null    — nothing deterministic (the classifier keeps the turn).
+ * Guards mirror the post-parse ones (SVG / code deliverable / search
+ * command). Used by v12-flow to divert a MEDIA continuation away from a
+ * sticky web-search toggle (which used to bypass the whole auto engagement
+ * and end in the "je ne peux pas…" refusal).
+ */
+export function deterministicMediaTurn(
+  messages: { role: string; content: string }[],
+  opts?: { attachedImage?: boolean }
+): 'video' | 'image' | 'edit' | null {
+  const targetText = latestUserText(messages);
+  if (!targetText) return null;
+  const svg = SVG_REQUEST_RE.test(targetText);
+  const imageWords = IMAGE_WORD_RE.test(targetText);
+  const videoWords = VIDEO_WORD_RE.test(targetText);
+  // Same jeu-video carve-out as the post-parse guard.
+  const jeuVideo = /\bjeux?\s+vid[ée]o\b/i.test(targetText);
+  const otherVideoSignal =
+    /\b(?:gifs?|jifs?|clips?|animations?|anim\w*|reels?|stories?|tiktoks?|court[ -]?m[ée]trages?|bandes?[ -]?annonces?|trailer?s?)\b/i.test(
+      targetText
+    );
+  const codeGuard =
+    CODE_DELIVERABLE_RE.test(targetText) &&
+    !imageWords &&
+    (!videoWords || (jeuVideo && !otherVideoSignal));
+  const searchCommand = SEARCH_COMMAND_RE.test(targetText);
+  // HOW-TO/EXPLANATION phrasings never take the deterministic media path
+  // ("explique comment dessiner un chien") — the classifier keeps the turn.
+  if (svg || codeGuard || searchCommand || EDIT_QUESTION_RE.test(targetText)) return null;
+
+  const attachedImage = opts?.attachedImage === true;
+  const recentVisual = attachedImage || hasRecentImageTrace(messages);
+  // Video/GIF nets outrank everything (an animate request is video, never an
+  // image edit) and do not need conversation context.
+  if (GIF_REQUEST_RE.test(targetText) || VIDEO_ENGAGE_RE.test(targetText)) return 'video';
+  const editTurn =
+    recentVisual && !EDIT_QUESTION_RE.test(targetText) && EDIT_DIRECTIVE_RE.test(targetText);
+  if (editTurn) return 'edit';
+  if (IMAGE_ENGAGE_RE.test(targetText)) return 'image';
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Lexical search safety net (verbatim from auto-web-search.ts)
@@ -431,6 +606,11 @@ EXAMPLES — study the boundaries, then decide the LATEST message on its own:
 "imagine un dragon cracheur de feu" → image=true (concrete visual thing)
 "imagine une histoire de dragon" → all false (creative writing)
 "fais-le en bleu" (the previous assistant turn generated an image) → image=true, edit=true
+"changer le vetement" / "change la couleur de la robe" (an image was generated earlier in the conversation) → image=true, edit=true
+"enlève le chapeau" / "mets la robe en vert" / "ajoute un chien dans l'image" (an image was generated earlier) → image=true, edit=true
+"une autre version" / "même chose mais de nuit" (an image was generated earlier) → image=true, edit=true
+"animer cette photo" / "anime cette image" / "fais-la bouger" (an image was generated earlier or is attached) → video=true, animate=true
+"comment changer le vetement" (asking for instructions, even after an image) → all false (how-to question, NOT an edit)
 "génère un GIF de chat qui danse" → video=true
 "crée une vidéo verticale de danse" → video=true, aspectRatio "9:16"
 "crée une landing page ultra moderne" → all false (CODE)
@@ -516,9 +696,14 @@ function normalizeParsed(parsed: any): AutoEngagementDecision | null {
  * Decide — in ONE classifier call — whether the latest user message should
  * engage the video engine, the image engine, or a web search.
  * Fail-open: returns the neutral all-false decision on any failure.
+ * opts.attachedImage — the user attached an image to THIS message: it makes
+ * an edit directive an immediate image→image iteration (the attachment is
+ * the visual being edited), and it rides a synthetic line on the classifier
+ * transcript so the model's own "attached image" rules become usable.
  */
 export async function decideAutoEngagement(
-  messages: { role: string; content: string }[]
+  messages: { role: string; content: string }[],
+  opts?: { attachedImage?: boolean }
 ): Promise<AutoEngagementDecision> {
   // Latest user message — the decision target.
   let lastUserIdx = -1;
@@ -561,25 +746,50 @@ export async function decideAutoEngagement(
       !imageWords &&
       (!videoWords || (jeuVideo && !otherVideoSignal));
     const searchCommand = SEARCH_COMMAND_RE.test(targetText);
+    // HOW-TO/EXPLANATION phrasings never take the deterministic media path
+    // ("explique comment dessiner un chien", "comment faire une vidéo ?"):
+    // the user wants INSTRUCTIONS, not a produced artifact — the classifier
+    // keeps the turn and answers image=false on the question.
+    const questionPhrasing = EDIT_QUESTION_RE.test(targetText);
+    // EDIT CONTINUATION net — an explicit edit directive on a visual already
+    // present (previous generated image, or an image attached this turn).
+    // Runs BEFORE the fresh-creation image net (an iteration with the
+    // previous visual as source outranks a context-free re-roll) but AFTER
+    // the video nets ("anime cette image" is the video engine's turn).
+    const attachedImage = opts?.attachedImage === true;
+    const editNet =
+      (attachedImage || hasRecentImageTrace(messages)) &&
+      !questionPhrasing &&
+      EDIT_DIRECTIVE_RE.test(targetText);
     // Nets fire only when NO engine is already engaged — with the classifier
     // skipped both start false, so the FIRST net in the post-parse order
-    // wins: gif → video → image (priority VIDEO > IMAGE kept).
+    // wins: gif → video → edit → image (priority VIDEO > EDIT > IMAGE kept).
     const videoNet = VIDEO_ENGAGE_RE.test(targetText);
     const imageNet = IMAGE_ENGAGE_RE.test(targetText);
     const gifNet = GIF_REQUEST_RE.test(targetText);
-    if (!svg && !codeGuard && !searchCommand && (videoNet || gifNet || imageNet)) {
+    if (
+      !svg &&
+      !codeGuard &&
+      !searchCommand &&
+      !questionPhrasing &&
+      (videoNet || gifNet || imageNet || editNet)
+    ) {
       const fast: AutoEngagementDecision = { ...NO_ENGAGEMENT };
       if (videoNet || gifNet) {
         fast.video = true;
         // Explicit animate phrasing → image→video with the conversation's
         // most recent visual (the classifier's animate=true parity).
         fast.animate = ANIMATE_FAST_RE.test(targetText);
+      } else if (editNet) {
+        fast.image = true;
+        fast.edit = true;
       } else {
         fast.image = true;
       }
       console.log(
         '[auto-engage] fast path — deterministic net decided the turn (classifier skipped, ' +
           (fast.video ? 'video' : 'image') +
+          (fast.edit ? ' + edit (image-to-image continuation)' : '') +
           (fast.animate ? ' + animate' : '') +
           ')'
       );
@@ -600,7 +810,7 @@ export async function decideAutoEngagement(
       return `${m.role.toUpperCase()}: ${truncate(m.content, cap)}`;
     })
     .join('\n\n');
-  const userPrompt = `${transcript}\n\n---\nDecide now. JSON only.`;
+  const userPrompt = `${transcript}${opts?.attachedImage ? '\n\n[This message has an attached image.]' : ''}\n\n---\nDecide now. JSON only.`;
 
   // Classifier call with retry — the 6s total budget gates the user-visible
   // first token; a dropped request or unparsable answer retries while the
@@ -689,12 +899,17 @@ export async function decideAutoEngagement(
       result.animate = false;
     }
     if (!searchCommand) {
+      // HOW-TO/EXPLANATION phrasings never take the deterministic media
+      // nets ("explique comment dessiner un chien", "comment faire une
+      // vidéo ?") — the classifier keeps those turns and answers false.
+      const questionPhrasing = EDIT_QUESTION_RE.test(targetText);
       // GIF lexical net — a bare "gif" request deterministically routes to the
       // video engine (a GIF is animated); the animate flag stays as parsed so
       // "convertis cette image en gif" keeps its image→video animate source.
-      if (!result.video && !result.image && GIF_REQUEST_RE.test(targetText)) {
+      if (!questionPhrasing && !result.video && !result.image && GIF_REQUEST_RE.test(targetText)) {
         console.log('[auto-engage] gif net → video=true');
         result.video = true;
+        result.animate = result.animate || ANIMATE_FAST_RE.test(targetText);
       }
       // ---- ENGAGEMENT nets (image & video) — the production backstop for the
       // ---- "les autos décident mal" report: an explicit creation phrasing
@@ -703,18 +918,60 @@ export async function decideAutoEngagement(
       // ---- now only the search and GIF paths had backstops — an image/video
       // ---- request missed by the classifier fell through to a plain text
       // ---- turn (often with the "je ne peux pas générer…" refusal).
-      // ---- Priority stays VIDEO > IMAGE; the nets never override an engine
-      // ---- the classifier already engaged, and the SVG/code guard above has
-      // ---- already vetoed code turns.
-      if (!result.video && !result.image && VIDEO_ENGAGE_RE.test(targetText)) {
+      // ---- Priority stays VIDEO > EDIT > IMAGE; the nets never override an
+      // ---- engine the classifier already engaged, and the SVG/code guard
+      // ---- above has already vetoed code turns.
+      if (!questionPhrasing && !result.video && !result.image && VIDEO_ENGAGE_RE.test(targetText)) {
         console.log(
           '[auto-engage] video engagement net → video=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
         );
         result.video = true;
         result.image = false;
         result.edit = false;
+        // Animate parity with the fast path — the net firing on a cold/failed
+        // classifier must keep the animate flag, else "animer cette photo"
+        // degrades to a context-free text→video instead of animating the
+        // conversation's most recent image.
+        result.animate = result.animate || ANIMATE_FAST_RE.test(targetText);
       }
-      if (!result.video && !result.image && IMAGE_ENGAGE_RE.test(targetText)) {
+      // ---- EDIT CONTINUATION net (post-parse backstop) — the classifier
+      // ---- answered conservatively or its call failed on a queued free
+      // ---- gateway; an explicit edit directive on a visual already present
+      // ---- ("changer le vetement" after a generated image) still engages the
+      // ---- IMAGE engine with edit=true, so the previous visual feeds the
+      // ---- image→image job instead of a plain-chat refusal.
+      if (
+        !result.video &&
+        !result.image &&
+        (opts?.attachedImage === true || hasRecentImageTrace(messages)) &&
+        !EDIT_QUESTION_RE.test(targetText) &&
+        EDIT_DIRECTIVE_RE.test(targetText)
+      ) {
+        console.log(
+          '[auto-engage] edit continuation net → image=true, edit=true' +
+            (decision ? ' (model said false)' : ' (model decision unavailable)')
+        );
+        result.image = true;
+        result.video = false;
+        result.animate = false;
+        result.edit = true;
+      }
+      // Edit UPGRADE — the classifier engaged the image engine but missed the
+      // iteration nuance ("génère une nouvelle version" → image=true,
+      // edit=false): the directive + a visual already present upgrade the
+      // turn so the source image feeds the job.
+      if (
+        !result.video &&
+        result.image &&
+        !result.edit &&
+        (opts?.attachedImage === true || hasRecentImageTrace(messages)) &&
+        !EDIT_QUESTION_RE.test(targetText) &&
+        EDIT_DIRECTIVE_RE.test(targetText)
+      ) {
+        console.log('[auto-engage] edit upgrade → edit=true (iteration on a visual already present)');
+        result.edit = true;
+      }
+      if (!questionPhrasing && !result.video && !result.image && IMAGE_ENGAGE_RE.test(targetText)) {
         console.log(
           '[auto-engage] image engagement net → image=true' + (decision ? ' (model said false)' : ' (model decision unavailable)')
         );
@@ -778,6 +1035,13 @@ export const AUTO_NETS = {
   SVG_REQUEST_RE,
   IMAGE_WORD_RE,
   VIDEO_WORD_RE,
+  EDIT_DIRECTIVE_RE,
+  EDIT_QUESTION_RE,
+  RECENT_IMAGE_TRACE_RE,
+  ANIMATE_FAST_RE,
   forcedSearchMatch,
   stripSearchBoilerplate,
+  hasRecentImageTrace,
+  isEditIterationOn,
+  deterministicMediaTurn,
 };
