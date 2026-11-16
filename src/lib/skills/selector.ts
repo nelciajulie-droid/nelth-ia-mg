@@ -79,11 +79,10 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
   ],
   [/art\s+(algorithmique|g[ée]n[ée]ratif|generative)|generative\s+art|p5\.?js|art\s+cod[ée]/i, 'algorithmic-art'],
   [/guidelines?\s+de\s+marque|brand\s+guidelines|charte\s+graphique/i, 'brand-guidelines'],
-  [/clon(er|e|age)\s+(ce\s+)?site|website\s+clone|copier\s+ce\s+site/i, 'website-clone'],
   [/serveur\s+mcp|mcp\s+server|\bmcp\b\s+(server|serveur|builder)/i, 'mcp-builder'],
   [/tester\s+(mon\s+)?(?:web)?app|webapp\s+test|tests?\s+(e2e|playwright|automatis[ée])/i, 'webapp-testing'],
   [/artifact\s+html|app\s+web\s+interactive|web\s+artifact/i, 'web-artifacts-builder'],
-  [/curriculum|formation\s+claude|claude\s+academy|apprendre\s+[àa]\s+utiliser\s+claude/i, 'claude-academy-guide'],
+  [/curriculum|formation\s+claude|claude\s+academy|apprendre\s+[àa]\s+utiliser\s+claude/i, 'academy-guide'],
 ];
 
 /** Hints that mark the request as a WEB-PAGE deliverable. When one of them
@@ -94,7 +93,6 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
 const WEB_DELIVERABLE_HINTS = new Set([
   'landing-page-creation',
   'frontend-design',
-  'website-clone',
   'web-artifacts-builder',
 ]);
 

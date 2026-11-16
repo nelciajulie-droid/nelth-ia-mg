@@ -120,7 +120,7 @@ When to use a skill (examples):
 - "crée une landing page / un site ultra moderne" → frontend-design + landing-page-creation (usually auto-loaded)
 - "améliore le design / redessine l'interface / un thème" → frontend-design / theme-factory
 - "rédige des guidelines de marque / une communication interne" → brand-guidelines / internal-comms / doc-coauthoring
-- "clone ce site / construis un artifact HTML interactif / un serveur MCP / une API Claude" → website-clone / web-artifacts-builder / mcp-builder / claude-api
+- "construis un artifact HTML interactif / un serveur MCP / une API Claude" → web-artifacts-builder / mcp-builder / claude-api
 - "teste mon webapp" → webapp-testing
 - "crée une scène 3D / un objet 3D / du WebGL" → threejs-webgl (react-three-fiber si React)
 - "fais-moi un jeu / un jeu de cartes / un platformer / un jeu Phaser" → game-development + le skill du genre/engine
