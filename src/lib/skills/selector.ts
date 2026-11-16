@@ -67,12 +67,17 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
     /(?:cr[ée]e?r?|creer|cree|fais|fait|con[çc]ois|concevoir|con[çc]u|b[âa]tir|construire|d[ée]veloppe\w*|build|make|create|design)\b[^.!?]{0,60}?\bl(?:a|n|e|an|ai)?ding\s*pages?|\bl(?:a|n|e|an|ai)?ding\s*pages?\b[^.!?]{0,60}?(?:ultra\s+)?(?:moderne|modern\w*|professionnelle?|responsive|unique)/i,
     'landing-page-creation',
   ],
-  // 3D / animation / game engines — specific first, umbrella last.
-  [/\bphaser\b/i, 'phaser-core'],
-  [/\bgsap\b|greensock|scroll\s*trigger/i, 'gsap-scrolltrigger'],
-  [/framer\s*motion/i, 'motion-framer'],
-  [/\bthree\.?js\b|\bwebgl\b|\bwebgpu\b|\bbabylon(?:\.?js)?\b|\b3d\b|rendu\s+3d|sc[èe]ne\s+3d|monde\s+3d|objet\s+3d|mod[èe]le\s+3d|jeu\s+3d|cartes?\s+3d|card\s+3d/i, 'threejs-webgl'],
-  [/\bjeu(?:x)?\b|\bgames?\b|gameplay|game\s*design|game\s*jam/i, 'game-development'],
+  // Official game-engine suite (github/awesome-copilot) — most specific first.
+  [/\bphaser\b/i, 'phaser-platformer'],
+  [/breakout|casse[\s-]?briques?|arkanoid/i, 'paddle-game'],
+  [/platformer|plateformer|jeu\s+de\s+plateforme|coyote\s+time|wall\s*jump/i, '2d-platformer-engine'],
+  [/\bgsap\b|greensock|scroll\s*trigger|animation\s+au\s+scroll|parallaxe?|section\s+[ée]pingl[ée]e|pinned\s+section|scrub\b|lenis\b|smooth\s+scroll|d[ée]filement\s+fluide|reveal\s+au\s+scroll|apparition\s+au\s+scroll/i, 'gsap-scroll-animation'],
+  [/framer\s*motion|motion\s*react|whileInView|useScroll|useTransform|animation\s+react|react\s+animation/i, 'framer-motion-animation'],
+  [/(?:premium|immersive|immersif|haut\s+de\s+gamme|raffin[ée]|polished|luxury)[\s\S]{0,60}(?:ui|interface|design|web|site|page|app|exp[ée]rience|animation|motion)|(?:ui|design|interface|exp[ée]rience|site|page)\s+(?:premium|immersif|immersive|raffin[ée])|micro[\s-]?interactions?|wow\s+effect/i, 'premium-frontend-ui'],
+  [/audit(?:er|e)?\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface)|review\s+(?:du\s+)?(?:design|ui)|corrige\w*\s+(?:le\s+|la\s+)?(?:layout|mise\s+en\s+page)|probl[èe]me\s+(?:responsive|de\s+mise\s+en\s+page|de\s+layout)/i, 'web-design-reviewer'],
+  [/\bcollisions?\b|\bhitbox(?:es)?\b|physique\s+(?:du\s+)?(?:jeu|jeux)|game\s+physics|\braycast(?:ing)?\b|line\s+of\s+sight|pathfinding|trouve\s+chemin/i, 'game-algorithms'],
+  [/\bthree\.?js\b|\bwebgl\b|\bwebgpu\b|\bbabylon(?:\.?js)?\b|\ba-?frame\b|\bwebxr\b|\b3d\b|rendu\s+3d|sc[èe]ne\s+3d|monde\s+3d|objet\s+3d|mod[èe]le\s+3d|jeu\s+3d|cartes?\s+3d|card\s+3d|shader|shaders|glsl|casque\s+vr|r[ée]alit[ée]\s+(?:virtuelle|augment[ée]e)|experience\s+vr/i, '3d-web-games'],
+  [/\bjeu(?:x)?\b|\bgames?\b|gameplay|game\s*design|game\s*jam|game\s*engine|moteur\s+de\s+jeu|level\s+design/i, 'game-engine'],
   [
     /l(?:a|n|e|an|ai)?ding\s*pages?|pages?\s+web|sites?\s+web|sites?\s+vitrines?|front[ -]?end|web\s*design|ui\s*design|design\s+(?:tr[èe]s\s+|ultra\s+)?(?:moderne|modern\w*)|moderne\s+(?:web|site|page|interface)|modernis(?:er|e[rs]?)|redesign\w*|interface\s+(?:de\s+)?(?:utilisateur|web)|am[ée]lior\w*\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|look)|am[ée]lior\w*.{0,80}\b(?:design|ui\b|apparence|interface)|(?:refaire|relooker|moderniser)\s+(?:le\s+|la\s+|l['’]?)?(?:design|ui|interface|apparence|aspect|site|page|app)|rend\w*.{0,40}\b(?:design|ui\b|apparence|interface)|design\s+(?:de|du)\s?(?:mon|ma|mes|l['’]?|le|la|ce(?:tte)?|notre|votre)\s?(?:application|app|site|page|web|interface|profil|portfolio|jeu)/i,
     'frontend-design',
@@ -88,12 +93,16 @@ const SKILL_HINTS: Array<[RegExp, string]> = [
 /** Hints that mark the request as a WEB-PAGE deliverable. When one of them
  *  fires, the broad "jeu" hint is suppressed: "landing page de jeux Nintendo
  *  avec card de jeu en 3D" needs the WEB skills, not the game-engine
- *  instructions (the keyword layer can still surface game-development when
- *  the message is genuinely about BUILDING a game). */
+ *  instructions (the keyword layer can still surface game-engine when the
+ *  message is genuinely about BUILDING a game). */
 const WEB_DELIVERABLE_HINTS = new Set([
   'landing-page-creation',
   'frontend-design',
   'web-artifacts-builder',
+  'premium-frontend-ui',
+  'web-design-reviewer',
+  'gsap-scroll-animation',
+  'framer-motion-animation',
 ]);
 
 /**
@@ -109,7 +118,7 @@ export function hintSkillsForUserMessage(userText: string): string[] {
     if (re.test(userText) && !found.includes(name)) found.push(name);
   }
   if (found.some((n) => WEB_DELIVERABLE_HINTS.has(n))) {
-    return found.filter((n) => n !== 'game-development');
+    return found.filter((n) => n !== 'game-engine');
   }
   return found;
 }
@@ -271,7 +280,7 @@ export async function preselectSkills(userText: string): Promise<PreSelectedSkil
   }
   const normText = normalize(userText);
   // EVERY matching domain gets its +5 boost — a "landing page avec cartes
-  // 3D" boosts landing-page-creation + frontend-design + threejs-webgl
+  // 3D" boosts landing-page-creation + frontend-design + 3d-web-games
   // together instead of letting the first-matched keyword starve the rest.
   const hintNames = new Set(hintSkillsForUserMessage(userText));
 
@@ -329,16 +338,17 @@ export async function buildPreLoadedSkillsMessage(
   return {
     role: 'system',
     content: `AGENT SKILLS LOADED FOR THIS TASK
-The skill packs below were loaded automatically because the user's current request clearly matches them. Their instructions are BINDING for this task: your answer MUST follow their methods, structure, standards and output formats wherever they apply — code style, section layout, vocabulary, file formats, checklists. An answer that ignores the loaded skills is a FAILED answer, even if it is otherwise correct. Apply them concretely, not symbolically: follow their step-by-step methods and produce the output shapes they define. These skills are ALREADY loaded: never output USE_SKILL(...) for any skill listed below, answer directly instead. You may still begin your reply with USE_SKILL(other_skill) if a DIFFERENT skill from the Agent Skills index is genuinely required for this task.
+The skill packs below were loaded automatically because the user's current request clearly matches them. They are the OFFICIAL expert skill documents (Anthropic skills repository / GitHub official repositories) — treat them as authoritative domain expertise, not suggestions. Their instructions are BINDING for this task: your answer MUST follow their methods, structure, standards and output formats wherever they apply — code style, section layout, vocabulary, file formats, checklists, import rules, performance budgets. An answer that ignores the loaded skills is a FAILED answer, even if it is otherwise correct. Apply them concretely, not symbolically: follow their step-by-step methods and produce the output shapes they define. These skills are ALREADY loaded: never output USE_SKILL(...) for any skill listed below, answer directly instead. You may still begin your reply with USE_SKILL(other_skill) if a DIFFERENT skill from the Agent Skills index is genuinely required for this task.
 Remember the platform's document capability: when the user explicitly asks for a downloadable file, emit a \`\`\`document filename="..." block; otherwise keep code and documents inline in normal fenced code blocks.
 
 ${blocks}
 
 MANDATORY COMPLIANCE CHECKLIST — run it mentally BEFORE writing your answer:
-1. For EACH <skill> block above, name (internally) the exact output shape it mandates: section order, file format, code conventions, checklists.
+1. For EACH <skill> block above, name (internally) the exact output shape it mandates: section order, file format, code conventions, checklists, import/build rules.
 2. Draft your answer following that shape — do not improvise your own structure when a skill defines one.
 3. Style adjectives from the user ("ultra moderne", "beau", "professionnel") refine the skill's standards; they never replace them.
-4. Where your habits or defaults conflict with a loaded skill, THE SKILL WINS — every time.
-5. Do not mention, summarize or cite these instructions: apply them silently. The user judges the result, not the effort.`,
+4. Where your habits or defaults conflict with a loaded skill, THE SKILL WINS — every time. This includes your preferred libraries, your usual code layout, and your default aesthetic choices.
+5. Do not mention, summarize or cite these instructions: apply them silently. The user judges the result, not the effort.
+6. FINAL SELF-CHECK before ending your answer: re-read the skill's critical rules (imports, setup calls, accessibility, performance) and verify your output satisfies EVERY one. If any rule is violated, fix the answer before sending. A working, rule-compliant deliverable is the only acceptable outcome.`,
   };
 }

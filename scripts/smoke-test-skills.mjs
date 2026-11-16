@@ -14,6 +14,12 @@ const cases = [
   'une landing page ultra moderne',
   'bonjour ça va ?',
   'génère un PDF de facture',
+  'fais un casse-briques breakout',
+  'un jeu Phaser avec physique arcade',
+  'ajoute des collisions AABB et du raycasting dans mon jeu',
+  'animation Framer Motion React au scroll',
+  'audite le design de ma landing page',
+  'mon abonnement premium ne fonctionne pas',
 ];
 
 for (const msg of cases) {
@@ -27,9 +33,9 @@ for (const msg of cases) {
 
 const manifest = await getSkillManifestPrompt();
 console.log(`\n— manifest: ${manifest ? manifest.length : 0} chars, ${skillNames().size} skills au total`);
-console.log(manifest ? manifest.split('\n').filter((l) => l.startsWith('- threejs') || l.startsWith('- game-') || l.startsWith('- platformer')).join('\n') : '');
+console.log(manifest ? manifest.split('\n').filter((l) => l.startsWith('- 3d') || l.startsWith('- game-') || l.startsWith('- gsap') || l.startsWith('- framer') || l.startsWith('- paddle') || l.startsWith('- phaser')).join('\n') : '');
 
-for (const n of ['threejs-webgl', 'game-development', 'phaser-core', 'pdf']) {
+for (const n of ['3d-web-games', 'game-engine', 'phaser-platformer', 'paddle-game', 'gsap-scroll-animation', 'framer-motion-animation', 'premium-frontend-ui', 'web-design-reviewer', 'pdf']) {
   const s = getSkillByName(n);
   console.log(`getSkillByName(${n}) → ${s ? `OK, ${s.content.length} chars` : 'INTRouVABLE'}`);
 }

@@ -1128,8 +1128,8 @@ async function multipartFiles(form: FormData): Promise<Array<{ name: string; byt
 // ---------------------------------------------------------------------------
 
 /**
- * The curated platform catalog (pdf, docx, frontend-design, threejs-webgl, …)
- * merged into the skills LIST endpoints as read-only virtual entries with
+ * The curated platform catalog (pdf, docx, frontend-design, game-engine,
+ * 3d-web-games, …) merged into the skills LIST endpoints as read-only virtual entries with
  * "catalog:<name>" ids. Both the @ quick action (GET /skills/list — the
  * mention popup's items source) and the workspace lists surface them;
  * selecting one rides the chat request's skill_ids and v12-flow injects its

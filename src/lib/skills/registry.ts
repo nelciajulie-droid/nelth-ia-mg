@@ -122,9 +122,12 @@ When to use a skill (examples):
 - "rédige des guidelines de marque / une communication interne" → brand-guidelines / internal-comms / doc-coauthoring
 - "construis un artifact HTML interactif / un serveur MCP / une API Claude" → web-artifacts-builder / mcp-builder / claude-api
 - "teste mon webapp" → webapp-testing
-- "crée une scène 3D / un objet 3D / du WebGL" → threejs-webgl (react-three-fiber si React)
-- "fais-moi un jeu / un jeu de cartes / un platformer / un jeu Phaser" → game-development + le skill du genre/engine
-- "une animation GSAP / au scroll / Framer Motion / fond animé" → gsap-scrolltrigger / motion-framer / lightweight-3d-effects
+- "crée une scène 3D / un objet 3D / du WebGL / des shaders / de la VR" → 3d-web-games
+- "fais-moi un jeu / un jeu de cartes / un platformer / un jeu Phaser" → game-engine + le skill du genre/engine (2d-platformer-engine, phaser-platformer, paddle-game)
+- "ajoute des collisions / de la physique / du raycasting" → game-algorithms
+- "une animation GSAP / au scroll / Framer Motion / parallaxe" → gsap-scroll-animation / framer-motion-animation
+- "une UI premium / immersive / des micro-interactions" → premium-frontend-ui
+- "audite / corrige le design de ma page" → web-design-reviewer
 
 Available skills:
 ${lines}${hintBlock}${loadedBlock}`;

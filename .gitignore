@@ -67,3 +67,4 @@ tool-results/
 
 # local offline audit harnesses (bun-run, import src directly)
 audit-nets.ts
+/skills-games/
