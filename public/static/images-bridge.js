@@ -58,7 +58,12 @@
   // l'envoi unique multi-variations (paramètre NATIF « variations » de la
   // passerelle vibes — une seule action/soumission pour toute la
   // génération, plus d'envoi une-par-une ; canari de déploiement).
-  const BUILD = '20261112a4';
+  // 20261119a5 — bundle main.js enveloppé en IIFE : ses helpers minifiés
+  // de premier niveau (class CL de framer-motion, etc.) ne vivent plus
+  // dans la portée globale et n'entrent plus en collision avec le bundle
+  // vocal (function CL) chargé avant lui — fix « page Images vide »
+  // (SyntaxError: Identifier 'CL' has already been declared).
+  const BUILD = '20261119a5';
   const SCRIPT_URL = '/static/images/main.js?v=' + BUILD;
   const CSS_URL = '/static/images/app.css?v=' + BUILD;
 

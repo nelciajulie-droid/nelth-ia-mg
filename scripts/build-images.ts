@@ -4,7 +4,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 /**
  * Nelth-IA Images — build du bundle autonome (JS + CSS).
  *
- *   JS : bun build src/images-app/main.tsx → public/static/images/main.js
+ *   JS : bun build src/images-app/main.tsx → public/static/images/main.js,
+ *        puis POST-PROCESS « IIFE » (isolation de l'espace de noms global).
  *   CSS: @tailwindcss/cli v4 → public/static/images/app.css
  *        puis POST-PROCESS « scoping » (voir scopeLayer ci-dessous).
  *
@@ -20,7 +21,32 @@ await Bun.build({
   minify: true,
   naming: '[name].[ext]',
 });
-console.log('[images] main.js ✓');
+
+// ---------------------------------------------------------------------------
+// IIFE — isolation de l'espace de noms global du bundle.
+//
+// HISTORIQUE (bug « page Images vide ») : Bun.build (target browser) émet
+// les déclarations de premier niveau (helpers minifiés var/function ET les
+// class/const/let internes des libs — p.ex. class CL de framer-motion) DANS
+// LA PORTÉE GLOBALE. Le bundle vocal (dictée react-vocal) déclare lui aussi
+// un `function CL` global : chargé en premier au démarrage de la SPA, il
+// faisait échouer l'évaluation du bundle Images avec « Identifier 'CL' has
+// already been declared » → la vue #/images restait vide.
+//
+// FIX racine : le bundle est enveloppé dans une IIFE — toutes ses
+// déclarations deviennent locales ; la surface publique reste
+// window.NelthImages (assignée explicitement dans le bundle), le bridge
+// fonctionne donc à l'identique.
+// ---------------------------------------------------------------------------
+
+function wrapIife(path: string) {
+  let code = readFileSync(path, 'utf8');
+  if (code.startsWith('(()=>{')) return; // déjà enveloppé
+  writeFileSync(path, '(()=>{' + code.trimEnd() + '})();');
+}
+
+wrapIife('public/static/images/main.js');
+console.log('[images] main.js ✓ (IIFE — noms globaux cloisonnés)');
 
 console.log('[images] building CSS…');
 await $`./node_modules/.bin/tailwindcss -i src/images-app/app.css -o public/static/images/app.css --minify`;
