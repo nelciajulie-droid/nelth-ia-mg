@@ -1056,7 +1056,10 @@ export function getCurrentMessageId(chat: Json | null | undefined): string | nul
   return null;
 }
 
-function lastDescendantId(messages: Json, messageId: string): string {
+// v0.14.4 — exported for the v12 chat flow: the follow-up user message is
+// wired to the conversation's current leaf (the deepest descendant of the
+// stored currentId) — the wire payload carries no parentId of its own.
+export function lastDescendantId(messages: Json, messageId: string): string {
   const seen = new Set<string>();
   while (messageId in messages && !seen.has(messageId)) {
     seen.add(messageId);

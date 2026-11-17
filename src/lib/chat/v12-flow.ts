@@ -173,6 +173,43 @@ async function videoSourceFrom(
   return undefined;
 }
 
+/** True when a history message is an assistant turn carrying image files. */
+function hasImageFiles(m: any): boolean {
+  return (
+    !!m &&
+    m.role === 'assistant' &&
+    (Array.isArray(m?.files) ? m.files : []).some((f: any) => f?.type === 'image' && (f?.url || f?.id))
+  );
+}
+
+/**
+ * v0.14.4 — Candidate order (newest → oldest) for the "previous visual"
+ * walks (the image-edit source feed and the animate source feed).
+ *
+ * The parentId chain from this turn's user message is the exact answer for
+ * healthy histories. Chats saved before the v0.14.4 parentId wiring hold
+ * parentless user messages though — the walk used to stop after ONE node and
+ * never reached the conversation's older image turns ("changer le tenue"
+ * after a generated image fed the engine a context-free TEXT→image job with
+ * the raw directive as prompt). Fallback: when the chain carries no visual,
+ * scan the WHOLE map chronologically (timestamp order, newest first) for
+ * assistant messages with image files.
+ */
+function previousVisualCandidates(map: Record<string, any>, userMessageId: string): any[] {
+  const chain = getMessageList(map, userMessageId); // newest→oldest from this user msg
+  if (chain.some((m: any) => hasImageFiles(m))) return chain;
+  const chronological = Object.values(map ?? {})
+    .filter((m: any) => hasImageFiles(m))
+    .sort((a: any, b: any) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+    .reverse(); // newest first
+  if (chronological.length) {
+    console.log(
+      `[v12-flow] previous visual resolved chronologically — ${chronological.length} image turn(s) in the chat (legacy parentless history)`
+    );
+  }
+  return chronological;
+}
+
 /**
  * Internal-analysis narration detector. The dots-3 "note" model sometimes
  * opens its answer with its deliberation process — English meta-narration on
@@ -464,6 +501,11 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       childrenIds: allAssistantIds,
       user_id: user.id,
       user: { id: user.id, name: user.name },
+      // v0.14.4 — a deterministic ordering stamp (the wire payload carries no
+      // timestamp either): the legacy-history chronological repair below and
+      // the "previous visual" walks both sort by it — the user row needs one,
+      // same as the assistant placeholder rows.
+      timestamp: typeof (userMessage as any).timestamp === 'number' ? (userMessage as any).timestamp : nowSec(),
     };
 
     if (isNewChat) {
@@ -509,6 +551,35 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       const chatJson: any = (chat.chat as any) ?? {};
       const history: any = chatJson.history ?? {};
       const messagesMap: Record<string, any> = { ...(history.messages ?? {}) };
+      // v0.14.4 — THE image-continuation bug root cause: the wire user_message
+      // payload carries NO parentId (the TS frontend never sends one), so every
+      // follow-up user message used to land PARENTLESS in the history map.
+      // getMessageList walks parentId links — the chain from the new message
+      // stopped after ONE node: every follow-up turn was model-context AMNESIA
+      // (the LLM saw only the latest user message), and the image-edit
+      // continuation machinery never saw the "recent generated visual" trace
+      // ("changer le tenue" after a generated image → context-free text→image
+      // with the raw directive as the whole prompt, or the plain-chat parrot of
+      // the stored canned sentence). The fix: link the new user message to the
+      // conversation's CURRENT leaf — the deepest descendant of the stored
+      // currentId (the last persisted message of the previous turn). Chats
+      // saved before this fix are healed read-side by the chronological repair
+      // in the llm context builder below.
+      if (um.parentId == null) {
+        try {
+          const { lastDescendantId } = await import('@/lib/models/chats');
+          const leafId =
+            typeof history.currentId === 'string' && history.currentId
+              ? lastDescendantId(messagesMap as any, history.currentId)
+              : null;
+          const leaf = leafId ? messagesMap[leafId] : null;
+          if (leafId && leafId !== userMessageId && leaf && (leaf.role === 'assistant' || leaf.role === 'user')) {
+            um.parentId = leafId;
+          }
+        } catch {
+          /* unwirable history → parentless (the chronological repair still heals the context) */
+        }
+      }
       messagesMap[userMessageId] = um;
       for (const entry of messageIds) {
         if (entry?.message_id) {
@@ -682,7 +753,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
       const stored = await getChatMessagesMapByChatId(chatId);
       if (stored && Object.keys(stored as any).length) map = stored as any;
     }
-    const chain = getMessageList(map as any, userMessageId).reverse();
+    let chain = getMessageList(map as any, userMessageId).reverse();
     // In-flight assistant placeholders (this turn's targets) are dropped, as
     // before. Any OTHER empty assistant message is an interrupted/killed
     // generation (serverless function timeout, crash…) — it is NOT silently
@@ -692,6 +763,47 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     const inFlightIds = new Set(
       messageIds.map((e: any) => e?.message_id).filter((id: any): id is string => !!id)
     );
+    // v0.14.4 — LEGACY HISTORY REPAIR (read-side): chats saved before the
+    // parentId wiring above hold parentless user messages — the parentId chain
+    // from this turn reaches only back to the last wired link, cutting the
+    // older turns out of the model context (and the image-edit continuation
+    // trace with them). Detection: the chain's root is parentless AND the map
+    // holds real conversation messages the chain does not cover → rebuild the
+    // context window CHRONOLOGICALLY instead (every wire row carries a
+    // timestamp). Healthy chains — the Python-era histories with real
+    // parentId links, and every chat saved from this version on — are
+    // untouched (branch siblings never trip the detector: their chains reach
+    // a true parented root).
+    {
+      const chainIds = new Set(chain.map((m: any) => String(m?.id ?? '')));
+      const chainLength = chain.length;
+      const rootOrphan = chainLength > 0 && chain[0]?.parentId == null;
+      const stranded =
+        rootOrphan &&
+        Object.values(map as any).some(
+          (m: any) =>
+            m &&
+            m.id &&
+            !chainIds.has(String(m.id)) &&
+            (m.role === 'user' || m.role === 'assistant') &&
+            !inFlightIds.has(m.id)
+        );
+      if (stranded) {
+        const chronological = (Object.values(map as any) as any[])
+          .filter(
+            (m: any) =>
+              m && (m.role === 'user' || m.role === 'assistant') && !inFlightIds.has(m.id)
+          )
+          .sort((a: any, b: any) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+          .slice(-16);
+        if (chronological.length > chainLength) {
+          chain = chronological;
+          console.log(
+            `[v12-flow] legacy parentless history repaired chronologically — ${chronological.length} messages in context (chain reached ${chainLength})`
+          );
+        }
+      }
+    }
     llmMessages = chain
       .map((m: any) => {
         if (m.role === 'assistant' && !messageContent(m)) {
@@ -1648,6 +1760,43 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     }
   }
 
+  // v0.14.4 — DETERMINISTIC MEDIA DIRECTIVES outrank the SOFT auto gates. The
+  // deterministic probe (forcedMediaTurn) fired on UNAMBIGUOUS phrasings only:
+  // an explicit edit directive on a visual the conversation already holds, a
+  // literal "crée une vidéo…". Letting those turns still depend on the
+  // classifier's 8s budget or on a persisted image_generation.auto /
+  // video_generation.auto = false left a silent fall-through to plain chat —
+  // the model then parroted the previous image turn's canned sentence ("Voici
+  // l'image générée (…). Dites-moi si vous souhaitez des ajustements.") or
+  // refused ("je ne peux pas…"). A deterministic directive is a user COMMAND
+  // on an engine-produced artifact, not an "auto" guess: the engine owns the
+  // turn. The HARD gates remain in force inside the engine sections (guest
+  // lock, image/video enable flags, ownership checks).
+  if (forcedMediaTurn === 'edit') {
+    if (!autoImage) {
+      autoImage = true;
+      console.log('[v12-flow] deterministic edit directive → image engine forced on (classifier/config independent)');
+    }
+    if (!autoImageEdit) {
+      autoImageEdit = true;
+      console.log('[v12-flow] deterministic edit directive → edit=true (image-to-image source feed)');
+    }
+  }
+  if (forcedMediaTurn === 'video' && !autoVideo) {
+    autoVideo = true;
+    console.log('[v12-flow] deterministic video directive → video engine forced on (classifier/config independent)');
+    // Animate parity with the decision fast path — a forced video turn phrased
+    // as an animation of an existing visual ("animer cette photo") keeps its
+    // image→video source feed even when the classifier never ran.
+    try {
+      const { AUTO_NETS } = await import('@/lib/chat/auto-engage');
+      const lastUserText = [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
+      if (lastUserText && AUTO_NETS.ANIMATE_FAST_RE.test(lastUserText)) autoVideoAnimate = true;
+    } catch {
+      /* net unavailable → plain text→video */
+    }
+  }
+
   // ------------------------------------ 3.4ter Video generation (AUTO engagement
   // only — the compiled frontend has no video toggle; natural phrasing
   // ("crée une vidéo…", "anime cette image") routes the turn through the
@@ -1708,8 +1857,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         const chat = await getChatById(chatId);
         const map = ((chat?.chat as any)?.history as any)?.messages;
         if (map && typeof map === 'object') {
-          const chain = getMessageList(map, userMessageId); // newest→oldest from this user msg
-          for (const m of chain) {
+          // v0.14.4 — chain-first with the chronological fallback (see
+          // previousVisualCandidates): legacy parentless histories still expose
+          // the conversation's most recent visual to the animate engine.
+          const candidates = previousVisualCandidates(map, userMessageId);
+          for (const m of candidates) {
             const imageFiles = (Array.isArray(m?.files) ? m.files : []).filter(
               (f: any) => f?.type === 'image' && (f?.url || f?.id)
             );
@@ -1890,7 +2042,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       return json({ detail: ERROR_MESSAGES.ACCESS_PROHIBITED }, 403);
     }
 
-    const prompt = [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
+    let prompt = [...llmMessages].reverse().find((m) => m.role === 'user')?.content ?? '';
 
     // Image→image: when this turn's user message carries image attachments,
     // they become the sources of the multipart image-to-image Nelthai job
@@ -1930,8 +2082,12 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         const chat = await getChatById(chatId);
         const map = ((chat?.chat as any)?.history as any)?.messages;
         if (map && typeof map === 'object') {
-          const chain = getMessageList(map, userMessageId); // newest→oldest from this user msg
-          for (const m of chain) {
+          // v0.14.4 — chain-first, with the chronological fallback for legacy
+          // parentless histories (see previousVisualCandidates): the previous
+          // generated image must be found even when the stored chain stops at
+          // the last wired link.
+          const candidates = previousVisualCandidates(map, userMessageId);
+          for (const m of candidates) {
             const imageFiles = (Array.isArray(m?.files) ? m.files : []).filter(
               (f: any) => f?.type === 'image' && (f?.url || f?.id)
             );
@@ -1949,6 +2105,25 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         }
       } catch {
         /* history unreadable → plain text→image */
+      }
+    }
+
+    // v0.14.4 — an edit directive whose source could not be resolved (legacy
+    // history without image turns, unreadable file row) must never be sent to
+    // the engine ALONE: "changer le tenue" rendered literally is garbage —
+    // the engine rejects short prompts outright and the whole turn dies. Fold
+    // in the conversation's ORIGINAL generation prompt so the re-roll at
+    // least matches the scene the user is iterating on, with the edit
+    // directive applied on top of it.
+    if ((autoImageEdit || toggleEditFollowup) && !sourceImages.length) {
+      const userTurns = llmMessages.filter((m) => m.role === 'user');
+      const originalPrompt =
+        userTurns.length >= 2 ? String(userTurns[userTurns.length - 2].content ?? '').trim() : '';
+      if (originalPrompt && prompt.trim()) {
+        prompt = `${originalPrompt}, ${prompt.trim()}`.slice(0, 3900);
+        console.log(
+          '[v12-flow] edit source unresolved — prompt enriched with the original generation prompt'
+        );
       }
     }
 
@@ -2003,7 +2178,11 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         // note: small chat models echo bare annotations verbatim on the next
         // "ok merci", and the sentence keeps the edit-iteration signal (the
         // auto-image decision reads the same history) that an image exists.
-        const llmContent = sourceImages.length
+        // v0.14.4 — an edit INTENT turn says "nouvelle version" even when the
+        // source row could not be resolved (the re-roll still answered the
+        // user's iteration request, not a fresh creation).
+        const editTurn = sourceImages.length > 0 || autoImageEdit || toggleEditFollowup;
+        const llmContent = editTurn
           ? `Voici la nouvelle version de l'image (${file.name}). Dites-moi si vous souhaitez d'autres ajustements.`
           : `Voici l'image générée (${file.name}). Dites-moi si vous souhaitez des ajustements.`;
         await upsertMessageToChatByIdAndMessageId(chatId, assistantMessageId, {
