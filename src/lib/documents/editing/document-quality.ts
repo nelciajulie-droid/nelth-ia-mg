@@ -158,6 +158,11 @@ export type EnhanceDocumentBlocksOpts = {
   model?: string;
   /** Generation temperature (default 0.45 — professional, low-drift). */
   temperature?: number;
+  /** LIVE progress callback (streamed deltas): fires as the expert rewrite
+   *  grows — the caller feeds the chat status row ("Rédaction experte · file —
+   *  N caractères") so the phase reads as active writing instead of a frozen
+   *  label. Throttled here (~400 chars / call) to stay cheap. */
+  onProgress?: (info: { filename: string; chars: number }) => void;
 };
 
 export type EnhanceStats = {
@@ -208,6 +213,9 @@ export async function enhanceDocumentBlocks(
         timeoutMs: Math.max(20_000, timeoutMs - Math.min(700 * idx, 1_400)),
         model: opts?.model,
         temperature: opts?.temperature,
+        onProgress: opts?.onProgress
+          ? (chars) => opts!.onProgress!({ filename: block.filename, chars })
+          : undefined,
       });
       if (enhanced !== null) {
         return {
@@ -241,13 +249,21 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Rewrite ONE block. Returns the enhanced markdown, or null when a gate
- *  rejected the reply (caller keeps the draft). Throws on transport errors. */
+ *  rejected the reply (caller keeps the draft). Throws on transport errors
+ *  UNLESS a rich partial was already streamed in (budget abort mid-stream →
+ *  salvage). */
 async function enhanceOneBlock(
   block: QualityBlock,
   ext: string,
-  opts: { userRequest?: string; timeoutMs: number; model?: string; temperature?: number }
+  opts: {
+    userRequest?: string;
+    timeoutMs: number;
+    model?: string;
+    temperature?: number;
+    onProgress?: (chars: number) => void;
+  }
 ): Promise<string | null> {
-  const { kiloChatCompletion, KILO_REASONING_MODEL_ID } = await import('@/lib/kilo-llm');
+  const { kiloChatCompletionStream, KILO_REASONING_MODEL_ID } = await import('@/lib/kilo-llm');
 
   const userRequest = (opts.userRequest ?? '').trim().slice(0, 4_000);
   const draft = block.content.trim().slice(0, 24_000); // cap prompt weight
@@ -261,22 +277,54 @@ async function enhanceOneBlock(
     draft,
   ].join('\n');
 
-  const data: any = await kiloChatCompletion({
-    model: opts.model ?? KILO_REASONING_MODEL_ID,
-    // Thinking stays OFF for the pass: the 55B-active base already writes
-    // senior-grade prose, and reliability (staying inside the serverless
-    // budget) beats the marginal planning gain of CoT here.
-    thinking: false,
-    messages: [
-      { role: 'system', content: SENIOR_DOCUMENT_WRITER_PROMPT },
-      { role: 'user', content: userMessage },
-    ],
-    temperature: opts.temperature ?? 0.45,
-    max_tokens: 12_000,
-    timeoutMs: Math.max(20_000, opts.timeoutMs - 3_000),
-  });
+  // STREAMED rewrite (the long "Rédaction experte" fix): the pass used to
+  // be one NON-STREAMING call — the free 55B gateway returned only after the
+  // LAST token, so the user stared at a frozen status label for the whole
+  // write, and a budget abort at the deadline discarded EVERYTHING (the thin
+  // draft was served after the full wait). Tokens now flow as the model
+  // writes them: onProgress feeds the live status row, and an abort
+  // mid-stream SALVAGES the partial when it already beats the draft.
+  let content = '';
+  let lastReportedChars = 0;
+  try {
+    for await (const delta of kiloChatCompletionStream({
+      model: opts.model ?? KILO_REASONING_MODEL_ID,
+      // Thinking stays OFF for the pass: the 55B-active base already writes
+      // senior-grade prose, and reliability (staying inside the serverless
+      // budget) beats the marginal planning gain of CoT here.
+      thinking: false,
+      messages: [
+        { role: 'system', content: SENIOR_DOCUMENT_WRITER_PROMPT },
+        { role: 'user', content: userMessage },
+      ],
+      temperature: opts.temperature ?? 0.45,
+      max_tokens: 12_000,
+      timeoutMs: Math.max(20_000, opts.timeoutMs - 3_000),
+    })) {
+      content += delta;
+      // Throttled progress: ~400 chars between reports keeps the callback
+      // cheap while the status row still moves visibly.
+      if (opts.onProgress && content.length - lastReportedChars >= 400) {
+        lastReportedChars = content.length;
+        opts.onProgress(content.length);
+      }
+    }
+  } catch (e) {
+    // Budget abort / transport failure MID-STREAM: every delta collected so
+    // far is real senior-grade prose. When the partial is already materially
+    // richer than the draft it is salvaged (the gates below still apply — a
+    // thin or malformed partial is dropped like any rejected reply and the
+    // draft is served). Below the salvage floor the error propagates to the
+    // caller's catch, which serves the draft exactly as before.
+    const partial = content.trim();
+    if (partial.length < Math.max(2_500, block.content.trim().length)) throw e;
+    console.warn(
+      `[document-quality] stream aborted at ${partial.length} chars for ${block.filename} — salvaging the partial (gates apply)`
+    );
+    content = partial;
+  }
 
-  let reply = String(data?.choices?.[0]?.message?.content ?? '').trim();
+  let reply = content.trim();
   if (!reply) return null;
   reply = stripLeadingChatter(unwrapFences(reply));
 

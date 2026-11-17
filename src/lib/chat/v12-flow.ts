@@ -2703,9 +2703,34 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
               done: false,
             },
           });
+          // LIVE progress (the long frozen "Rédaction experte" fix): the
+          // expert rewrite now STREAMS — this throttle feeds the chat status
+          // row with the growing character count so the phase reads as active
+          // writing, not a hang. The old non-streaming pass left the same
+          // label frozen for up to 150s and an abort discarded the whole wait.
+          let lastProgressAt = 0;
+          let lastProgressChars = 0;
+          const emitExpertProgress = ({ filename, chars }: { filename: string; chars: number }): void => {
+            const now = Date.now();
+            if (now - lastProgressAt < 2_500 && chars - lastProgressChars < 1_500) return;
+            lastProgressAt = now;
+            lastProgressChars = chars;
+            void emit({
+              type: 'status',
+              data: {
+                action: 'document_generation',
+                description: `Rédaction experte · ${filename} — ${chars.toLocaleString('fr-FR')} caractères`,
+                done: false,
+              },
+            }).catch(() => {}); // a status hiccup must never kill the rewrite
+          };
           const { blocks: enhanced, stats } = await enhanceDocumentBlocks(blocks, {
             userRequest: rawLastUserText || undefined,
-            budgetMs: Math.min(150_000, usableBudgetMs),
+            // 110s cap (was 150s): with live progress + partial-salvage a
+            // shorter wall keeps the whole turn responsive; conversion and
+            // persistence keep their ~40s reserve below.
+            budgetMs: Math.min(110_000, usableBudgetMs),
+            onProgress: emitExpertProgress,
           });
           finalBlocks = enhanced;
           const applied = stats.filter((s) => s.applied);

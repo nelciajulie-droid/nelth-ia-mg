@@ -154,6 +154,66 @@ export async function kiloChatCompletion(params: KiloChatParams): Promise<any> {
   return res.json();
 }
 
+/**
+ * STREAMING chat completion → async iterator over `choices[0].delta.content`
+ * SSE chunks.
+ *
+ * Why it exists (the long "Rédaction experte" phase): a non-streaming call
+ * on the free 55B gateway returns only after the LAST token — a full
+ * document rewrite (12k max_tokens) is minutes of server-side silence the
+ * caller can neither see nor salvage. Streaming emits tokens as the model
+ * writes them, so the caller can (a) report live progress (status row char
+ * counts) and (b) keep the partial content when the time budget aborts
+ * mid-stream — an abort on the JSON call discards the ENTIRE wait.
+ *
+ * The timeout signal covers the whole call INCLUDING the body stream: a
+ * mid-stream abort rejects the pending read; chunks already yielded stay
+ * in the caller's hands.
+ */
+export async function* kiloChatCompletionStream(
+  params: KiloChatParams
+): AsyncGenerator<string, void, void> {
+  const timeoutMs = Math.max(1_000, Math.min(params.timeoutMs ?? 285_000, 285_000));
+  if (!KILO_GATEWAY_API_KEY) {
+    throw new Error('Kilo gateway is not configured (KILO_GATEWAY_API_KEY missing) — no fallback provider is used');
+  }
+  const res = await fetch(kiloChatUrl(), {
+    method: 'POST',
+    headers: kiloGatewayHeaders(),
+    body: JSON.stringify(buildBody({ ...params, stream: true })),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`Kilo gateway error ${res.status}: ${detail.slice(0, 300)}`);
+  }
+  if (!res.body) throw new Error('Kilo gateway returned no stream body');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') return;
+      let delta = '';
+      try {
+        const obj = JSON.parse(payload);
+        delta = String(obj?.choices?.[0]?.delta?.content ?? '');
+      } catch {
+        continue; // keep-alive comment or malformed line
+      }
+      if (delta) yield delta;
+    }
+  }
+}
+
 /** Title generation helper (tasks.py generate_title equivalent for Kilo). */
 export async function kiloGenerateTitle(prompt: string): Promise<string | null> {
   try {
