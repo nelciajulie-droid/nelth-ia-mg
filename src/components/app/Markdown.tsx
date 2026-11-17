@@ -1,18 +1,23 @@
 "use client";
 
 /**
- * Markdown-lite renderer for chat messages.
+ * Rich Markdown renderer for chat messages (ChatGPT parity).
  *
- * Supports: fenced code blocks (```lang ... ```), **bold**, *italic*,
- * `inline code`, [links](https://...) and line breaks. Everything is rendered
- * as React elements (no HTML injection), which keeps the stream safe.
+ * Block-level: fenced code blocks, ATX headings (#…######), bullet and
+ * ordered lists (nested by indentation, with - [ ] task checkboxes),
+ * GFM tables (with a header row, alignment support, mobile scroll wrapper),
+ * blockquotes (with nested content), horizontal rules, paragraphs.
+ * Inline: **bold**, *italic*, ~~strikethrough~~, `inline code`,
+ * [links](url) and [N]/[N,M] citation pills (rendered as small badges).
+ * Everything is rendered as React elements (no HTML injection).
  *
- * `streamingCursor` appends the ANIMATED NELTH N LOGO INLINE — right after
- * the LAST streamed character (or at the end of the last code block while it
- * is still being written). Because every delta re-renders this component,
- * the logo visibly follows the text as it streams, and it disappears
- * entirely once the stream ends (the prop is only true while tokens are
- * arriving).
+ * STREAMING-FIRST: every delta re-renders this component, so a partially
+ * received document must render gracefully at any byte offset — an
+ * unterminated table renders its rows so far, a list mid-item renders the
+ * items already seen, a heading half-received renders its partial text.
+ * `streamingCursor` appends the ANIMATED NELTH N LOGO INLINE right after
+ * the LAST streamed character of the LAST block (or at the end of the last
+ * code block while it is still being written).
  */
 
 import * as React from "react";
@@ -47,8 +52,9 @@ function StreamN({ dark = false }: { dark?: boolean }) {
 // Inline elements
 // ---------------------------------------------------------------------------
 
+/** Inline token grammar: bold, italic, strikethrough, code, links, [N] citations. */
 const INLINE_TOKEN_RE =
-  /(\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/|\/)[^)\s]+\))/g;
+  /(\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/|\/)[^)\s]+\)|\[\d+(?:\s*,\s*\d+)*\])/g;
 
 function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   const parts = text.split(INLINE_TOKEN_RE).filter((p) => p !== undefined && p !== "");
@@ -63,6 +69,13 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
     }
     if (part.startsWith("*") && part.endsWith("*") && part.length > 2 && !part.startsWith("**")) {
       return <em key={key}>{part.slice(1, -1)}</em>;
+    }
+    if (part.startsWith("~~") && part.endsWith("~~") && part.length > 4) {
+      return (
+        <del key={key} className="text-zinc-500">
+          {part.slice(2, -2)}
+        </del>
+      );
     }
     if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
       return (
@@ -88,33 +101,20 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
         </a>
       );
     }
+    // [N] / [N,M] citation marker → compact badge (the compiled frontend
+    // resolves these to favicon+domain pills; the TS port shows the number).
+    const citationMatch = part.match(/^\[(\d+(?:\s*,\s*\d+)*)\]$/);
+    if (citationMatch) {
+      return (
+        <sup
+          key={key}
+          className="ml-[0.15em] rounded border border-zinc-200 bg-zinc-100 px-1 py-[0.05em] text-[0.62em] font-semibold leading-none text-zinc-500"
+        >
+          {citationMatch[1].replace(/\s+/g, "")}
+        </sup>
+      );
+    }
     return <React.Fragment key={key}>{part}</React.Fragment>;
-  });
-}
-
-/**
- * Render a text run as paragraphs. When `caret` is true the blinking caret is
- * appended AFTER THE LAST CHARACTER of the last line of the last paragraph —
- * including when that line is still empty (the caret then marks the exact spot
- * where the next token will land).
- */
-function renderTextBlock(text: string, keyPrefix: string, caret = false): React.ReactNode[] {
-  const paragraphs = text.split(/\n{2,}/);
-  return paragraphs.map((paragraph, pIndex) => {
-    const key = `${keyPrefix}-p${pIndex}`;
-    const isLastParagraph = pIndex === paragraphs.length - 1;
-    const lines = paragraph.split("\n");
-    return (
-      <p key={key} className="whitespace-pre-wrap break-words leading-relaxed">
-        {lines.flatMap((line, lIndex) => (
-          <React.Fragment key={`${key}-l${lIndex}`}>
-            {lIndex > 0 ? <br /> : null}
-            {renderInline(line, `${key}-l${lIndex}`)}
-            {caret && isLastParagraph && lIndex === lines.length - 1 ? <StreamN /> : null}
-          </React.Fragment>
-        ))}
-      </p>
-    );
   });
 }
 
@@ -170,13 +170,188 @@ function CodeBlock({
 }
 
 // ---------------------------------------------------------------------------
-// Public component
+// Block model + line-level parser
 // ---------------------------------------------------------------------------
 
 type Block =
-  | { kind: "text"; text: string }
-  | { kind: "code"; language: string; code: string };
+  | { kind: "code"; language: string; code: string }
+  | { kind: "heading"; level: number; text: string }
+  | { kind: "hr" }
+  | { kind: "quote"; content: string }
+  | {
+      kind: "list";
+      ordered: boolean;
+      start: number;
+      items: { text: string; depth: number; checked?: boolean }[];
+    }
+  | { kind: "table"; header: string[]; align: ("left" | "center" | "right")[]; rows: string[][]; hasBody: boolean }
+  | { kind: "text"; text: string };
 
+const HEADING_RE = /^(#{1,6})[ \t]+(.*)$/;
+const HR_RE = /^[ \t]{0,3}(?:[-*_])[ \t]*(?:[-*_][ \t]*){2,}$/;
+const LIST_ITEM_RE = /^([ \t]*)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
+const QUOTE_RE = /^[ \t]*>[ \t]?(.*)$/;
+const TABLE_ROW_RE = /^[ \t]*\|(.*)\|[ \t]*$/;
+const TABLE_ROW_LOOSE_RE = /^[ \t]*\|.*$/;
+const TABLE_SEPARATOR_RE = /^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(?:\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/;
+
+/** Split one table row into cells (leading/trailing pipes stripped). */
+function splitTableRow(line: string): string[] {
+  let body = line.trim();
+  if (body.startsWith("|")) body = body.slice(1);
+  if (body.endsWith("|")) body = body.slice(0, -1);
+  return body.split(/[ \t]*\|[ \t]*/).map((cell) => cell.trim());
+}
+
+/** Column alignment from a GFM separator row (---:, :---:, :---). */
+function separatorAlignments(separator: string): ("left" | "center" | "right")[] {
+  return splitTableRow(separator).map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    return "left";
+  });
+}
+
+/**
+ * Parse a text segment (between code fences) into line-level blocks.
+ * Streaming-safe: consumed lines render as far as they arrived.
+ */
+function parseLineBlocks(text: string): Block[] {
+  const blocks: Block[] = [];
+  const lines = text.split(/\n/);
+
+  let paragraph: string[] = [];
+  let quote: string[] | null = null;
+
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      const joined = paragraph.join("\n").trim();
+      if (joined) blocks.push({ kind: "text", text: joined });
+      paragraph = [];
+    }
+  };
+  const flushQuote = () => {
+    if (quote !== null) {
+      const joined = quote.join("\n").trim();
+      if (joined) blocks.push({ kind: "quote", content: joined });
+      quote = null;
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // ---- Blockquote run ------------------------------------------------
+    const quoteMatch = line.match(QUOTE_RE);
+    if (quoteMatch) {
+      flushParagraph();
+      if (quote === null) quote = [];
+      quote.push(quoteMatch[1]);
+      continue;
+    }
+    flushQuote();
+
+    // ---- Blank line ends the current paragraph ---------------------------
+    if (!line.trim()) {
+      flushParagraph();
+      continue;
+    }
+
+    // ---- Heading ---------------------------------------------------------
+    const headingMatch = line.match(HEADING_RE);
+    if (headingMatch) {
+      flushParagraph();
+      blocks.push({ kind: "heading", level: headingMatch[1].length, text: headingMatch[2].trim() });
+      continue;
+    }
+
+    // ---- Horizontal rule ---------------------------------------------------
+    if (HR_RE.test(line)) {
+      flushParagraph();
+      blocks.push({ kind: "hr" });
+      continue;
+    }
+
+    // ---- Table (header + separator + rows) --------------------------------
+    const rowMatch = line.match(TABLE_ROW_LOOSE_RE);
+    if (rowMatch && i + 1 < lines.length && TABLE_SEPARATOR_RE.test(lines[i + 1])) {
+      flushParagraph();
+      const header = splitTableRow(line);
+      const align = separatorAlignments(lines[i + 1]);
+      const rows: string[][] = [];
+      let j = i + 2;
+      let hasBody = false;
+      while (j < lines.length) {
+        const rowLine = lines[j];
+        if (!rowLine.trim() || !TABLE_ROW_LOOSE_RE.test(rowLine)) break;
+        rows.push(splitTableRow(rowLine));
+        hasBody = true;
+        j++;
+      }
+      blocks.push({ kind: "table", header, align, rows, hasBody });
+      i = j - 1;
+      continue;
+    }
+
+    // ---- List run (bullet or ordered, nested by indentation) -------------
+    const listMatch = line.match(LIST_ITEM_RE);
+    if (listMatch) {
+      flushParagraph();
+      const firstMarker = listMatch[2];
+      const ordered = /\d/.test(firstMarker[0]);
+      const start = ordered ? parseInt(firstMarker, 10) : 1;
+      const items: { text: string; depth: number; checked?: boolean }[] = [];
+      let j = i;
+      while (j < lines.length) {
+        const itemLine = lines[j];
+        const itemMatch = itemLine.match(LIST_ITEM_RE);
+        if (!itemMatch) {
+          // Continuation text indented under the last item — folded in.
+          if (
+            items.length &&
+            itemLine.trim() &&
+            /^[ \t]{2,}\S/.test(itemLine) &&
+            !HEADING_RE.test(itemLine) &&
+            !QUOTE_RE.test(itemLine)
+          ) {
+            items[items.length - 1].text += ` ${itemLine.trim()}`;
+            j++;
+            continue;
+          }
+          break;
+        }
+        // A different marker family (bullet ↔ ordered) starts a NEW list.
+        const marker = itemMatch[2];
+        const isOrdered = /\d/.test(marker[0]);
+        if (isOrdered !== ordered && items.length) break;
+        const indent = itemMatch[1].replace(/\t/g, "  ").length;
+        const depth = Math.min(3, Math.floor(indent / 2));
+        let itemText = itemMatch[3];
+        let checked: boolean | undefined;
+        const taskMatch = itemText.match(/^\[([ xX])\][ \t]+(.*)$/);
+        if (taskMatch) {
+          checked = taskMatch[1].toLowerCase() === "x";
+          itemText = taskMatch[2];
+        }
+        items.push({ text: itemText.trim(), depth, ...(checked !== undefined ? { checked } : {}) });
+        j++;
+      }
+      blocks.push({ kind: "list", ordered, start, items });
+      i = j - 1;
+      continue;
+    }
+
+    // ---- Plain paragraph line ---------------------------------------------
+    paragraph.push(line);
+  }
+  flushParagraph();
+  flushQuote();
+  return blocks;
+}
+
+/** Split fenced code blocks out of the raw content, then line-parse the rest. */
 function parseBlocks(content: string): Block[] {
   const blocks: Block[] = [];
   const fenceRe = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)(?:```|$)/g;
@@ -185,7 +360,7 @@ function parseBlocks(content: string): Block[] {
 
   while ((match = fenceRe.exec(content)) !== null) {
     if (match.index > lastIndex) {
-      blocks.push({ kind: "text", text: content.slice(lastIndex, match.index) });
+      blocks.push(...parseLineBlocks(content.slice(lastIndex, match.index)));
     }
     const [, language, code] = match;
     if (code && code.trim().length > 0) {
@@ -194,10 +369,196 @@ function parseBlocks(content: string): Block[] {
     lastIndex = match.index + match[0].length;
   }
   if (lastIndex < content.length) {
-    blocks.push({ kind: "text", text: content.slice(lastIndex) });
+    blocks.push(...parseLineBlocks(content.slice(lastIndex)));
   }
   return blocks;
 }
+
+// ---------------------------------------------------------------------------
+// Block renderers
+// ---------------------------------------------------------------------------
+
+const HEADING_CLASSES: Record<number, string> = {
+  1: "mt-4 mb-2 text-[1.35rem] font-semibold leading-snug text-zinc-900",
+  2: "mt-4 mb-2 text-[1.2rem] font-semibold leading-snug text-zinc-900",
+  3: "mt-3 mb-1.5 text-[1.07rem] font-semibold leading-snug text-zinc-900",
+  4: "mt-3 mb-1.5 text-[0.98rem] font-semibold text-zinc-800",
+  5: "mt-2 mb-1 text-[0.93rem] font-semibold text-zinc-800",
+  6: "mt-2 mb-1 text-[0.88rem] font-semibold uppercase tracking-wide text-zinc-600",
+};
+
+const NESTED_BULLET_STYLES = ["disc", "circle", "square", "disc"];
+
+function renderList(block: Extract<Block, { kind: "list" }>, key: string, caret: boolean): React.ReactNode {
+  const lastItemIndex = block.items.length - 1;
+  return (
+    <ul key={key} className="my-1.5 space-y-0.5 pl-1" aria-label={block.ordered ? "Liste ordonnée" : "Liste"}>
+      {block.items.map((item, index) => {
+        const bullet = item.checked === undefined;
+        const orderedMarker = block.ordered ? `${block.start + index}.` : null;
+        return (
+          <li
+            key={`${key}-li${index}`}
+            className="flex items-start gap-2 leading-relaxed"
+            style={{ paddingLeft: `${item.depth * 1.15}rem` }}
+          >
+            {bullet ? (
+              <span
+                aria-hidden="true"
+                className="mt-[0.42em] flex size-[0.68em] shrink-0 items-center justify-center"
+                style={
+                  orderedMarker
+                    ? { minWidth: "1.1em", fontSize: "0.86em" }
+                    : undefined
+                }
+              >
+                {orderedMarker ? (
+                  <span className="font-medium text-zinc-600">{orderedMarker}</span>
+                ) : (
+                  <span
+                    className="block size-[0.38em] rounded-full"
+                    style={{
+                      backgroundColor: "currentColor",
+                      borderRadius: NESTED_BULLET_STYLES[item.depth % NESTED_BULLET_STYLES.length] === "circle" ? "50%" : undefined,
+                      opacity: NESTED_BULLET_STYLES[item.depth % NESTED_BULLET_STYLES.length] === "square" ? 1 : 0.75,
+                    }}
+                  />
+                )}
+              </span>
+            ) : (
+              <span aria-hidden="true" className="mt-[0.28em] flex size-4 shrink-0 items-center justify-center">
+                <span
+                  className={cn(
+                    "flex size-[0.9em] items-center justify-center rounded border text-[0.6em] font-bold leading-none",
+                    item.checked
+                      ? "border-emerald-500 bg-emerald-500 text-white"
+                      : "border-zinc-300 text-transparent"
+                  )}
+                >
+                  {item.checked ? "✓" : "·"}
+                </span>
+              </span>
+            )}
+            <span className="min-w-0 break-words">
+              {renderInline(item.text, `${key}-li${index}`)}
+              {caret && index === lastItemIndex ? <StreamN /> : null}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function renderTable(block: Extract<Block, { kind: "table" }>, key: string, caret: boolean): React.ReactNode {
+  const lastRowIndex = block.rows.length - 1;
+  const cellAlign = (col: number): React.CSSProperties =>
+    ({ textAlign: block.align[col] ?? "left" });
+  return (
+    <div key={key} className="scrollbar-thin my-2 overflow-x-auto rounded-lg border border-zinc-200 shadow-sm">
+      <table className="w-full border-collapse bg-white text-[0.86rem]">
+        <thead>
+          <tr className="border-b-2 border-zinc-200 bg-zinc-50">
+            {block.header.map((cell, col) => (
+              <th
+                key={`${key}-th${col}`}
+                style={cellAlign(col)}
+                className="px-3 py-2 font-semibold text-zinc-700"
+              >
+                {renderInline(cell, `${key}-th${col}`)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        {block.rows.length > 0 && (
+          <tbody>
+            {block.rows.map((row, rowIndex) => (
+              <tr
+                key={`${key}-tr${rowIndex}`}
+                className="border-b border-zinc-100 last:border-b-0 odd:bg-white even:bg-zinc-50/60"
+              >
+                {row.map((cell, col) => (
+                  <td
+                    key={`${key}-td${rowIndex}-${col}`}
+                    style={cellAlign(col)}
+                    className="px-3 py-2 align-top text-zinc-700"
+                  >
+                    {renderInline(cell, `${key}-td${rowIndex}-${col}`)}
+                    {caret && rowIndex === lastRowIndex && col === row.length - 1 ? <StreamN /> : null}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        )}
+      </table>
+    </div>
+  );
+}
+
+function renderQuote(content: string, key: string, caret: boolean): React.ReactNode {
+  const inner = parseLineBlocks(content);
+  const last = inner.length - 1;
+  return (
+    <blockquote
+      key={key}
+      className="my-2 rounded-r-md border-l-[3px] border-emerald-300 bg-emerald-50/60 py-1.5 pl-3.5 pr-2 text-zinc-700 [&>p]:leading-relaxed"
+    >
+      {inner.map((block, index) => renderBlock(block, `${key}-b${index}`, caret && index === last))}
+    </blockquote>
+  );
+}
+
+function renderParagraph(text: string, keyPrefix: string, caret: boolean): React.ReactNode {
+  const paragraphs = text.split(/\n{2,}/);
+  return paragraphs.map((paragraph, pIndex) => {
+    const key = `${keyPrefix}-p${pIndex}`;
+    const isLastParagraph = pIndex === paragraphs.length - 1;
+    const lines = paragraph.split("\n");
+    return (
+      <p key={key} className="my-1.5 whitespace-pre-wrap break-words leading-relaxed">
+        {lines.flatMap((line, lIndex) => (
+          <React.Fragment key={`${key}-l${lIndex}`}>
+            {lIndex > 0 ? <br /> : null}
+            {renderInline(line, `${key}-l${lIndex}`)}
+            {caret && isLastParagraph && lIndex === lines.length - 1 ? <StreamN /> : null}
+          </React.Fragment>
+        ))}
+      </p>
+    );
+  });
+}
+
+function renderBlock(block: Block, key: string, caret: boolean): React.ReactNode {
+  switch (block.kind) {
+    case "code":
+      return <CodeBlock key={key} language={block.language} code={block.code} caret={caret} />;
+    case "heading": {
+      const level = Math.min(6, Math.max(1, block.level));
+      const Tag = `h${Math.min(4, level)}` as "h1" | "h2" | "h3" | "h4";
+      return (
+        <Tag key={key} className={HEADING_CLASSES[level]}>
+          {renderInline(block.text, `${key}-inl`)}
+          {caret ? <StreamN /> : null}
+        </Tag>
+      );
+    }
+    case "hr":
+      return <hr key={key} className="my-3 border-zinc-200" />;
+    case "quote":
+      return renderQuote(block.content, key, caret);
+    case "list":
+      return renderList(block, key, caret);
+    case "table":
+      return renderTable(block, key, caret);
+    case "text":
+      return renderParagraph(block.text, key, caret);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public component
+// ---------------------------------------------------------------------------
 
 export function Markdown({
   content,
@@ -221,13 +582,9 @@ export function Markdown({
           ]
         : null;
     }
-    return blocks.map((block, index) => {
-      const caret = streamingCursor && index === blocks.length - 1;
-      if (block.kind === "code") {
-        return <CodeBlock key={`c${index}`} language={block.language} code={block.code} caret={caret} />;
-      }
-      return renderTextBlock(block.text, `t${index}`, caret);
-    });
+    return blocks.map((block, index) =>
+      renderBlock(block, `b${index}`, streamingCursor && index === blocks.length - 1)
+    );
   }, [content, streamingCursor]);
 
   return <div className={cn("text-[0.925rem] text-zinc-800", className)}>{nodes}</div>;

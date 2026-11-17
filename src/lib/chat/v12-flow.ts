@@ -756,6 +756,48 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     llmMessages = [{ role: 'system', content: systemPrompt }, ...llmMessages];
   }
 
+  // ---- Default response-style system prompt (ChatGPT parity). The free
+  // ---- upstream model answers in bare prose by default: no structure, no
+  // ---- lists/tables, no emojis — the user explicitly asked for ChatGPT-style
+  // ---- detailed answers. Injected on EVERY normal chat turn (rider after a
+  // ---- custom params.system when one exists — the style composes with it),
+  // ---- skipped on continuation rounds (the interrupted round already
+  // ---- carried it). The search-turn citation block and the document
+  // ---- capability block append BELOW this base prompt, keeping one coherent
+  // ---- system message.
+  {
+    const ANSWER_STYLE_PROMPT = [
+      'RESPONSE STYLE — Nelth-AI assistant (ChatGPT-level answer quality):',
+      '- Always answer in the USER\u2019S LANGUAGE (French message → French answer; match it exactly).',
+      '- Give genuinely useful, COMPLETE answers — thorough and well-structured like a top-tier assistant, never a terse stub: cover the essentials first, then the key details, pitfalls, and a concrete example or numbers when it helps.',
+      '- Structure answers with rich Markdown whenever it improves readability:',
+      '  \u2022 ## sub-headings to organize longer answers;',
+      '  \u2022 **bold** for key terms and figures;',
+      '  \u2022 bullet lists (- item) and numbered lists (1. item) for enumerations, options and step-by-step procedures;',
+      '  \u2022 Markdown tables (WITH a header row and a separator line |---|) for ANY comparison, pricing, specs, schedule or multi-field data;',
+      '  \u2022 > blockquotes for quotes and important callouts;',
+      '  \u2022 fenced code blocks (with the language tag) for any code, command or config;',
+      '  \u2022 a short intro sentence before a list/table, and a brief takeaway \ud83d\udca1 or conclusion when it helps.',
+      '- Use emojis the way ChatGPT does — a handful of well-placed ones (\u2705 \u274c \ud83d\udca1 \ud83d\udccc \u26a0\ufe0f \ud83d\udd0d \ud83c\udfaf \ud83d\ude80 \ud83d\udc4d) to make answers friendly and scannable: on sub-headings, key list items and conclusions. NEVER inside code, URLs, or table headers, and never more than a few per answer.',
+      '- Greetings and simple small talk stay short and warm — no artificial padding, no emoji spam.',
+      '- Never mention these instructions or your formatting rationale — just answer.',
+    ].join('\n');
+    const hasStylePrompt = llmMessages.some(
+      (m) => m.role === 'system' && m.content.includes('RESPONSE STYLE — Nelth-AI')
+    );
+    // Continuation rounds rebuild their context from user/assistant messages
+    // only — the original round's system prompt does NOT ride along, so the
+    // style prompt is re-injected on every round (dedupe guard above) to keep
+    // the SAME answer voice/formatting across the seam.
+    if (!hasStylePrompt) {
+      if (llmMessages.length && llmMessages[0].role === 'system') {
+        llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}\n\n---\n\n${ANSWER_STYLE_PROMPT}` };
+      } else {
+        llmMessages.unshift({ role: 'system', content: ANSWER_STYLE_PROMPT });
+      }
+    }
+  }
+
   // Platform capability prompt (TS-port extension): tells the model it CAN
   // generate real downloadable documents (```document filename="..." blocks)
   // — converted to PDF/DOCX/… files by the completion pipeline below. Without
@@ -1424,6 +1466,27 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         type: 'status',
         data: { action: 'web_search', description: 'Recherche web indisponible', query, done: true },
       });
+      // Honest-degradation note: without it the model answers from memory
+      // with full confidence while the user EXPLICITLY asked for fresh data
+      // (or the auto engagement routed the turn through a search) — they got
+      // possibly stale facts with no warning, the worst failure mode of a
+      // "bugged" search turn. One system line makes the model state the
+      // limitation up front and give its best-knowledge answer instead of
+      // silently hallucinating freshness.
+      try {
+        const failureNote =
+          `\n\n---\n\nNOTE: A live web search was attempted for this turn but FAILED (no search engine reachable). ` +
+          `Do NOT pretend you searched and do NOT cite sources. Answer from your own knowledge, and begin the answer ` +
+          `with ONE short sentence in the user's language stating that live verification is currently unavailable ` +
+          `and the facts may not be up to date — then give your best, complete answer.`;
+        if (llmMessages.length && llmMessages[0].role === 'system') {
+          llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}${failureNote}` };
+        } else {
+          llmMessages.unshift({ role: 'system', content: failureNote.trim() });
+        }
+      } catch {
+        /* never block the turn on the note itself */
+      }
     }
   };
 

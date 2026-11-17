@@ -53,6 +53,8 @@ let preferredProvider: string | null = null;
 
 const decodeEntities = (s: string): string =>
   s
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => safeCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => safeCodePoint(parseInt(dec, 10)))
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
@@ -61,6 +63,20 @@ const decodeEntities = (s: string): string =>
     .replace(/&#x27;/g, "'")
     .replace(/&#x2F;/gi, '/')
     .replace(/&nbsp;/g, ' ');
+
+/** Numeric-entity → character, with lone-surrogate protection (Bing titles
+ *  routinely carry &#233;-style accents — without this they render literally). */
+function safeCodePoint(code: number): string {
+  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return '';
+  // Skip UTF-16 lone surrogates — String.fromCharCode would emit them and
+  // poison downstream JSON/UTF-8 serialization.
+  if (code >= 0xd800 && code <= 0xdfff) return '';
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return '';
+  }
+}
 
 const stripTags = (s: string): string => decodeEntities(s.replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim();
 
@@ -290,30 +306,95 @@ function normalizeResultTitle(title: string): string {
 }
 
 /**
- * Run the provider chain; the first provider that yields results wins.
- * The last successful provider is remembered (in-process) and tried first
- * on subsequent searches. Throws only when every provider failed.
+ * Run the providers; the FIRST one that yields usable results wins.
+ *
+ * RACING (parallel) — not a sequential chain. The old chain burned 5s+5s on
+ * DuckDuckGo's datacenter 403s (Vercel: "ddg-lite HTTP 403" in ~550ms) before
+ * Bing/4get were even attempted, and one slow provider stalled every search
+ * behind it — worst case the SUM of all timeouts (~36s), surfacing live as
+ * "Recherche web indisponible" on otherwise healthy turns (the reported
+ * auto-search bug). Now every provider fires at once and the first usable
+ * result set wins: the wait is bounded by the SLOWEST single provider
+ * (~12s worst case, typically 1-3s) and a single engine outage can no longer
+ * break a search — whichever engine answers serves the turn.
+ *
+ * The last successful provider is remembered (in-process) and gets a solo
+ * head start on the next search: a warm engine that just answered is the
+ * best bet, and it keeps the outbound fan-out to ONE request on the happy
+ * path (rate-limit friendly).
  */
 export async function searchWeb(query: string, count = 3): Promise<WebSearchSource> {
+  const t0 = Date.now();
   const errors: string[] = [];
-  const ordered = preferredProvider
-    ? [...CHAIN.filter((p) => p.name === preferredProvider), ...CHAIN.filter((p) => p.name !== preferredProvider)]
-    : CHAIN;
-  for (const p of ordered) {
-    const t0 = Date.now();
-    try {
-      const results = (await p.run(query, count)).map((r) => ({
-        ...r,
-        title: normalizeResultTitle(r.title) || r.title,
-      }));
-      preferredProvider = p.name;
-      console.log(`[web-search] ${p.name} OK en ${Date.now() - t0}ms (${results.length} résultats)`);
-      return { provider: p.name, results };
-    } catch (e) {
-      errors.push(`${p.name}: ${e instanceof Error ? e.message : String(e)}`);
-      console.log(`[web-search] ${p.name} ÉCHEC après ${Date.now() - t0}ms: ${e instanceof Error ? e.message : String(e)}`);
+
+  const runProvider = async (
+    p: { name: string; run: (q: string, n: number) => Promise<WebSearchResult[]> }
+  ): Promise<WebSearchSource> => {
+    const results = (await p.run(query, count)).map((r) => ({
+      ...r,
+      title: normalizeResultTitle(r.title) || r.title,
+    }));
+    if (!results.length) throw new Error(`${p.name} empty`);
+    return { provider: p.name, results };
+  };
+
+  // Fast path — the provider that succeeded last in this process tries first.
+  if (preferredProvider) {
+    const preferred = CHAIN.find((p) => p.name === preferredProvider);
+    if (preferred) {
+      try {
+        const out = await runProvider(preferred);
+        console.log(
+          `[web-search] ${out.provider} OK en ${Date.now() - t0}ms (${out.results.length} résultats) [préféré]`
+        );
+        return out;
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        errors.push(`${preferred.name}: ${message}`);
+        console.log(
+          `[web-search] ${preferred.name} ÉCHEC après ${Date.now() - t0}ms: ${message} — course parallèle`
+        );
+      }
     }
   }
+
+  // Race every remaining provider at once — the first success resolves the
+  // race; each loser is bounded by its own provider timeout and its failure
+  // message feeds the final aggregate error.
+  const racers = CHAIN.filter((p) => p.name !== preferredProvider).map((p) => ({
+    name: p.name,
+    promise: runProvider(p),
+  }));
+  const raced = await new Promise<WebSearchSource | null>((resolve) => {
+    let pending = racers.length;
+    let settled = false;
+    if (!pending) return resolve(null);
+    for (const racer of racers) {
+      racer.promise.then(
+        (out) => {
+          if (!settled) {
+            settled = true;
+            resolve(out);
+          }
+        },
+        (e) => {
+          const message = e instanceof Error ? e.message : String(e);
+          errors.push(`${racer.name}: ${message}`);
+          console.log(`[web-search] ${racer.name} ÉCHEC: ${message}`);
+          if (--pending === 0 && !settled) resolve(null);
+        }
+      );
+    }
+  });
+
+  if (raced) {
+    preferredProvider = raced.provider;
+    console.log(
+      `[web-search] ${raced.provider} OK en ${Date.now() - t0}ms (${raced.results.length} résultats) [course]`
+    );
+    return raced;
+  }
+
   throw new Error(`Aucun moteur de recherche disponible (${errors.join(' | ')})`);
 }
 
