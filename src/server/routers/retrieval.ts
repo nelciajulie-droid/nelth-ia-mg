@@ -805,8 +805,11 @@ export const routes: Route[] = [
       // { query, follow-ups, results: [{ title, url, snippet, description }] }
       try {
         const { searchWeb } = await import('@/lib/retrieval/web-search');
-        const resultCountRaw = await configGet<number>('web.search.result_count', 3);
-        const resultCount = Math.min(10, Math.max(1, Math.floor(Number(resultCountRaw) || 3)));
+        // v0.14.2 — floor 6 (cap 10): a stale persisted
+        // web.search.result_count=5 used to cap every tool search at five
+        // thin snippets ("toujours 5 sources").
+        const resultCountRaw = await configGet<number>('web.search.result_count', 6);
+        const resultCount = Math.min(10, Math.max(6, Math.floor(Number(resultCountRaw) || 6)));
         const query = queries[0] ?? '';
         if (!query) return ctx.error(400, WEB_SEARCH_ERROR);
         const { results } = await searchWeb(query, resultCount);

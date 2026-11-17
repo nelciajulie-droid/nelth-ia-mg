@@ -165,7 +165,7 @@ export const RAG_CONFIG_DEFAULTS: Record<string, unknown> = {
   'web.search.confirmation.content': '',
   'web.search.engine': process.env.WEB_SEARCH_ENGINE || '',
   'web.search.trust_env': true,
-  'web.search.result_count': 3,
+  'web.search.result_count': 6,
   'web.search.concurrent_requests': 0,
   'web.search.domain.filter_list': [],
   'web.search.bypass_embedding_and_retrieval': false,

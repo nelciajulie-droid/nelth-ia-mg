@@ -246,7 +246,7 @@ const CONTINUE_INSTRUCTION = `Your previous answer was interrupted mid-output by
  * next round receives the model's own notes as its prior turn and THIS
  * instruction: convert, do not re-analyze.
  */
-const NOTES_TO_ANSWER_INSTRUCTION = `These were your internal analysis notes from your previous attempt, not an answer. Write NOW the FINAL ANSWER to my original question: direct and concise, in MY language. Use your notes as your working memory — do not redo the analysis, do not restate or mention the notes, never describe your reading process. Just answer me directly.`;
+const NOTES_TO_ANSWER_INSTRUCTION = `These were your internal analysis notes from your previous attempt, not an answer. Write NOW the FINAL ANSWER to my original question: direct and COMPLETE, in MY language, formatted exactly like your normal answers — rich Markdown structure (sub-headings, bullet/numbered lists, tables for comparisons) and a few well-placed emojis, as the RESPONSE STYLE in your system prompt defines. Use your notes as your working memory — do not redo the analysis, do not restate or mention the notes, never describe your reading process. Just answer me directly.`;
 
 /** Extract the accumulated chain-of-thought text from structured output
  * items (rounds' reasoning blocks) — the notes fed back into a continuation
@@ -1308,8 +1308,14 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
     try {
       const { configGet } = await import('@/lib/config');
       const { searchWeb, webResultsToContext, loadWebPages, loadWebImages } = await import('@/lib/retrieval/web-search');
-      const resultCountRaw = await configGet<number>('web.search.result_count', 3);
-      const resultCount = Math.min(10, Math.max(1, Math.floor(Number(resultCountRaw) || 3)));
+      // v0.14.2 — source count: the reported "toujours 5 sources" was a
+      // stale persisted web.search.result_count (5) in the config table capping
+      // EVERY search at five thin snippets. The effective count is now FLOORED
+      // at 6 (and capped at 10 when the admin raises it): a genuinely useful
+      // search answer needs more than a handful of teasers, and the web loader
+      // below turns those sources into REAL page content, not snippets.
+      const resultCountRaw = await configGet<number>('web.search.result_count', 6);
+      const resultCount = Math.min(10, Math.max(6, Math.floor(Number(resultCountRaw) || 6)));
       const { results } = await searchWeb(query, resultCount);
       if (results.length) {
         // Web loader (Python parity): unless bypassed, fetch the top result
@@ -1330,10 +1336,13 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
           const loaderConcurrent = await configGet<number>('web.loader.concurrent_requests', 5);
           const [texts, images] = await Promise.all([
             loadWebPages(results, {
-              maxPages: 3,
-              maxCharsPerPage: 3000,
+              // v0.14.2 — the answer must ride the REAL page content: load
+              // (nearly) every result page, deeper per page, in one concurrent
+              // wave so the wall-clock stays bounded by one page timeout.
+              maxPages: Math.min(6, Math.max(resultCount, 4)),
+              maxCharsPerPage: 4000,
               timeoutMs: Math.min(30_000, Math.max(3000, Number(loaderTimeout) || 10_000)),
-              concurrent: Math.min(6, Math.max(1, Number(loaderConcurrent) || 3)),
+              concurrent: Math.min(6, Math.max(6, Number(loaderConcurrent) || 6)),
             }).catch(() => undefined),
             loadWebImages(results, {
               timeoutMs: 6000,
@@ -1360,7 +1369,7 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
               `The following web search results were retrieved on ${retrievalDate} for the query "${query}".\n` +
               `They are CONTEXT to help you answer the user's question — not a task to analyze, summarize, or describe. Never mention the retrieval, the sources' structure, or your reading process in your answer.\n\n` +
               webResultsToContext(results, pageTexts) +
-              `\n\n---\nAnswer the user's question below using the context above (cite it with [N] markers). Write the final answer only, in the user's language.\n\n`;
+              `\n\n---\nAnswer the user's question below using the context above (cite it with [N] markers). Write the final answer only, in the user's language, with the SAME rich ChatGPT-style formatting as all your answers (sub-headings, lists, tables, well-placed emojis).\n\n`;
             llmMessages[li].content = `${framedContext}${llmMessages[li].content}`;
             break;
           }
@@ -1437,12 +1446,12 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
 You have been provided with numbered web sources in <source number="N" ...> blocks.
 Attach a citation marker to each factual claim that is DIRECTLY supported by these sources:
 - [N] when one source supports the claim; [N,M] when several sources support the SAME claim.
-- Place each marker IMMEDIATELY AFTER the specific claim it supports — this may be in the MIDDLE of a paragraph, right after a list item, or just before the sentence's final period. Never systematically close every sentence or paragraph with a marker.
+- Place each marker IMMEDIATELY AFTER the specific claim it supports — this may be in the MIDDLE of a paragraph, right after a list item, inside a table's DATA cell, or just before the sentence's final period. Never systematically close every sentence or paragraph with a marker.
 - A claim with no supporting source gets NO marker (your own analysis, opinions, math and conversation summaries are not cited). Never invent sources.
 - One source may support several different claims — cite it at each of them. Several sources supporting one claim merge into a single [N,M] group.
-- Never write markers inside code blocks, tables' headers, or headings. Do NOT add a bibliography or source list at the end — the interface renders sources automatically.
+- Do not write markers inside code blocks, inside table HEADER cells, or inside headings. Tables themselves are ENCOURAGED for comparisons — only the header row stays marker-free. Do NOT add a bibliography or source list at the end — the interface renders sources automatically.
 
-ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as the user's message. Never narrate your reasoning process, never analyze or enumerate the sources, never describe what you are reading ("The user is asking…", "Looking at the sources…", "Source 1 shows…") — those are internal steps, not the answer. Start directly with the answer to the user's question.`;
+ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as the user's message. Keep your FULL RESPONSE STYLE from the system prompt — this is a normal answer that happens to cite sources: same depth, same rich Markdown structure (sub-headings, bold, bullet/numbered lists, tables for any comparison, blockquotes), same well-placed emojis as always. NEVER narrate your reasoning process, never analyze or enumerate the sources, never describe what you are reading ("The user is asking…", "Looking at the sources…", "Source 1 shows…") — those are internal steps, not the answer. Start directly with the answer to the user's question.`;
           if (llmMessages.length && llmMessages[0].role === 'system') {
             llmMessages[0] = { role: 'system', content: `${llmMessages[0].content}${citationPrompt}` };
           } else {
@@ -2427,7 +2436,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       {
         role: 'user',
         content:
-          'These were your internal analysis notes, not an answer. Write now the FINAL ANSWER to my original question: direct and concise, in MY language. Keep the [N] citation markers where a source supports a claim. Never mention "the user", the sources, your reading process, or these notes — just answer me directly.',
+          'These were your internal analysis notes, not an answer. Write now the FINAL ANSWER to my original question: direct and COMPLETE, in MY language, formatted exactly like your normal answers — rich Markdown structure (sub-headings, lists, tables for comparisons) and a few well-placed emojis, as the RESPONSE STYLE in your system prompt defines. Keep the [N] citation markers where a source supports a claim. Never mention "the user", the sources, your reading process, or these notes — just answer me directly.',
       },
     ];
     // stream_options MUST go: strict OpenAI-compatible gateways reject it
