@@ -436,6 +436,12 @@ const SOURCE_REFERENCE_RE = new RegExp(
     `\\b(?:d['’]apr[èe]s|sur\\s+la\\s+base\\s+de|en\\s+partant\\s+de|bas[ée]e?s?\\s+sur|utilisant)\\s+(?:(?:mon|ma|mes|ton|ta|tes|son|sa|ses|notre|votre|ce|cet|cette|ces|le|la|les|un|une|l['’ ]?|the|my|our|your|this|that|these|those|his|her|their)\\s*)?${SOURCE_VISUAL_NOUN}`,
     // 3) English from/with/using/starting from/based on + determiner + visual
     `\\b(?:from|with|using|starting\\s+(?:from|with)|based\\s+on)\\s+(?:my|our|your|the|this|that|these|those|his|her|their)\\s+${SOURCE_VISUAL_NOUN}`,
+    // 4) v0.14.10 — French « avec / utilise / reprends » + POSSESSIVE +
+    //    visual noun (« crée un logo de chrome avec mon logo », « utilise mon
+    //    image », « reprends ma photo »): the user names their OWN visual as
+    //    the base — the same bug class as branch 1. Possessive-locked so
+    //    « avec un fond bleu » / « avec la photo de référence » never fire.
+    `\\b(?:avec|utilise[rz]?|reprends?|reprenant)\\s+(?:mon|ma|mes|ton|ta|tes|son|sa|ses|notre|votre|my|our|your|his|her|their)\\s+${SOURCE_VISUAL_NOUN}`,
   ].join('|'),
   'i'
 );

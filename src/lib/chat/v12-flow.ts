@@ -1366,7 +1366,21 @@ export async function handleChatCompletionV12(user: ApiUser, form: any): Promise
         ...(Array.isArray(userMessage?.files) ? userMessage.files : []),
         ...(Array.isArray(lastFormMessage?.files) ? lastFormMessage.files : []),
       ];
-      return files.some((f: any) => f?.type === 'image' && (f?.url || f?.id));
+      // v0.14.10 — user uploads ride the wire with type 'file' (assistant
+      // generations carry 'image'); the STORED content type stays the
+      // authority later in resolveImageSources, but the deterministic media
+      // probe needs a zero-cost routing signal NOW. Without this, an image
+      // upload on a FRESH chat ("transforme mon logo…" + logo.png attached)
+      // left recentVisual false — the deterministic edit net never fired
+      // and the whole routing depended on the LLM classifier, which dies
+      // open (no image) whenever the decision gateway is unavailable.
+      return files.some(
+        (f: any) =>
+          f &&
+          (f.url || f.id) &&
+          (f.type === 'image' ||
+            (f.type !== 'video' && /\.(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(String(f.name ?? ''))))
+      );
     } catch {
       return false;
     }
@@ -2242,8 +2256,19 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
       await emit({ type: 'chat:list', data: { chat_id: chatId, folder_id: form.folder_id ?? null } });
       await emit({ type: 'status', data: { done: true } });
     } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
+      let detail = e instanceof Error ? e.message : String(e);
       console.error('[v12-flow] image generation failed', e);
+      // v0.14.10 — an EDIT turn whose source visual could not be resolved
+      // must say SO: the engine diagnosis alone (refused subject / service
+      // down) used to point the user at their prompt while the real cause
+      // was the image the derivation referenced but never received (the
+      // reported bug's shape — « à partir de mon logo » with the logo
+      // unreadable in the history). One honest sentence beats a misleading
+      // generic one.
+      if ((autoImageEdit || toggleEditFollowup) && !sourceImages.length) {
+        detail =
+          `${detail} (Note : l’image source référencée par votre demande n’a pas pu être retrouvée dans la conversation — réattachez-la à votre prochain message pour un rendu fidèle à votre visuel.)`;
+      }
       if (sessionId && chatId) {
         await emit({ type: 'chat:message:error', data: { error: { content: detail }, done: true } });
         return nullJson();

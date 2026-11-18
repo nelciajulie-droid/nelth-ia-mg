@@ -63,8 +63,7 @@ export interface GenerateImageOptions {
 /**
  * Transient-failure tolerance for the Nelthai engine (observed live on the
  * gateway): the upstream sometimes rejects a perfectly fine job with a bare
- * status 'error' and NO detail whatsoever — the raw word that used to reach
- * users as "Image generation failed: error". Two distinct failure modes:
+ * status 'error' and NO detail whatsoever. Two distinct failure modes:
  *
  *   • transient blips — the SAME prompt fails once then succeeds minutes
  *     later (verified: « voiture rouge »);
@@ -84,6 +83,101 @@ export interface GenerateImageOptions {
  * route maxDuration 300s — nothing else cuts a running generation.)
  */
 const PROMPT_ENRICHMENT = ' — image détaillée et de haute qualité';
+
+// ---------------------------------------------------------------------------
+// v0.14.10 — honest failure diagnosis. The reported production bug taught the
+// lesson: a turn that fails because its SOURCE IMAGE never reached the engine
+// used to surface « le service a probablement refusé ce sujet (politique de
+// contenu)… » — a diagnosis that pointed the user at their PROMPT while the
+// real cause was the absent attachment. The engine failure surface is small
+// and observable, so classify it instead of guessing:
+//
+//   • SOURCE      — every attempt ran the multipart image→image endpoint and
+//                   died at SUBMIT: the endpoint refused the attachment
+//                   itself (bad format, unreadable bytes, oversized file),
+//                   not the prompt and not the service → "réattachez une
+//                   image valide";
+//   • UNAVAILABLE — connectivity symptoms dominate (5xx at submit, dead
+//                   polls, timeouts, download-only failures): the gateway
+//                   never delivered → "réessayez dans quelques instants",
+//                   NEVER a content-policy claim;
+//   • REFUSED     — jobs were accepted and RAN, the engine terminally
+//                   rejected them: filtered subject or too-short prompt →
+//                   the rephrasing advice (« un chat orange qui dort sur un
+//                   canapé » plutôt que « chat »).
+// ---------------------------------------------------------------------------
+
+/** Where a single attempt died — maps to the diagnosis buckets above. */
+type AttemptStage = 'submit' | 'job' | 'download';
+
+/** One recorded failure: its stage, raw detail and the endpoint family used. */
+type AttemptFailure = { stage: AttemptStage; detail: string; withSources: boolean };
+
+function stageOf(e: unknown): AttemptStage {
+  const msg = e instanceof Error ? e.message : String(e ?? '');
+  // The multipart endpoint refused the request before any job existed, and
+  // the "requires at least one image" guard (defensive — sources are filtered
+  // upstream) is the same family: the attachment, not the service.
+  if (msg.startsWith('Nelthai submit failed') || msg.startsWith('Image-to-image requires')) return 'submit';
+  if (
+    msg.startsWith('Failed to download') ||
+    msg.includes('returned an empty image') ||
+    msg.startsWith('The image service produced no downloadable image')
+  ) {
+    return 'download';
+  }
+  // Everything else is a job-stage outcome: terminal 'error' status (engine
+  // refusal) or persistent poll/timeout failures (connectivity) — the
+  // diagnosis splits them on the raw detail below.
+  return 'job';
+}
+
+/** True when the raw detail smells like a connectivity problem, not a refusal. */
+function isConnectivitySymptom(detail: string): boolean {
+  return (
+    /HTTP\s5\d\d/i.test(detail) || // gateway 5xx at submit
+    /Nelthai poll failed/i.test(detail) || // job snapshot unreachable
+    /timed out|timeout/i.test(detail) ||
+    /\b(fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|network|socket hang up)\b/i.test(detail) ||
+    /no job_id in response/i.test(detail) // gateway alive but broken
+  );
+}
+
+/** Classified end-failure → the French, actionable user-facing message. */
+function diagnoseImageFailure(failures: AttemptFailure[]): { kind: 'source' | 'unavailable' | 'refused'; message: string } {
+  // SOURCE — the multipart endpoint rejected the attachment itself on every
+  // attempt: the prompt never even reached the engine.
+  if (failures.length && failures.every((f) => f.withSources && f.stage === 'submit') && !failures.some((f) => isConnectivitySymptom(f.detail))) {
+    const detail = failures[failures.length - 1].detail.replace(/^Nelthai submit failed:\s*/i, '');
+    return {
+      kind: 'source',
+      message:
+        `Votre image source n’a pas pu être transmise au service d’images` +
+        (detail ? ` (${detail})` : '') +
+        `. Vérifiez qu’il s’agit d’une image valide (PNG, JPG ou WEBP), puis réessayez en la réattachant à votre message.`,
+    };
+  }
+
+  // UNAVAILABLE — the gateway never accepted or never delivered the job:
+  // no subject was refused, retrying later is the ONLY useful advice.
+  if (failures.some((f) => isConnectivitySymptom(f.detail)) || failures.every((f) => f.stage === 'download')) {
+    return {
+      kind: 'unavailable',
+      message:
+        'Le service d’images est momentanément indisponible ou ne répond plus — aucun sujet n’a été refusé. Réessayez simplement dans quelques instants.',
+    };
+  }
+
+  // REFUSED — jobs ran and the engine terminally rejected them: filtered
+  // subject or too-short prompt. The rephrasing advice, WITHOUT the
+  // misleading « ou momentanément indisponible » hedge (that bucket got its
+  // own diagnosis above).
+  return {
+    kind: 'refused',
+    message:
+      'La génération d’image a échoué après plusieurs tentatives : le service a probablement refusé ce sujet (politique de contenu) ou la description est trop courte. Essayez une description un peu plus détaillée — par exemple « un chat orange qui dort sur un canapé » plutôt que « chat » — puis relancez.',
+  };
+}
 
 /**
  * Generate an image with the built-in Nelthai engine → raw image bytes.
@@ -135,6 +229,10 @@ export async function generateSdImages(
       : [original, original, `${original}${PROMPT_ENRICHMENT}`];
 
   let lastFailure: unknown = null;
+  // v0.14.10 — every failure is recorded with its stage and endpoint family
+  // so the final error names the REAL cause (source image / service down /
+  // refused subject) instead of the one-size-fits-all policy guess.
+  const failures: AttemptFailure[] = [];
 
   for (let attempt = 0; attempt < attempts.length; attempt++) {
     try {
@@ -164,8 +262,18 @@ export async function generateSdImages(
       }
       if (images.length) return images;
       lastFailure = lastErr;
+      failures.push({
+        stage: stageOf(lastErr),
+        detail: lastErr instanceof Error ? lastErr.message : String(lastErr),
+        withSources: sources.length > 0,
+      });
     } catch (e) {
       lastFailure = e;
+      failures.push({
+        stage: stageOf(e),
+        detail: e instanceof Error ? e.message : String(e),
+        withSources: sources.length > 0,
+      });
     }
 
     if (attempt < attempts.length - 1) {
@@ -185,11 +293,17 @@ export async function generateSdImages(
     }
   }
 
-  // Every attempt failed: a French, actionable
-  // message instead of the gateway's bare "error" word.
-  throw new Error(
-    'La génération d’image a échoué après plusieurs tentatives. Le service d’images a probablement refusé ce sujet (politique de contenu) ou est momentanément indisponible. Essayez de reformuler votre demande avec un peu plus de détails — par exemple « un chat orange qui dort sur un canapé » plutôt que « chat » — puis relancez.'
+  // Every attempt failed: the diagnosis (v0.14.10) names the real cause —
+  // source image / service down / refused subject — instead of the blanket
+  // content-policy guess that used to mislead (the reported bug).
+  const diagnosis = diagnoseImageFailure(
+    failures.length ? failures : [{ stage: 'job', detail: String(lastFailure), withSources: sources.length > 0 }]
   );
+  console.error(
+    `[image-generation] all attempts failed — diagnosis: ${diagnosis.kind}` +
+      (failures.length ? ` (${failures.map((f) => `${f.stage}: ${f.detail.slice(0, 120)}`).join(' | ')})` : '')
+  );
+  throw new Error(diagnosis.message);
 }
 
 function extensionFor(contentType: string): string {
