@@ -3,7 +3,7 @@
  * + env resolution mirroring open_webui/env.py.
  */
 
-export const VERSION = '0.14.8';
+export const VERSION = '0.14.9';
 
 export const ROLE = {
   ADMIN: 'admin',

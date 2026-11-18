@@ -400,6 +400,69 @@ const EDIT_DIRECTIVE_RE = new RegExp(
   'i'
 );
 
+// ---------------------------------------------------------------------------
+// v0.14.9 — SOURCE-VISUAL REFERENCE net. The reported production bug: after
+// uploading a logo and generating a globe version of it, « creer comme logo
+// de chrome apartir de mon logo » was routed as a FRESH text→image creation
+// (the deterministic probe answered 'image' — "créer … logo" is a creation
+// verb + a media noun) and the RAW directive reached the Nelthai text
+// endpoint with NO source image, where it failed on every retry and the turn
+// died on the misleading content-policy error. But "à partir de MON logo"
+// is an explicit DERIVATION from a visual the conversation already holds:
+// the turn is an image→image iteration (the previous upload or the previous
+// generated visual feeds the multipart job), never a context-free re-roll.
+//
+// Matches, fr + live misspellings + en (the determiner is OPTIONAL so « à
+// partir de la photo » fires without a possessive):
+//   • « à partir de / a partir de / apartir de » + determiner + visual noun;
+//   • « d'après / sur la base de / en partant de / basé sur / utilisant » …;
+//   • English "from my logo", "based on my photo", "using this image",
+//     "starting from my artwork".
+// The noun list mirrors the concrete artifact set — abstract tails (« à
+// partir de zéro », « à partir de demain », "from my notes") never fire.
+// ---------------------------------------------------------------------------
+
+/** Concrete visual nouns a derivation source can be (fr + en). */
+const SOURCE_VISUAL_NOUN =
+  '(?:logos?|images?|photos?|photographie?s?|dessins?|illustrations?|avatars?|visuels?|ic[ôo]nes?|icones?|icons?|pictures?|artworks?|cr[ée]ations?|miniatures?|banni[èe]res?)';
+
+/** Derivation preposition + (optional determiner) + visual noun. */
+const SOURCE_REFERENCE_RE = new RegExp(
+  [
+    // 1) à partir de / a partir de / apartir de … + determiner? + visual noun
+    //    ("à partir de mon logo", "a partir de l'image", "apartir de la photo")
+    `(?:^|[\\s(])[àa][\\s]*partir\\s+(?:de\\s+la|des|du|de|d['’ ]?)\\s*(?:(?:mon|ma|mes|ton|ta|tes|son|sa|ses|notre|votre|ce|cet|cette|ces|le|la|les|un|une|l['’ ]?|the|my|our|your|this|that|these|those|his|her|their)\\s*)?${SOURCE_VISUAL_NOUN}`,
+    // 2) d'après / sur la base de / en partant de / basé(s) sur / utilisant …
+    `\\b(?:d['’]apr[èe]s|sur\\s+la\\s+base\\s+de|en\\s+partant\\s+de|bas[ée]e?s?\\s+sur|utilisant)\\s+(?:(?:mon|ma|mes|ton|ta|tes|son|sa|ses|notre|votre|ce|cet|cette|ces|le|la|les|un|une|l['’ ]?|the|my|our|your|this|that|these|those|his|her|their)\\s*)?${SOURCE_VISUAL_NOUN}`,
+    // 3) English from/with/using/starting from/based on + determiner + visual
+    `\\b(?:from|with|using|starting\\s+(?:from|with)|based\\s+on)\\s+(?:my|our|your|the|this|that|these|those|his|her|their)\\s+${SOURCE_VISUAL_NOUN}`,
+  ].join('|'),
+  'i'
+);
+
+/**
+ * First-person visual reference — « mon logo », « ma photo », « my image »:
+ * the user names THEIR OWN uploaded visual as the derivation base, so the
+ * edit source feed prefers the conversation's most recent USER upload over
+ * the assistant's generated iteration (see v12-flow §3.5).
+ */
+const OWN_VISUAL_RE = new RegExp(
+  `\\b(?:mon|ma|mes|my|our|notre)\\s+${SOURCE_VISUAL_NOUN}\\b`,
+  'i'
+);
+
+/** True when the phrasing references a visual the conversation already holds
+ *  as a derivation base ("à partir de mon logo" → image→image, never a
+ *  context-free text→image re-roll). */
+export function referencesSourceVisual(text: string): boolean {
+  return !!text && SOURCE_REFERENCE_RE.test(text);
+}
+
+/** True when the phrasing names the user's OWN visual ("mon logo", "my photo"). */
+export function referencesOwnVisual(text: string): boolean {
+  return !!text && OWN_VISUAL_RE.test(text);
+}
+
 /**
  * Recent-generated-visual trace — every image/video turn persists a natural
  * assistant sentence as meta.llm_content ("Voici l'image générée (f). Dites-moi
@@ -443,7 +506,10 @@ export function isEditIterationOn(
   if (!targetText || EDIT_QUESTION_RE.test(targetText)) return false;
   const visualPresent = opts?.attachedImage === true || hasRecentImageTrace(messages);
   if (!visualPresent) return false;
-  return EDIT_DIRECTIVE_RE.test(targetText);
+  // v0.14.9 — an explicit SOURCE-VISUAL reference ("à partir de mon logo")
+  // counts as an edit iteration exactly like a directive phrasing: the
+  // derivation base is a visual the conversation already holds.
+  return EDIT_DIRECTIVE_RE.test(targetText) || SOURCE_REFERENCE_RE.test(targetText);
 }
 
 /**
@@ -492,8 +558,16 @@ export function deterministicMediaTurn(
   // Video/GIF nets outrank everything (an animate request is video, never an
   // image edit) and do not need conversation context.
   if (GIF_REQUEST_RE.test(targetText) || VIDEO_ENGAGE_RE.test(targetText)) return 'video';
+  // v0.14.9 — a SOURCE-VISUAL reference ("créer un logo de chrome à partir
+  // de mon logo") outranks the fresh-creation net below it: the turn derives
+  // from a visual the conversation already holds (image→image), it is never
+  // a context-free text→image re-roll (the reproduced bug: the raw directive
+  // alone hit the text endpoint and died on a misleading content-policy
+  // error while the source image sat unused in the history).
   const editTurn =
-    recentVisual && !EDIT_QUESTION_RE.test(targetText) && EDIT_DIRECTIVE_RE.test(targetText);
+    recentVisual &&
+    !EDIT_QUESTION_RE.test(targetText) &&
+    (EDIT_DIRECTIVE_RE.test(targetText) || SOURCE_REFERENCE_RE.test(targetText));
   if (editTurn) return 'edit';
   if (IMAGE_ENGAGE_RE.test(targetText)) return 'image';
   return null;
@@ -837,8 +911,9 @@ export async function decideAutoEngagement(
     // the user wants a TEXT list) unless an explicit creation command rides
     // along ("dessine-moi 5 idées de logos").
     const ideaQuestion = IDEA_REQUEST_RE.test(targetText) && !CREATE_COMMAND_RE.test(targetText);
-    // EDIT CONTINUATION net — an explicit edit directive on a visual already
-    // present (previous generated image, or an image attached this turn).
+    // EDIT CONTINUATION net — an explicit edit directive OR a source-visual
+    // reference ("à partir de mon logo") on a visual already present (previous
+    // generated/uploaded image, or an image attached this turn).
     // Runs BEFORE the fresh-creation image net (an iteration with the
     // previous visual as source outranks a context-free re-roll) but AFTER
     // the video nets ("anime cette image" is the video engine's turn).
@@ -846,7 +921,7 @@ export async function decideAutoEngagement(
     const editNet =
       (attachedImage || hasRecentImageTrace(messages)) &&
       !questionPhrasing &&
-      EDIT_DIRECTIVE_RE.test(targetText);
+      (EDIT_DIRECTIVE_RE.test(targetText) || SOURCE_REFERENCE_RE.test(targetText));
     // Nets fire only when NO engine is already engaged — with the classifier
     // skipped both start false, so the FIRST net in the post-parse order
     // wins: gif → video → edit → image (priority VIDEO > EDIT > IMAGE kept).
@@ -1032,7 +1107,7 @@ export async function decideAutoEngagement(
         !result.image &&
         (opts?.attachedImage === true || hasRecentImageTrace(messages)) &&
         !EDIT_QUESTION_RE.test(targetText) &&
-        EDIT_DIRECTIVE_RE.test(targetText)
+        (EDIT_DIRECTIVE_RE.test(targetText) || SOURCE_REFERENCE_RE.test(targetText))
       ) {
         console.log(
           '[auto-engage] edit continuation net → image=true, edit=true' +
@@ -1046,14 +1121,18 @@ export async function decideAutoEngagement(
       // Edit UPGRADE — the classifier engaged the image engine but missed the
       // iteration nuance ("génère une nouvelle version" → image=true,
       // edit=false): the directive + a visual already present upgrade the
-      // turn so the source image feeds the job.
+      // turn so the source image feeds the job. v0.14.9 — a SOURCE-VISUAL
+      // reference rides the same upgrade: the classifier reads « créer un
+      // logo de chrome à partir de mon logo » as a creation (image=true,
+      // edit=false) — the reference to the conversation's visual upgrades it
+      // to an image→image iteration instead of a source-less text→image.
       if (
         !result.video &&
         result.image &&
         !result.edit &&
         (opts?.attachedImage === true || hasRecentImageTrace(messages)) &&
         !EDIT_QUESTION_RE.test(targetText) &&
-        EDIT_DIRECTIVE_RE.test(targetText)
+        (EDIT_DIRECTIVE_RE.test(targetText) || SOURCE_REFERENCE_RE.test(targetText))
       ) {
         console.log('[auto-engage] edit upgrade → edit=true (iteration on a visual already present)');
         result.edit = true;
@@ -1142,6 +1221,8 @@ export const AUTO_NETS = {
   VIDEO_WORD_RE,
   EDIT_DIRECTIVE_RE,
   EDIT_QUESTION_RE,
+  SOURCE_REFERENCE_RE,
+  OWN_VISUAL_RE,
   RECENT_IMAGE_TRACE_RE,
   ANIMATE_FAST_RE,
   IDEA_REQUEST_RE,
@@ -1150,5 +1231,7 @@ export const AUTO_NETS = {
   stripSearchBoilerplate,
   hasRecentImageTrace,
   isEditIterationOn,
+  referencesSourceVisual,
+  referencesOwnVisual,
   deterministicMediaTurn,
 };

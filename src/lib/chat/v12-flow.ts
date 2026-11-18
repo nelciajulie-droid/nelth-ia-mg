@@ -2071,6 +2071,24 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
     // phrasing ("changer le vetement") used to text→image a garbage prompt —
     // the deterministic probe (forcedMediaTurn === 'edit') feeds the previous
     // visual here too.
+    //
+    // v0.14.9 — the previous visual is not necessarily an ASSISTANT
+    // generation. « creer comme logo de chrome apartir de mon logo » after an
+    // upload + a generated version was routed as a FRESH text→image creation
+    // and the raw directive hit the text endpoint with NO source image (the
+    // reported bug: misleading content-policy failure while the logo sat
+    // unused in the history). The source feed now walks the conversation for
+    // BOTH kinds of visuals:
+    //   • a first-person reference (« mon logo », « my photo ») prefers the
+    //     conversation's most recent USER upload — the visual the user calls
+    //     THEIRS is the one they attached, not the assistant's iteration;
+    //   • otherwise the most recent ASSISTANT generation still wins (the
+    //     iteration state);
+    //   • the user's latest upload is the universal fallback (an edit
+    //     directive in an upload-only conversation used to leave the job
+    //     source-less). User attachments carry type 'file' on the wire — every
+    //     reference with a url/id passes and resolveImageSources decides by
+    //     the STORED content type (a PDF stays out, a PNG joins).
     const toggleEditFollowup = form.features?.image_generation === true && forcedMediaTurn === 'edit';
     if (
       (autoImageEdit || toggleEditFollowup) &&
@@ -2087,21 +2105,35 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
           // generated image must be found even when the stored chain stops at
           // the last wired link.
           const candidates = previousVisualCandidates(map, userMessageId);
-          for (const m of candidates) {
-            const imageFiles = (Array.isArray(m?.files) ? m.files : []).filter(
-              (f: any) => f?.type === 'image' && (f?.url || f?.id)
-            );
-            if (m?.role === 'assistant' && imageFiles.length) {
+          const { referencesOwnVisual } = await import('@/lib/chat/auto-engage');
+          const ownUploadWanted = referencesOwnVisual(prompt);
+          const refsOf = (m: any) =>
+            (Array.isArray(m?.files) ? m.files : []).filter((f: any) => f && (f.url || f.id));
+          const resolveRole = async (role: 'user' | 'assistant'): Promise<boolean> => {
+            for (const m of candidates) {
+              if (m?.role !== role) continue;
+              const refs = refsOf(m);
+              if (!refs.length) continue;
+              // Assistant files are engine-produced ({type:'image'}) — keep
+              // the strict filter so a video/document card never slips in.
+              if (role === 'assistant' && !refs.some((f: any) => f?.type === 'image')) continue;
               const { resolveImageSources } = await import('@/lib/image-generation');
-              sourceImages = await resolveImageSources(imageFiles);
-              if (sourceImages.length) {
+              const sources = await resolveImageSources(refs);
+              if (sources.length) {
+                sourceImages = sources;
                 console.log(
-                  `[v12-flow] auto edit — image-to-image with the previous generated image (${imageFiles[0]?.name ?? 'unnamed'})`
+                  `[v12-flow] edit source — image-to-image with the previous ${
+                    role === 'user' ? 'uploaded image' : 'generated image'
+                  } (${refs[0]?.name ?? 'unnamed'})`
                 );
+                return true;
               }
-              break;
             }
-          }
+            return false;
+          };
+          if (ownUploadWanted) await resolveRole('user');
+          if (!sourceImages.length) await resolveRole('assistant');
+          if (!sourceImages.length) await resolveRole('user');
         }
       } catch {
         /* history unreadable → plain text→image */
