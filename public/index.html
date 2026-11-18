@@ -148,13 +148,19 @@
                      LLM automatiquement). isSupported() faux → comportement
                      natif conservé. Voir vocal-bridge.js + src/vocal-app/. -->
                 <script src="/static/vocal-bridge.js?v=20270114a2" defer></script>
-                <!-- custom.css v=20270106a6 — effet fondu streaming spec Streamdown :
-                     260ms ease-out par mot (fadeIn, opacité seule) sur .fade-in-token. -->
-                <link rel="stylesheet" href="/static/custom.css?v=20270106a6" crossorigin="use-credentials" />
+                <!-- custom.css v=20270106a7 — fondu streaming spec Streamdown +
+                     espaceur bas #messages-container pour le scroll auto d'envoi. -->
+                <link rel="stylesheet" href="/static/custom.css?v=20270106a7" crossorigin="use-credentials" />
                 <!-- Stagger du fondu streaming : délai progressif 24ms/mot sur
                      chaque lot inséré par le flux (mot 1 à 0ms, mot 2 à 24ms…),
                      reset par chunk, jamais de ré-animation des mots déjà visibles. -->
                 <script src="/static/stream-fade-bridge.js?v=20270106a1" defer></script>
+                <!-- Scroll auto ChatGPT : à l'envoi le nouveau message s'ancre EN
+                     HAUT de la vue (discussion précédente remonte au-dessus, smooth),
+                     puis la vue suit le bas de la réponse pendant le streaming
+                     (stoppe si l'utilisateur remonte manuellement). Ouverture
+                     d'une discussion = comportement d'origine (bas). -->
+                <script src="/static/autoscroll-bridge.js?v=20270106a1" defer></script>
 
                 <script>
                         function resizeIframe(obj) {

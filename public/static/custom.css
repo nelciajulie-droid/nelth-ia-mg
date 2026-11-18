@@ -481,3 +481,36 @@ html.dark [data-sonner-toaster][data-theme='dark'] {
                 animation: none;
         }
 }
+
+/* ── C12. Scroll auto à l'envoi — le nouveau message devient le PREMIER
+ * visible (comportement ChatGPT), la discussion précédente remonte au-dessus.
+ *
+ * Tout est géré par /static/autoscroll-bridge.js : à l'envoi, il pose un
+ * ESPACEUR (élément <li> à la fin de la liste des messages, hauteur =
+ * hauteur de la vue) — c'est lui qui rend le haut ATTEIGNABLE (sinon le
+ * scroll maximum colle le bas du contenu au bas de la vue et le message du
+ * bas ne peut JAMAIS monter en haut) — puis ancre le message en haut
+ * (smooth + corrections itératives). Pendant le streaming, l'espaceur
+ * absorbe la croissance de la réponse (aucun saut de vue) et dès qu'elle
+ * déborde la vue suit son bas — le texte le plus récent reste juste
+ * au-dessus du composeur. Ouverture d'une discussion : espaceur retiré,
+ * scroll vers le bas d'origine conservé.
+ *
+ * L'espaceur DOIT être un ÉLÉMENT du flux : un padding-bottom sur
+ * #messages-container casserait son enfant h-full (height:100% de la
+ * content-box réduite par le padding → 0) et effondrerait toute la
+ * géométrie (vérifié empiriquement).
+ *
+ * Le mode « rendu complet » ci-dessous sert à l'ancrage : la liste des
+ * messages peut être virtualisée (content-visibility:auto +
+ * contain-intrinsic-size 150px) — les rangées non rendues sont des
+ * ESTIMATIONS de hauteur, donc scrollHeight peut sous-estimer la position
+ * réelle d'un message et PLAFONNER le défilement (le navigateur borne
+ * scrollTop à scrollHeight - clientHeight, le message devient
+ * physiquement inatteignable). Quand les corrections de l'ancrage
+ * détectent ce blocage, le bridge pose html.nelth-fullrender : les rangées
+ * rendent toutes (géométrie réelle), l'ancre se pose, puis la classe est
+ * retirée (~1,2s) et la virtualisation reprend. */
+html.nelth-fullrender .message-virtualized {
+        content-visibility: visible !important;
+}
