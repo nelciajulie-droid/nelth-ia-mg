@@ -439,34 +439,41 @@ html.dark [data-sonner-toaster][data-theme='dark'] {
         --normal-text: #ececec;
 }
 
-/* ── C11. Effet fondu FLUIDE — mots du streaming en douceur ───────────────────
+/* ── C11. Effet fondu streaming — spec Streamdown (mot par mot) ────────────────
  * Le SPA compile déjà chaque mot diffusé dans un <span class="fade-in-token">
- * (« effet fondu » d'origine) — mais l'animation stock (0.1s ease-out, opacité
- * seule) fait « poper » les mots un à un : saccadé. On ne rajoute AUCUN
- * fondu par bloc (retiré) : on remplace simplement l'animation du token
- * existant par un fondu plus long et plus doux — opacité + léger flou,
- * courbe ease-out fluide — pour que la réponse s'écrive en onde continue,
- * comme ChatGPT.
+ * (paramètre utilisateur chatFadeStreamingText, actif par défaut ; ces spans
+ * n'existent QUE pendant le streaming — l'historique insère du texte brut,
+ * équivalent du garde isAnimating de Streamdown).
+ *
+ * On calque EXACTEMENT la config Streamdown référencée :
+ *   animation: 'fadeIn'  → sd-fadeIn = opacité seule 0 → 1 (pas de blur —
+ *                          les variantes blurIn/slideUp ne sont PAS choisies)
+ *   duration:  260ms      → fondu par mot
+ *   easing:    ease-out   → rapide au début, lent à la fin
+ *   fill-mode: both       → pendant le délai de stagger, le mot tient son
+ *                          état from (invisible) — cascade nette
+ *   stagger:   24ms/mot   → posé par /static/stream-fade-bridge.js (un
+ *                          MutationObserver met animation-delay progressif
+ *                          sur chaque LOT de mots insérés : mot 1 à 0ms,
+ *                          mot 2 à 24ms, mot 3 à 48ms… reset à chaque chunk).
  *
  * Spécificité : custom.css charge AVANT le CSS du bundle (ordre dans
  * index.html), donc une simple redéfinition perd. On gagne par spécificité :
  * .fade-in-token.fade-in-token (0,0,2,0) > .fade-in-token (0,0,1,0).
- * Keyframes sous un nom dédié — redéfinir `fade-in-token` ne servirait à
- * rien : le @keyframes du bundle, plus tard dans l'ordre du document,
- * écraserait le nôtre. */
-@keyframes nelth-token-fluid {
+ * Keyframes sous un nom dédié — le @keyframes du bundle, plus tard dans
+ * l'ordre du document, écraserait une redéfinition du même nom. */
+@keyframes nelth-word-fade {
         from {
                 opacity: 0;
-                filter: blur(2.5px);
         }
         to {
                 opacity: 1;
-                filter: blur(0);
         }
 }
 
 .fade-in-token.fade-in-token {
-        animation: nelth-token-fluid 0.35s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+        animation: nelth-word-fade 260ms ease-out both;
+        /* animation-delay (stagger) : inline, posé par stream-fade-bridge.js */
 }
 
 @media (prefers-reduced-motion: reduce) {
