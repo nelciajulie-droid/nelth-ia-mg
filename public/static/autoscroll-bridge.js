@@ -1,51 +1,32 @@
-/* ── autoscroll-bridge.js — scroll auto ChatGPT à l'envoi d'un message ────────
- * Demande : « quand l'utilisateur envoie un message, le dernier message
- * s'affiche directement comme PREMIER (en haut de la vue) et la discussion
- * précédente remonte au-dessus » — MAIS seulement à partir du DEUXIÈME
- * message utilisateur : le PREMIER message d'une discussion ne prend PAS
- * cet ancrage (il resterait seul tout en haut d'un écran vide) et garde
- * le comportement d'origine (en bas, la réponse streame dessous).
+/* ── autoscroll-bridge.js — scroll auto à l'envoi d'un message ────────────────
+ * ⛔ DÉSACTIVÉ depuis 0.14.12 (demande : « tous les messages placés comme
+ * le PREMIER message ») : chaque message garde sa place NATURELLE dans le
+ * flux — le bundle déroule déjà vers le bas à l'envoi et suit nativement le
+ * streaming (message au-dessus du composeur, réponse dessous).
  *
- * Le bundle scrolle déjà vers le bas à l'envoi (le nouveau message atterrit au
- * milieu de la vue). Ce pont implémente la mécanique EXACTE de ChatGPT :
+ * L'implémentation ChatGPT (ancrage en haut + espaceur + follow streaming)
+ * est CONSERVÉE ci-dessous pour un éventuel retour arrière :
+ *   1. remettre ENABLED = true juste en dessous ;
+ *   2. bumper la version ?v= du <script> dans index.html.
  *
- *   1. ENVOI à partir du 2ᵉ message (un seul nouveau message utilisateur
- *      ajouté à la fin, et au moins un message utilisateur précédent) →
- *      ESPACEUR (élément <li> à la fin de la liste, hauteur = la vue) puis
- *      smooth-scroll : le message s'ancre EN HAUT avec une marge (PAD_TOP),
- *      la discussion précédente remonte au-dessus, et l'espace libre
- *      dessous accueille la réponse.
- *      PREMIER message utilisateur d'une discussion → AUCUNE intervention :
- *      pas d'espaceur, pas d'ancrage — le bundle défile vers le bas comme
- *      à l'origine et suit nativement le streaming.
- *      (Sans espaceur, le scroll maximum colle le bas du contenu au bas de
- *      la vue : un message du bas ne peut JAMAIS atteindre le haut.)
- *      NB : l'espaceur doit être un ÉLÉMENT dans le flux — un padding sur
- *      #messages-container casserait son enfant h-full (height:100% de la
- *      content-box → 0) et effondrerait toute la géométrie.
- *   2. STREAMING → l'espaceur RÉTRÉCIT au fur et à mesure que la réponse
- *      grandit dessous (le total reste constant → aucun saut de vue) : la vue
- *      reste ancrée tant que la réponse tient à l'écran ; dès qu'elle
- *      déborde, la vue suit son BAS (le texte le plus récent reste visible
- *      juste au-dessus du composeur).
- *   3. Volonté humaine (molette/tactile vers le haut) → le follow s'arrête.
- *   4. Ouverture d'une discussion (plusieurs messages d'un coup) → espaceur
- *      retiré, comportement d'origine conservé (bas du contenu).
- *
- * La liste peut être virtualisée (content-visibility + contain-intrinsic-size
- * 150px) : les corrections itératives mesurent l'écart RÉEL et corrigent le
- * scrollTop du même delta ; si une estimation plafonne le défilement, on force
- * le rendu complet une fois (html.nelth-fullrender), on ré-ancre sur la
- * géométrie réelle, puis on relâche.
- *
- * Le follow du bundle (autoScroll = en-bas || (autoScroll && pas remonté))
- * se désactive de lui-même pendant notre glissement vers le haut — c'est
- * notre follow qui prend le relais, sans combat. */
+ * Historique de la demande initiale : « quand l'utilisateur envoie un
+ * message, le dernier message s'affiche directement comme PREMIER (en haut
+ * de la vue) et la discussion précédente remonte au-dessus » — puis le
+ * premier message en était exclu (place naturelle), et finalement l'utilisateur
+ * a préféré la place naturelle pour TOUS les messages. */
 (function () {
         'use strict';
 
         if (window.__nelthAutoscrollBridge) return; // idempotent
         window.__nelthAutoscrollBridge = true;
+
+        // ⛔ 0.14.12 — DÉSACTIVÉ (demande : « tous les messages placés comme le
+        // premier »). Aucun observateur n'est attaché, aucune intervention sur
+        // le scroll : le bundle garde son comportement natif pour chaque envoi
+        // (défilement vers le bas + suivi natif du streaming).
+        // Retour arrière : ENABLED = true + bumper ?v= dans index.html.
+        var ENABLED = false;
+        if (!ENABLED) return;
 
         var PAD_TOP = 32;          // respiration au-dessus du message ancré (px) —
                                    // « le message est trop haut » : ne pas le

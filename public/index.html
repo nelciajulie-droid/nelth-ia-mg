@@ -155,16 +155,13 @@
                      chaque lot inséré par le flux (mot 1 à 0ms, mot 2 à 24ms…),
                      reset par chunk, jamais de ré-animation des mots déjà visibles. -->
                 <script src="/static/stream-fade-bridge.js?v=20270106a1" defer></script>
-                <!-- Scroll auto ChatGPT : à l'envoi, à partir du 2ᵉ message
-                     utilisateur, le nouveau message s'ancre EN HAUT de la vue
-                     avec une marge (PAD_TOP 32px, pas collé au bord — « le
-                     message est trop haut »), la discussion précédente remonte
-                     au-dessus (smooth), puis la vue suit le bas de la réponse
-                     pendant le streaming (stoppe si l'utilisateur remonte
-                     manuellement). PREMIER message d'une discussion et ouverture
-                     d'une discussion = comportement d'origine (bas, réponse
-                     dessous, suivi natif du bundle). -->
-                <script src="/static/autoscroll-bridge.js?v=20261118a1" defer></script>
+                <!-- Scroll auto : ⛔ DÉSACTIVÉ (0.14.12, demande : « tous les
+                     messages placés comme le PREMIER »). Chaque message garde
+                     sa place NATURELLE dans le flux — défilement natif du
+                     bundle vers le bas à l'envoi + suivi natif du streaming.
+                     Le bridge reste chargé mais inerte (ENABLED = false) :
+                     retour arrière = ENABLED = true + bumper ?v=. -->
+                <script src="/static/autoscroll-bridge.js?v=20261118a2" defer></script>
 
                 <script>
                         function resizeIframe(obj) {

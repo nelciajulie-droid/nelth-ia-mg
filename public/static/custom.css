@@ -482,15 +482,17 @@ html.dark [data-sonner-toaster][data-theme='dark'] {
         }
 }
 
-/* ── C12. Scroll auto à l'envoi — à partir du 2ᵉ message utilisateur, le
- * nouveau message devient le PREMIER visible (comportement ChatGPT), la
- * discussion précédente remonte au-dessus. Le PREMIER message d'une
- * discussion ne prend PAS cet ancrage (comportement d'origine : en bas,
- * réponse dessous) — sinon il resterait seul tout en haut d'un écran vide.
+/* ── C12. Scroll auto à l'envoi — ⛔ DÉSACTIVÉ depuis 0.14.12 (demande :
+ * « tous les messages placés comme le PREMIER ») : chaque message garde sa
+ * place NATURELLE dans le flux, le bundle déroule nativement vers le bas à
+ * l'envoi et suit le streaming. L'implémentation ChatGPT (ancrage en haut +
+ * espaceur + follow) est conservée dans autoscroll-bridge.js derrière
+ * ENABLED = false pour un éventuel retour arrière (remettre true + bumper
+ * la version ?v= dans index.html). Historique complet dans le bridge.
  *
- * Tout est géré par /static/autoscroll-bridge.js : à l'envoi (2ᵉ message et
- * suivants), il pose un ESPACEUR (élément <li> à la fin de la liste des
- * messages, hauteur = hauteur de la vue) — c'est lui qui rend le haut
+ * Tout était géré par /static/autoscroll-bridge.js : à l'envoi (2ᵉ message et
+ * suivants), il posait un ESPACEUR (élément <li> à la fin de la liste des
+ * messages, hauteur = hauteur de la vue) — c'est lui qui rendait le haut
  * ATTEIGNABLE (sinon le scroll maximum colle le bas du contenu au bas de la
  * vue et le message du bas ne peut JAMAIS monter en haut) — puis ancre le
  * message en haut avec une marge PAD_TOP 32px (pas collé au bord
