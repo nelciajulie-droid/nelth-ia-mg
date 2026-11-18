@@ -438,3 +438,61 @@ html.dark [data-sonner-toaster][data-theme='dark'] {
         --normal-border: #424242;
         --normal-text: #ececec;
 }
+
+/* ── C11. Effet fondu — streamed responses appear softly ────────────────────
+ * Every newly INSERTED markdown block inside a chat response (paragraph,
+ * list item, table row, heading, quote, code block…) fades in with a short
+ * opacity/blur/translate reveal instead of popping in, so a streaming
+ * answer builds up smoothly ("la réponse s'affiche en douceur").
+ *
+ * Why this is safe for non-streaming renders:
+ *   • blocks already rendered keep their DOM node (Svelte keyed each-block
+ *     items), so only blocks appearing NOW ever animate — text growing
+ *     inside an existing block does not re-animate;
+ *   • the virtualized long-chat optimization uses content-visibility:auto
+ *     (.message-virtualized), which skips PAINTING off-screen content but
+ *     never unmounts the elements — scrolling an old chat re-reveals blocks
+ *     at their final state, with NO re-animation;
+ *   • opening a chat mounts the whole conversation at once → one soft
+ *     0.38s fade-in of the history (consistent with the streamed feel).
+ * Table rows use the no-translate variant (transforms on <tr> are
+ * unreliable across engines). */
+@keyframes nelth-stream-fade-in {
+        from {
+                opacity: 0;
+                transform: translateY(4px);
+                filter: blur(2px);
+        }
+        to {
+                opacity: 1;
+                transform: none;
+                filter: blur(0);
+        }
+}
+
+@keyframes nelth-stream-fade-in-row {
+        from {
+                opacity: 0;
+        }
+        to {
+                opacity: 1;
+        }
+}
+
+/* Assistant/user response content blocks — .markdown-prose is the message
+   content container the compiled frontend renders (slot="content"); its
+   direct children are the streamed markdown blocks. */
+.message-listitem .markdown-prose > * {
+        animation: nelth-stream-fade-in 0.38s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.message-listitem .markdown-prose tbody tr {
+        animation: nelth-stream-fade-in-row 0.38s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+        .message-listitem .markdown-prose > *,
+        .message-listitem .markdown-prose tbody tr {
+                animation: none;
+        }
+}

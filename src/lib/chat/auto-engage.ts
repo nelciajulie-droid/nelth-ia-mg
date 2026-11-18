@@ -182,6 +182,75 @@ const VIDEO_WORD_RE = new RegExp(
 const GIF_REQUEST_RE = /\b(?:gifs?|jifs?)\b/i;
 
 // ---------------------------------------------------------------------------
+// Accent-aware boundaries. JS regex \b only sees [A-Za-z0-9_] — every
+// accented char (é è à â…) is a NON-word char, which cut both ways in
+// production:
+//  • a verb stem ending in an accent ("cré") forms a \b with ANY letter that
+//    follows — "créatives", "crédit", "création" all matched as the creation
+//    verb: « Quelles sont 5 idées CRÉATIVES pour utiliser les DESSINS de mes
+//    enfants ? » engaged the IMAGE engine although the user asked for a TEXT
+//    list of ideas;
+//  • "quel(?:le|s)?\b" could never match "Quelles" (quel+le then \b fails
+//    on the trailing "s"), so the question guard missed the exact phrasing;
+//  • edit-verb stems "chang\w+"/"modifi\w+" never matched their accented
+//    endings ("changé", "modifié"), silently killing those edit turns.
+// The nets below use these lookarounds as verb boundaries instead of \b.
+// ---------------------------------------------------------------------------
+
+const ACC_LETTERS = 'a-zA-Z0-9_à-öø-ÿÀ-ÖØ-ÞœŒŸ';
+const NOT_LETTER = `(?![${ACC_LETTERS}])`;
+const NOT_LETTER_BEFORE = `(?<![${ACC_LETTERS}])`;
+const W_ACC = `[${ACC_LETTERS}]`;
+
+// ---------------------------------------------------------------------------
+// IDEAS/ADVICE questions — NEVER a media turn. The reproduced production
+// bug: "Quelles sont 5 idées créatives pour utiliser les dessins de mes
+// enfants ?" (plus every sibling phrasing — "donne-moi des idées de photos",
+// "que faire avec mes vieilles photos ?", "des conseils pour mes logos")
+// carries a MEDIA NOUN, so the nets (and a noun-primed classifier) routed the
+// turn to the IMAGE engine — but the user asked for a TEXT ANSWER: a list of
+// ideas/suggestions, exactly what ChatGPT answers inline. The veto below
+// strips the media flags unless an EXPLICIT creation command rides along
+// ("dessine-moi 5 idées de logos" — the draw verb wins, the engines deliver).
+// ---------------------------------------------------------------------------
+
+/** Idea/advice/brainstorm request phrasings (fr + en). */
+const IDEA_REQUEST_RE = new RegExp(
+  [
+    // counted ideas/answers ("5 idées", "trois suggestions", "10 conseils")
+    '\\b\\d+\\s+(?:id[ée]es?|suggestions?|conseils?|astuces?|propositions?|exemples?|fa[çc]ons?|mani[èe]res?|exercices?|activit[ée]s?|idées?)\\b',
+    // ideas/suggestions/advice + de/pour/sur/with context
+    "\\b(?:id[ée]es?|id[ée]e\\b|suggestions?|conseils?|astuces?|propositions?|recommandations?|inspirations?|pistes?)\\b[^\\n]{0,30}?\\b(?:de|du|des?|d['’]|pour|sur|about|for|with|avec|avec\\s+mes|de\\s+mes|de\\s+mon|de\\s+ma)\\b",
+    // what-to-do-with openings ("que faire de/avec mes vieux dessins")
+    "\\b(?:que|quoi)\\s+faire\\b[^\\n]{0,20}?\\b(?:de|du|des?|d['’]|avec|de\\s+mes|de\\s+mon)\\b",
+    '\\bwhat\\s+(?:can\\s+i|to|should\\s+i)\\s+do\\b[^\\n]{0,30}?\\b(?:with|with\\s+my|of)\\b',
+    // imperative brainstorm/proposals ("propose-moi des idées")
+    '\\b(?:propose(?:s|-moi)?|sugg[èe]re(?:s|-moi)?|conseille(?:s|-moi)?|brainstorm(?:e|er|ez)?)\\b[^\\n]{0,40}?\\b(?:id[ée]es?|suggestions?|conseils?|pistes?)\\b',
+    // bare determiner + ideas family ("des idées", "une idée", "quelques conseils")
+    '\\b(?:des?|une?|quelques|plusieurs|trois|quatre|cinq|six|sept|huit|neuf|dix)\\s+(?:id[ée]es?|suggestions?|conseils?|astuces?|propositions?|recommandations?|inspirations?)\\b',
+    '\\bsome\\s+(?:ideas?|suggestions?|tips?)\\b|\\b(?:ideas?|tips?|suggestions?)\\s+for\\b',
+  ].join('|'),
+  'i'
+);
+
+/** Explicit creation command — the ONLY phrasings that may still engage a
+ *  media engine on a message that also carries an ideas/advice request
+ *  ("dessine-moi 5 idées de logos", "génère une image pour illustrer ces
+ *  idées"). Accent-safe on both edges: "créatives"/"crédit"/"création" can
+ *  never match (a letter follows the stem), "créé"/"créer"/"cre" do. */
+const CREATE_COMMAND_RE = new RegExp(
+  [
+    `\\b(?:dessin(?:e|es|er|ez|ent)|desin(?:e|es|er|ez)|draw|draws|drew|drawing|paint|paints|painted|painting|peign${W_ACC}*)${NOT_LETTER}`,
+    `\\bg[ée]n[èe]r(?![aà])${W_ACC}*${NOT_LETTER}`,
+    '\\b(?:generate|generating|generated)\b',
+    `\\bcr[ée]{1,2}(?:e|er|ez|ent|ons)${W_ACC}*${NOT_LETTER}`,
+    `\\bcre(?:e[rz]?)?${NOT_LETTER}`,
+    '\\bsketch(?:e|es|er)?\b',
+  ].join('|'),
+  'i'
+);
+
+// ---------------------------------------------------------------------------
 // Deterministic ENGAGEMENT nets (image & video) — the production backstop.
 // The classifier call fails open whenever the free gateway queues past the
 // 6.5s budget or emits an unparsable answer; until now ONLY the search and
@@ -203,7 +272,7 @@ const IMAGE_ENGAGE_RE = new RegExp(
     // "fais-moi un logo", "génère une image de…", "je voudrais une photo
     // de…", "create a poster of…"). "cré" carries an OPTIONAL suffix so the
     // phonetic typo "cre une image" routes like "crée une image".
-    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)?|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|montre(?:-moi)?|show|donn(?:e|es|ez|-moi)?|veux|voudrais|aimerais|d[eé]sir(?:e|erait)?)\\b[^\\n]{0,40}?\\b(?:images?|photos?|photographie?s?|dessins?|illustrations?|logos?|ic[ôo]nes?|avatars?|affiches?|posters?|banni[èe]res?|fonds?\\s+d[’\']?[ée]cran|wallpapers?|visuels?|rendus?|renders?|mockups?|maquettes?|concept\\s+arts?|miniatures?|thumbnails?)\\b',
+    `\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)?|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|montre(?:-moi)?|show|donn(?:e|es|ez|-moi)?|veux|voudrais|aimerais|d[eé]sir(?:e|erait)?)${NOT_LETTER}[^\\n]{0,40}?\\b(?:images?|photos?|photographie?s?|dessins?|illustrations?|logos?|ic[ôo]nes?|avatars?|affiches?|posters?|banni[èe]res?|fonds?\\s+d[’\']?[ée]cran|wallpapers?|visuels?|rendus?|renders?|mockups?|maquettes?|concept\\s+arts?|miniatures?|thumbnails?)\\b`,
     // inherently-visual hypotheticals — "montre-moi à quoi ressemble un
     // blobfish", "imagine à quoi ressemblerait une ville flottante"; the
     // bare conditional "à quoi ressemblerait X ?" is a visual-render request.
@@ -222,7 +291,7 @@ const VIDEO_ENGAGE_RE = new RegExp(
     // creation/want verb + explicit moving-media noun ("crée une vidéo",
     // "fais un clip", "je voudrais un court-métrage", "generate an
     // animation", "une bande-annonce de…"). Same optional-suffix "cré".
-    '\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)?|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|produis(?:-moi)?|produce|producing|donn(?:e|es|ez|-moi)?|veux|voudrais|aimerais|d[eé]sir(?:e|erait)?)\\b[^\\n]{0,40}?\\b(?:vid[ée]os?|clips?|animations?|court[ -]?m[ée]trages?|reels?|stories?|tiktoks?|shorts?|film(?:s|ettes?)?|trailer?s?|bandes?[ -]?annonces?|gifs?)\\b',
+    `\\b(?:g[ée]n[èe]r(?:e|er|ez)|cr[ée]{1,2}(?:e|er|ez|-moi)?|fais(?:-moi|-en|-le|-la|-un|-une)?|faire|make|making|create|creating|generate|generating|produis(?:-moi)?|produce|producing|donn(?:e|es|ez|-moi)?|veux|voudrais|aimerais|d[eé]sir(?:e|erait)?)${NOT_LETTER}[^\\n]{0,40}?\\b(?:vid[ée]os?|clips?|animations?|court[ -]?m[ée]trages?|reels?|stories?|tiktoks?|shorts?|film(?:s|ettes?)?|trailer?s?|bandes?[ -]?annonces?|gifs?)\\b`,
     // explicit animate-an-existing-visual phrasings ("anime cette image",
     // "fais bouger cette photo", "animate this image") — BOTH word orders:
     // "fais ça bouger" and the reversed "fais bouger ça" are correct French.
@@ -278,15 +347,17 @@ const ANIMATE_FAST_RE = new RegExp(
  */
 const EDIT_QUESTION_RE = new RegExp(
   [
-    '^\\s*(?:comment|how\\s+to|how\\s+do|how\\s+can|pourquoi|why|o[uù]|where|qui|who|quoi|what|quel(?:le|s)?|which|combien|c\\s*[\'’]?est\\s+comment)\\b',
+    '^\\s*(?:comment|how\\s+to|how\\s+do|how\\s+can|pourquoi|why|o[uù]|where|qui|who|quoi|what|quel(?:le|s|les)?|which|combien|c\\s*[\'’]?est\\s+comment)\\b',
     '\\b(?:comment|how\\s+to|how\\s+do|how\\s+can|explique(?:r|z|moi)?|apprends?|enseigne|tuto(?:riel)?s?|astuce|instructions?)\\b',
   ].join('|'),
   'i'
 );
 
-/** Edit verbs (fr + en, misspellings tolerated via stems). */
+/** Edit verbs (fr + en, misspellings tolerated via stems; the W_ACC stems
+ *  keep the accented endings "changé"/"modifié"/"transformé" INSIDE the stem
+ *  — plain \\w+ never matched them, silently killing those edit turns). */
 const EDIT_VERB =
-  '(?:chang\\w+|modifi\\w+|[ée]dit\\w+|retouch\\w+|enl[èe]v\\w+|retir\\w+|ajout\\w+|rajout\\w+|mets?|mettre|mettons|fais|fait|refais|refait|refaire|rends?|rendre|transform\\w+|convertis|convertissez|convertir|passe|passes|passer|arrang\\w+|rectifi\\w+|corrige\\w*|am[ée]lior\\w+|actualis\\w+|rafr[ai]ch\\w+|r[ée]g[ée]n[èe]r\\w+|modify|modif\\w+|edit\\w+|remov\\w+|delet\\w+|add\\w*|put|putting|make|making|turn|turning|swap\\w*|replac\\w+|redo\\w*|fix\\w*|updat\\w+|adjust\\w+|alter\\w+)';
+  `(?:chang${W_ACC}+|modifi${W_ACC}+|[ée]dit${W_ACC}+|retouch${W_ACC}+|enl[èe]v${W_ACC}+|retir${W_ACC}+|ajout${W_ACC}+|rajout${W_ACC}+|mets?|mettre|mettons|fais|fait|refais|refait|refaire|rends?|rendre|transform${W_ACC}+|convertis|convertissez|convertir|passe|passes|passer|arrang${W_ACC}+|rectifi${W_ACC}+|corrige${W_ACC}*|am[ée]lior${W_ACC}+|actualis${W_ACC}+|rafr[ai]ch${W_ACC}+|r[ée]g[ée]n[èe]r${W_ACC}+|modify|modif${W_ACC}+|edit${W_ACC}+|remov${W_ACC}+|delet${W_ACC}+|add${W_ACC}*|put|putting|make|making|turn|turning|swap${W_ACC}*|replac${W_ACC}+|redo${W_ACC}*|fix${W_ACC}*|updat${W_ACC}+|adjust${W_ACC}+|alter${W_ACC}+)`;
 
 /** Visual-attribute nouns the directive may target (fr + en). */
 const EDIT_ATTRIBUTE =
@@ -313,9 +384,9 @@ const EDIT_DIRECTIVE_RE = new RegExp(
   [
     // 1) verb + bare pronoun, pronoun followed by a complement, a trailing
     //    politeness token, or the end of message
-    `\\b${EDIT_VERB}\\b(?:\\s*-\\s*|\\s+)(?:moi\\s+|nous\\s+)?(?:le|la|les|l['’]|[çc]a|ca|ceci|cela|en|it|this|that|them)\\b(?:\\s+(?:en|in|into|plus|moins|aussi|plutôt|maintenant|tr[èe]s|trop|un\\s+peu|beaucoup|more|less|bigger|smaller|taller|shorter|darker|brighter|younger|older|again)\\b|\\s+(?:stp|svp|please|merci|pla[îi]t)\\b\\s*[.!?,;…]*\\s*$|\\s*[.!?,;…]*\\s*$)`,
+    `${NOT_LETTER_BEFORE}(?:${EDIT_VERB})${NOT_LETTER}(?:\\s*-\\s*|\\s+)(?:moi\\s+|nous\\s+)?(?:le|la|les|l['’]|[çc]a|ca|ceci|cela|en|it|this|that|them)\\b(?:\\s+(?:en|in|into|plus|moins|aussi|plutôt|maintenant|tr[èe]s|trop|un\\s+peu|beaucoup|more|less|bigger|smaller|taller|shorter|darker|brighter|younger|older|again)\\b|\\s+(?:stp|svp|please|merci|pla[îi]t)\\b\\s*[.!?,;…]*\\s*$|\\s*[.!?,;…]*\\s*$)`,
     // 2) verb + visual-attribute noun within 40 chars
-    `\\b${EDIT_VERB}\\b[^\\n]{0,40}?\\b${EDIT_ATTRIBUTE}\\b`,
+    `${NOT_LETTER_BEFORE}(?:${EDIT_VERB})${NOT_LETTER}[^\\n]{0,40}?\\b${EDIT_ATTRIBUTE}\\b`,
     // 3) reiteration idioms
     '\\b(?:une?\\s+autre\\s+(?:version|variante|d[ée]clinaison|interpr[ée]tation)|autres?\\s+(?:versions?|variantes?)|nouvelles?\\s+(?:versions?|variantes?)|(?:encore|again)\\s+une?\\s+fois|m[êe]me\\s+(?:chose|image|photo)\\s+mais|same\\s+(?:but|thing)\\b[^\\n]{0,30}\\bbut\\b|another\\s+(?:version|one|take|variant|pass))\\b',
     // 4) make/turn + it/this/that + complement word
@@ -324,7 +395,7 @@ const EDIT_DIRECTIVE_RE = new RegExp(
     `\\b(?:passe|passes|passer|mets?|mettre|convertis|convertissez|convertir|transform\\w+|fais|fait|chang\\w+|modifi\\w+)\\b[^\\n]{0,30}?\\ben\\s+(?:noir\\s+et\\s+blanc|n[ée]gatif|sepias?|vertical\\w*|horizontal\\w*|carr[ée]?|format\\s+\\w+|(?:16|9|1)\\s*:\\s*(?:9|16|1))\\b`,
     // 6) edit verb + dans/sur + image/photo (add/remove INSIDE the visual) —
     //    "l image" (fast-typing, missing apostrophe) tolerated
-    `\\b${EDIT_VERB}\\b[^\\n]{0,50}?(?:dans|sur|à)\\s+(?:l['’  ]|la|le|ce|cette|the|this)\\s?(?:images?|photos?|visuels?|dessins?)\\b`,
+    `${NOT_LETTER_BEFORE}(?:${EDIT_VERB})${NOT_LETTER}[^\\n]{0,50}?(?:dans|sur|à)\\s+(?:l['’  ]|la|le|ce|cette|the|this)\\s?(?:images?|photos?|visuels?|dessins?)\\b`,
   ].join('|'),
   'i'
 );
@@ -409,7 +480,12 @@ export function deterministicMediaTurn(
   const searchCommand = SEARCH_COMMAND_RE.test(targetText);
   // HOW-TO/EXPLANATION phrasings never take the deterministic media path
   // ("explique comment dessiner un chien") — the classifier keeps the turn.
-  if (svg || codeGuard || searchCommand || EDIT_QUESTION_RE.test(targetText)) return null;
+  // IDEAS/ADVICE questions neither: "Quelles sont 5 idées créatives pour
+  // utiliser les dessins de mes enfants ?" is a TEXT-list request, never a
+  // generated visual — unless an explicit creation command rides along
+  // ("dessine-moi 5 idées de logos").
+  const ideaQuestion = IDEA_REQUEST_RE.test(targetText) && !CREATE_COMMAND_RE.test(targetText);
+  if (svg || codeGuard || searchCommand || ideaQuestion || EDIT_QUESTION_RE.test(targetText)) return null;
 
   const attachedImage = opts?.attachedImage === true;
   const recentVisual = attachedImage || hasRecentImageTrace(messages);
@@ -585,10 +661,11 @@ animate=true ONLY when video=true AND it animates an image ALREADY PRESENT (atta
 aspectRatio — when video=true AND animate=false, pick the ratio giving the BEST result for THIS video, exactly one of "16:9" (landscape, cinematic, wide scenes, vehicles, city, several elements), "9:16" (vertical, phone-screen, reel/story/TikTok content, standing/dancing person), "1:1" (square, single centered subject, product on plain background, logo-like loop). An EXPLICIT user format keyword ALWAYS wins: vertical/portrait/story/reel/TikTok/short → "9:16"; carré/square → "1:1"; horizontal/paysage/landscape → "16:9". When video=false or animate=true, set "16:9" (ignored anyway).
 
 IMAGE — image=true ONLY when video=false AND the user clearly wants a STATIC visual produced: a drawing, painting, illustration, picture/photo-style render, logo, icon, avatar, wallpaper/background image, banner, poster, thumbnail, meme, sticker, 3D render, concept art, character design. Typical phrasings: "dessine-moi…", "génère/crée une image de…", "fais-moi un logo…", "je voudrais une photo de…", "montre-moi … en image", "draw me…", "show me what … would look like". ALSO image=true for "imagine + a CONCRETE VISUAL THING" ("imagine un dragon", "imagine une ville flottante", "à quoi ressemblerait un lion en costume") — but "imagine une histoire / un poème / un récit / un scénario / une chanson" is CREATIVE WRITING → all false. ALSO image=true for ITERATION on an image the assistant previously generated ("fais-le en bleu", "même chose mais de nuit", "une autre version", "enlève le chapeau") — in that case ALSO set edit=true. edit=true ONLY when image=true AND it modifies or reiterates a visual ALREADY PRESENT; edit=false for every fresh creation.
+IDEAS/ADVICE ARE NEVER MEDIA: image=false when the user asks for IDEAS, SUGGESTIONS, ADVICE, TIPS or a LIST about a topic — even when the topic word is itself a media noun (dessins, photos, images, logo, affiche): "Quelles sont 5 idées créatives pour utiliser les dessins de mes enfants ?", "donne-moi des idées de photos à prendre", "que faire avec mes vieilles photos ?", "des conseils pour réussir mes logos", "what can I do with my kids' drawings ?" — the user wants a TEXT ANSWER (a list the assistant writes), NOT a generated visual. The idea/advice intent OVERRIDES the want-verb + media-noun reading. The engine engages ONLY on an explicit CREATE command ("dessine-moi…", "génère/crée une image de…", "fais-moi un logo", "draw me…") — "dessine-moi 5 idées de logos" IS a create command (image=true).
 
 CODE / SVG IS NEVER MEDIA — image=false AND video=false when the user asks for a WEB or SOFTWARE artifact: landing page, website, web page, site vitrine, app, application, dashboard, portfolio, blog, online store, game, API, script, HTML/CSS/JS/React/Python code — even with style adjectives like "ultra moderne" (those describe CODE quality). Also false for ANY SVG or vector-graphics request ("crée un SVG d'un chien", "dessine-moi le SVG", "convertis cette image en SVG"): an SVG is XML markup the assistant writes in its answer — this rule OVERRIDES any draw verb. EXCEPTION — explicit draw verbs win over code nouns for RASTER output: "dessine une maquette de landing page", "montre-moi un visuel du site" → image=true (the user wants a visual render). The exception NEVER covers SVG.
 
-SEARCH — search=true ONLY when image=false AND video=false AND the answer depends on facts that change or the assistant cannot reliably know: CURRENT HOLDERS of a role/title ("qui est le président", "le PDG de Tesla", "le champion en titre" — time-sensitive EVEN WITHOUT "actuellement"); RANKINGS/SUPERLATIVES ("l'homme le plus puissant", "la star la plus célèbre", "l'entreprise la plus riche"); current situation of real people/stars/companies/teams; news & current events; WEATHER anywhere ("quel temps à Douala", "il va pleuvoir demain"); MATCH RESULTS & SCORES ("qui a gagné le match", "le score de la finale", "who won yesterday"); PRICES & MONEY ("combien coûte l'iPhone 15", "le prix de l'essence", "1 euro en fcfa", "taux de change", "how much is it"); RELEASES ("quand sort le prochain album de X", "date de sortie du film", "le dernier épisode de la série"); LIFE/RELATIONSHIP STATUS of real people ("est-ce que X est mort", "est-il toujours en vie", "what happened to X"); volatile data (schedules, recent releases); obscure facts. ALWAYS search=true — whatever the topic, even a STABLE one — when the user EXPLICITLY commands a search: "recherche (au/sur le) web", "cherche X", "cherche sur internet", "google X", "googler", "fais une recherche sur X", "faites des recherches", "vérifie en ligne", "search the web", "look it up", "find information about X". The user literally asking for a search can never be answered from memory — an explicit search command is the highest-confidence search signal that exists. search=false for greetings, small talk, math/logic, coding help, creative writing, translation, STABLE knowledge (history, science, definitions, "quelle est la capitale du Cameroun"), how-to questions, or when the answer is ALREADY present in the conversation history. query: an optimized keyword search query (max ~10 words) in the LANGUAGE of the user's message, CORRECTLY spelled (silently fix their mistakes), essential keywords only, no full sentence — and WITHOUT the command boilerplate ("recherche au web billy" queries "billy", not the command sentence). Empty string when search=false.
+SEARCH — search=true ONLY when image=false AND video=false AND the answer depends on facts that change or the assistant cannot reliably know: CURRENT HOLDERS of a role/title ("qui est le président", "le PDG de Tesla", "le champion en titre" — time-sensitive EVEN WITHOUT "actuellement"); RANKINGS/SUPERLATIVES ("l'homme le plus puissant", "la star la plus célèbre", "l'entreprise la plus riche"); current situation of real people/stars/companies/teams; news & current events; WEATHER anywhere ("quel temps à Douala", "il va pleuvoir demain"); MATCH RESULTS & SCORES ("qui a gagné le match", "le score de la finale", "who won yesterday"); PRICES & MONEY ("combien coûte l'iPhone 15", "le prix de l'essence", "1 euro en fcfa", "taux de change", "how much is it"); RELEASES ("quand sort le prochain album de X", "date de sortie du film", "le dernier épisode de la série"); LIFE/RELATIONSHIP STATUS of real people ("est-ce que X est mort", "est-il toujours en vie", "what happened to X"); volatile data (schedules, recent releases); obscure facts. ALWAYS search=true — whatever the topic, even a STABLE one — when the user EXPLICITLY commands a search: "recherche (au/sur le) web", "cherche X", "cherche sur internet", "google X", "googler", "fais une recherche sur X", "faites des recherches", "vérifie en ligne", "search the web", "look it up", "find information about X". The user literally asking for a search can never be answered from memory — an explicit search command is the highest-confidence search signal that exists. search=false for greetings, small talk, math/logic, coding help, creative writing, PURE BRAINSTORMING ("5 idées pour…", "que faire avec…", "des suggestions de…" — the model's own creativity answers those), translation, STABLE knowledge (history, science, definitions, "quelle est la capitale du Cameroun"), how-to questions, or when the answer is ALREADY present in the conversation history. query: an optimized keyword search query (max ~10 words) in the LANGUAGE of the user's message, CORRECTLY spelled (silently fix their mistakes), essential keywords only, no full sentence — and WITHOUT the command boilerplate ("recherche au web billy" queries "billy", not the command sentence). Empty string when search=false.
 
 PRIORITY — exactly ONE engine per turn: video outranks image (a GIF/clip/animation request is video, NEVER image), image outranks search, and a media turn never searches (search=false when image or video is true). When genuinely uncertain, prefer everything false: wrongly generating media or a search interrupts a normal conversation far more than missing one does. Only choose true when you are CONFIDENT.
 
@@ -602,6 +679,9 @@ EXAMPLES — study the boundaries, then decide the LATEST message on its own:
 "1 euro en fcfa ?" → search=true, query "taux de change euro fcfa"
 "quelle est la capitale du Cameroun ?" → search=false (stable knowledge)
 "comment faire un gâteau ?" → search=false (how-to, stable)
+"Quelles sont 5 idées créatives pour utiliser les dessins de mes enfants ?" → all false (IDEAS question — a TEXT list, NEVER the image engine, even though "dessins" is a media noun)
+"que faire avec mes vieilles photos ?" → all false (advice question, not a creation)
+"donne-moi des conseils pour réussir mes photos" → all false
 "dessine-moi un chat astronaute" → image=true, edit=false
 "imagine un dragon cracheur de feu" → image=true (concrete visual thing)
 "imagine une histoire de dragon" → all false (creative writing)
@@ -751,6 +831,12 @@ export async function decideAutoEngagement(
     // the user wants INSTRUCTIONS, not a produced artifact — the classifier
     // keeps the turn and answers image=false on the question.
     const questionPhrasing = EDIT_QUESTION_RE.test(targetText);
+    // IDEAS/ADVICE questions never take the deterministic media path either
+    // ("Quelles sont 5 idées créatives pour utiliser les dessins de mes
+    // enfants ?" — the reproduced hijack: the topic noun is a media word but
+    // the user wants a TEXT list) unless an explicit creation command rides
+    // along ("dessine-moi 5 idées de logos").
+    const ideaQuestion = IDEA_REQUEST_RE.test(targetText) && !CREATE_COMMAND_RE.test(targetText);
     // EDIT CONTINUATION net — an explicit edit directive on a visual already
     // present (previous generated image, or an image attached this turn).
     // Runs BEFORE the fresh-creation image net (an iteration with the
@@ -772,6 +858,7 @@ export async function decideAutoEngagement(
       !codeGuard &&
       !searchCommand &&
       !questionPhrasing &&
+      !ideaQuestion &&
       (videoNet || gifNet || imageNet || editNet)
     ) {
       const fast: AutoEngagementDecision = { ...NO_ENGAGEMENT };
@@ -979,6 +1066,24 @@ export async function decideAutoEngagement(
         result.video = false;
         result.animate = false;
       }
+      // ---- IDEAS/ADVICE veto — the LAST word over every net above AND over
+      // ---- a noun-primed classifier: "Quelles sont 5 idées créatives pour
+      // ---- utiliser les dessins de mes enfants ?" engaged the IMAGE engine
+      // ---- because the topic noun is a media word, but the user asked for a
+      // ---- TEXT answer (a list of ideas — exactly what a ChatGPT-style
+      // ---- answer renders inline). Only an explicit creation command
+      // ---- ("dessine-moi 5 idées de logos") keeps the engines engaged.
+      if (
+        IDEA_REQUEST_RE.test(targetText) &&
+        !CREATE_COMMAND_RE.test(targetText) &&
+        (result.image || result.video || result.edit)
+      ) {
+        console.log('[auto-engage] ideas/advice question → media vetoed (text answer wanted)');
+        result.image = false;
+        result.edit = false;
+        result.video = false;
+        result.animate = false;
+      }
     }
   }
 
@@ -1039,6 +1144,8 @@ export const AUTO_NETS = {
   EDIT_QUESTION_RE,
   RECENT_IMAGE_TRACE_RE,
   ANIMATE_FAST_RE,
+  IDEA_REQUEST_RE,
+  CREATE_COMMAND_RE,
   forcedSearchMatch,
   stripSearchBoilerplate,
   hasRecentImageTrace,

@@ -1669,7 +1669,7 @@ ANSWER STYLE (mandatory): Write the FINAL ANSWER only, in the SAME LANGUAGE as t
         [
           '\\?', // any question
           // interrogatives / factual intent (fr + en)
-          '\\b(qui|quoi|quel(?:le|s)?|quand|o[uù]|comment|pourquoi|combien|who|what|when|where|why|how|which)\\b',
+          '\\b(qui|quoi|quels?|quelles?|quand|o[uù]|comment|pourquoi|combien|who|what|when|where|why|how|which)\\b',
           // volatile-fact vocabulary → potential web search
           'actu(?:alit[eé]|s)?\\b|\\bnews?\\b|\\bactu\\b|aujourd|now|current|latest|derni[eè]re|recent|prix|price|m[eé]t[eé]o|weather|score|r[eé]sultat|cours|rate|pr[eé]sident|ministre|champion|pdg|ceo|sorti(?:e|s)?|released?',
           // generation vocabulary → potential image/video engagement
