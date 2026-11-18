@@ -122,26 +122,14 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
 // Code block
 // ---------------------------------------------------------------------------
 
-/** Live fade class for a newly streamed block. React's KEYED
- *  reconciliation keeps already-rendered blocks in the DOM across deltas,
- *  so the CSS animation only ever runs for elements appearing NOW — blocks
- *  that merely grow (text appended inside an existing <p>/<li>) stay put
- *  under the streaming cursor, and history re-renders (fadeIn=false) never
- *  animate. This is the "effet fondu" on the streamed reply. */
-function fadeCls(fade: boolean): string | undefined {
-  return fade ? "nelth-stream-fade" : undefined;
-}
-
 function CodeBlock({
   language,
   code,
   caret = false,
-  fade = false,
 }: {
   language: string;
   code: string;
   caret?: boolean;
-  fade?: boolean;
 }) {
   const [copied, setCopied] = React.useState(false);
 
@@ -156,7 +144,7 @@ function CodeBlock({
   };
 
   return (
-    <div className={cn("my-2 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-950 shadow-sm", fadeCls(fade))}>
+    <div className={cn("my-2 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-950 shadow-sm")}>
       <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
         <span className="font-mono text-[11px] uppercase tracking-wide text-zinc-400">
           {language || "code"}
@@ -404,8 +392,7 @@ const NESTED_BULLET_STYLES = ["disc", "circle", "square", "disc"];
 function renderList(
   block: Extract<Block, { kind: "list" }>,
   key: string,
-  caret: boolean,
-  fade = false
+  caret: boolean
 ): React.ReactNode {
   const lastItemIndex = block.items.length - 1;
   return (
@@ -416,7 +403,7 @@ function renderList(
         return (
           <li
             key={`${key}-li${index}`}
-            className={cn("flex items-start gap-2 leading-relaxed", fadeCls(fade))}
+            className="flex items-start gap-2 leading-relaxed"
             style={{ paddingLeft: `${item.depth * 1.15}rem` }}
           >
             {bullet ? (
@@ -470,8 +457,7 @@ function renderList(
 function renderTable(
   block: Extract<Block, { kind: "table" }>,
   key: string,
-  caret: boolean,
-  fade = false
+  caret: boolean
 ): React.ReactNode {
   const lastRowIndex = block.rows.length - 1;
   const cellAlign = (col: number): React.CSSProperties =>
@@ -497,10 +483,7 @@ function renderTable(
             {block.rows.map((row, rowIndex) => (
               <tr
                 key={`${key}-tr${rowIndex}`}
-                className={cn(
-                  "border-b border-zinc-100 last:border-b-0 odd:bg-white even:bg-zinc-50/60",
-                  fade && "nelth-stream-fade-row"
-                )}
+                className="border-b border-zinc-100 last:border-b-0 odd:bg-white even:bg-zinc-50/60"
               >
                 {row.map((cell, col) => (
                   <td
@@ -521,30 +504,27 @@ function renderTable(
   );
 }
 
-function renderQuote(content: string, key: string, caret: boolean, fade = false): React.ReactNode {
+function renderQuote(content: string, key: string, caret: boolean): React.ReactNode {
   const inner = parseLineBlocks(content);
   const last = inner.length - 1;
   return (
     <blockquote
       key={key}
-      className={cn(
-        "my-2 rounded-r-md border-l-[3px] border-emerald-300 bg-emerald-50/60 py-1.5 pl-3.5 pr-2 text-zinc-700 [&>p]:leading-relaxed",
-        fadeCls(fade)
-      )}
+      className="my-2 rounded-r-md border-l-[3px] border-emerald-300 bg-emerald-50/60 py-1.5 pl-3.5 pr-2 text-zinc-700 [&>p]:leading-relaxed"
     >
-      {inner.map((block, index) => renderBlock(block, `${key}-b${index}`, caret && index === last, false))}
+      {inner.map((block, index) => renderBlock(block, `${key}-b${index}`, caret && index === last))}
     </blockquote>
   );
 }
 
-function renderParagraph(text: string, keyPrefix: string, caret: boolean, fade = false): React.ReactNode {
+function renderParagraph(text: string, keyPrefix: string, caret: boolean): React.ReactNode {
   const paragraphs = text.split(/\n{2,}/);
   return paragraphs.map((paragraph, pIndex) => {
     const key = `${keyPrefix}-p${pIndex}`;
     const isLastParagraph = pIndex === paragraphs.length - 1;
     const lines = paragraph.split("\n");
     return (
-      <p key={key} className={cn("my-1.5 whitespace-pre-wrap break-words leading-relaxed", fadeCls(fade))}>
+      <p key={key} className="my-1.5 whitespace-pre-wrap break-words leading-relaxed">
         {lines.flatMap((line, lIndex) => (
           <React.Fragment key={`${key}-l${lIndex}`}>
             {lIndex > 0 ? <br /> : null}
@@ -557,30 +537,30 @@ function renderParagraph(text: string, keyPrefix: string, caret: boolean, fade =
   });
 }
 
-function renderBlock(block: Block, key: string, caret: boolean, fade = false): React.ReactNode {
+function renderBlock(block: Block, key: string, caret: boolean): React.ReactNode {
   switch (block.kind) {
     case "code":
-      return <CodeBlock key={key} language={block.language} code={block.code} caret={caret} fade={fade} />;
+      return <CodeBlock key={key} language={block.language} code={block.code} caret={caret} />;
     case "heading": {
       const level = Math.min(6, Math.max(1, block.level));
       const Tag = `h${Math.min(4, level)}` as "h1" | "h2" | "h3" | "h4";
       return (
-        <Tag key={key} className={cn(HEADING_CLASSES[level], fadeCls(fade))}>
+        <Tag key={key} className={HEADING_CLASSES[level]}>
           {renderInline(block.text, `${key}-inl`)}
           {caret ? <StreamN /> : null}
         </Tag>
       );
     }
     case "hr":
-      return <hr key={key} className={cn("my-3 border-zinc-200", fadeCls(fade))} />;
+      return <hr key={key} className="my-3 border-zinc-200" />;
     case "quote":
-      return renderQuote(block.content, key, caret, fade);
+      return renderQuote(block.content, key, caret);
     case "list":
-      return renderList(block, key, caret, fade);
+      return renderList(block, key, caret);
     case "table":
-      return renderTable(block, key, caret, fade);
+      return renderTable(block, key, caret);
     case "text":
-      return renderParagraph(block.text, key, caret, fade);
+      return renderParagraph(block.text, key, caret);
   }
 }
 
@@ -592,17 +572,11 @@ export function Markdown({
   content,
   className,
   streamingCursor = false,
-  fadeIn = false,
 }: {
   content: string;
   className?: string;
   /** While true: blinking caret right after the last streamed character. */
   streamingCursor?: boolean;
-  /** While true: newly streamed blocks (paragraph, list item, table row,
-   *  heading…) mount with a soft fade-in — the "effet fondu" on the
-   *  streaming reply. React's keyed reconciliation keeps already-rendered
-   *  blocks in the DOM, so only the blocks appearing NOW animate. */
-  fadeIn?: boolean;
 }) {
   const nodes = React.useMemo(() => {
     const blocks = parseBlocks(content);
@@ -617,9 +591,9 @@ export function Markdown({
         : null;
     }
     return blocks.map((block, index) =>
-      renderBlock(block, `b${index}`, streamingCursor && index === blocks.length - 1, fadeIn)
+      renderBlock(block, `b${index}`, streamingCursor && index === blocks.length - 1)
     );
-  }, [content, streamingCursor, fadeIn]);
+  }, [content, streamingCursor]);
 
   return <div className={cn("text-[0.925rem] text-zinc-800", className)}>{nodes}</div>;
 }
