@@ -1,15 +1,23 @@
 /* ── autoscroll-bridge.js — scroll auto ChatGPT à l'envoi d'un message ────────
  * Demande : « quand l'utilisateur envoie un message, le dernier message
  * s'affiche directement comme PREMIER (en haut de la vue) et la discussion
- * précédente remonte au-dessus ».
+ * précédente remonte au-dessus » — MAIS seulement à partir du DEUXIÈME
+ * message utilisateur : le PREMIER message d'une discussion ne prend PAS
+ * cet ancrage (il resterait seul tout en haut d'un écran vide) et garde
+ * le comportement d'origine (en bas, la réponse streame dessous).
  *
  * Le bundle scrolle déjà vers le bas à l'envoi (le nouveau message atterrit au
  * milieu de la vue). Ce pont implémente la mécanique EXACTE de ChatGPT :
  *
- *   1. ENVOI (un seul nouveau message utilisateur ajouté à la fin) →
+ *   1. ENVOI à partir du 2ᵉ message (un seul nouveau message utilisateur
+ *      ajouté à la fin, et au moins un message utilisateur précédent) →
  *      ESPACEUR (élément <li> à la fin de la liste, hauteur = la vue) puis
- *      smooth-scroll : le message s'ancre EN HAUT, la discussion précédente
- *      remonte au-dessus, et l'espace libre dessous accueille la réponse.
+ *      smooth-scroll : le message s'ancre EN HAUT avec une marge (PAD_TOP),
+ *      la discussion précédente remonte au-dessus, et l'espace libre
+ *      dessous accueille la réponse.
+ *      PREMIER message utilisateur d'une discussion → AUCUNE intervention :
+ *      pas d'espaceur, pas d'ancrage — le bundle défile vers le bas comme
+ *      à l'origine et suit nativement le streaming.
  *      (Sans espaceur, le scroll maximum colle le bas du contenu au bas de
  *      la vue : un message du bas ne peut JAMAIS atteindre le haut.)
  *      NB : l'espaceur doit être un ÉLÉMENT dans le flux — un padding sur
@@ -39,7 +47,9 @@
         if (window.__nelthAutoscrollBridge) return; // idempotent
         window.__nelthAutoscrollBridge = true;
 
-        var PAD_TOP = 10;          // respiration au-dessus du message ancré (px)
+        var PAD_TOP = 32;          // respiration au-dessus du message ancré (px) —
+                                   // « le message est trop haut » : ne pas le
+                                   // coller au bord supérieur de la vue
         var PAD_BOTTOM = 14;       // marge sous le bas du contenu suivi (px)
         var ANCHOR_WINDOW_MS = 750; // fenêtre pendant laquelle nos scrolls sont « programme »
         var WHEEL_STOP_MS = 900;   // après une molette vers le haut, on ne suit plus
@@ -225,6 +235,18 @@
                 if (!el2 || !el2.contains(row)) return;
                 var userRows = el2.querySelectorAll('.user-message');
                 if (userRows.length > 0 && userRows[userRows.length - 1] !== row) return;
+                // PREMIER message utilisateur de la discussion (cette rangée
+                // est la SEULE) → PAS d'ancrage en haut : le message resterait
+                // seul tout en haut d'un écran vide (« trop haut »). On
+                // neutralise espaceur + follow et on rend la main au bundle :
+                // message en bas, réponse qui streame dessous, suivi natif.
+                // L'ancrage ChatGPT ne s'active qu'à partir du 2ᵉ message.
+                if (userRows.length < 2) {
+                        setSpacer(el2, 0);
+                        follow = false;
+                        dbg({ ev: 'first-msg-skip', rows: userRows.length });
+                        return;
+                }
                 anchorRow(row);
         });
 

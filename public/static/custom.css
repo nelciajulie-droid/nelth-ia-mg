@@ -482,19 +482,24 @@ html.dark [data-sonner-toaster][data-theme='dark'] {
         }
 }
 
-/* ── C12. Scroll auto à l'envoi — le nouveau message devient le PREMIER
- * visible (comportement ChatGPT), la discussion précédente remonte au-dessus.
+/* ── C12. Scroll auto à l'envoi — à partir du 2ᵉ message utilisateur, le
+ * nouveau message devient le PREMIER visible (comportement ChatGPT), la
+ * discussion précédente remonte au-dessus. Le PREMIER message d'une
+ * discussion ne prend PAS cet ancrage (comportement d'origine : en bas,
+ * réponse dessous) — sinon il resterait seul tout en haut d'un écran vide.
  *
- * Tout est géré par /static/autoscroll-bridge.js : à l'envoi, il pose un
- * ESPACEUR (élément <li> à la fin de la liste des messages, hauteur =
- * hauteur de la vue) — c'est lui qui rend le haut ATTEIGNABLE (sinon le
- * scroll maximum colle le bas du contenu au bas de la vue et le message du
- * bas ne peut JAMAIS monter en haut) — puis ancre le message en haut
- * (smooth + corrections itératives). Pendant le streaming, l'espaceur
+ * Tout est géré par /static/autoscroll-bridge.js : à l'envoi (2ᵉ message et
+ * suivants), il pose un ESPACEUR (élément <li> à la fin de la liste des
+ * messages, hauteur = hauteur de la vue) — c'est lui qui rend le haut
+ * ATTEIGNABLE (sinon le scroll maximum colle le bas du contenu au bas de la
+ * vue et le message du bas ne peut JAMAIS monter en haut) — puis ancre le
+ * message en haut avec une marge PAD_TOP 32px (pas collé au bord
+ * supérieur — « le message est trop haut ») (smooth + corrections
+ * itératives). Pendant le streaming, l'espaceur
  * absorbe la croissance de la réponse (aucun saut de vue) et dès qu'elle
  * déborde la vue suit son bas — le texte le plus récent reste juste
- * au-dessus du composeur. Ouverture d'une discussion : espaceur retiré,
- * scroll vers le bas d'origine conservé.
+ * au-dessus du composeur. Ouverture d'une discussion et PREMIER message :
+ * espaceur retiré, scroll vers le bas d'origine conservé.
  *
  * L'espaceur DOIT être un ÉLÉMENT du flux : un padding-bottom sur
  * #messages-container casserait son enfant h-full (height:100% de la
