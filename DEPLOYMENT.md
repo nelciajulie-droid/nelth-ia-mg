@@ -300,3 +300,52 @@ sinon vérifier `docker compose logs nelth-ai` : `[serve] mode=start`).
   de code ne lui est dédié (la résolution de `DATABASE_URL` dans
   `src/lib/db.ts` fonctionne à l'identique en production : variable
   d'environnement Postgres directe).
+
+---
+
+## 10. Relancer la production SANS payer le plan Pro (402 DEPLOYMENT_DISABLED)
+
+Symptôme : toutes les URLs `*.vercel.app` du compte répondent
+`HTTP 402 Payment required — x-vercel-error: DEPLOYMENT_DISABLED`,
+y compris les fichiers statiques. **C'est un blocage au niveau du COMPTE
+Vercel (facturation/usage), pas un problème de code** : le dépôt est
+entièrement poussé et le dernier déploiement avait bien été servi
+(0.14.12, vérifié au moment de la mise en ligne). Aucun changement de code
+ne peut lever ce blocage — il se règle dans le tableau de bord Vercel,
+et **aucun plan Pro n'est nécessaire** :
+
+| Chemin | Coût | Action (2 min dans vercel.com) |
+|---|---|---|
+| **1. Attente du reset** — si la suspension vient des limites d'usage du plan Hobby | 0 € | Billing → Usage : identifier la ressource dépassée et sa date de reset. À la date, le déploiement se réactive automatiquement (aucune action). En attendant : éviter de laisser des onglets ouverts sur l'app (voir consommation ci-dessous). |
+| **2. Facture en attente** — si le blocage vient d'un solde impayé (moyen de paiement expiré/refusé) | Montant de LA facture, une seule fois — ≠ abonnement Pro | Billing → Payment Method : mettre la carte à jour, payer la facture en attente. Le déploiement reprend dans les minutes qui suivent. Si le site ne revient pas seul : Deployments → dernier déploiement → Redeploy. |
+| **3. Compte neuf (recommandé si 1 et 2 ne s'appliquent pas)** | 0 € — plan Hobby neuf | Créer un compte Vercel avec une AUTRE adresse email → Add New… → Project → Importer le dépôt GitHub public `nelciajulie-droid/nelth-ia-mg` → renseigner les variables ci-dessous → Deploy. On obtient une nouvelle URL `*.vercel.app` avec des quotas frais. NB : l'ancienne URL reste attachée à l'ancien compte tant qu'il existe. |
+| **4. Auto-hébergement** | coût de votre serveur, 0 € Vercel | Voir §3 de ce guide (docker compose + reverse proxy + domaine). |
+
+### Variables à renseigner pour le chemin 3 (Import GitHub)
+
+| Variable | Obligatoire | Rôle |
+|---|---|---|
+| `DATABASE_URL` | ✅ | Postgres de production — **réutiliser la MÊME chaîne** (Neon/Supabase/…) pour retrouver comptes + conversations + fichiers |
+| `WEBUI_SECRET_KEY` | ✅ | Secret de signature des JWT (doit rester stable, sinon sessions invalidées) |
+| `KILO_GATEWAY_API_KEY` | ✅ | Moteur de chat intégré (+ LLM vocal, réutilise la même clé) |
+| `SOCKET_SERVICE_URL` | — | Endpoint du socket-service hébergé ; sans lui le temps réel fonctionne en SSE dégradé (le pipeline sérialise les événements dans la réponse HTTP — voir §9) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Connexion Google (le callback de la nouvelle URL doit être ajouté côté Google) |
+| `KILO_API_KEY` | — | LLM vocal dédié (sinon réutilise `KILO_GATEWAY_API_KEY`) |
+
+Le `vercel.json` du dépôt configure déjà tout le reste (build `bun run
+vercel-build`, install `bun install`, fonctions `maxDuration` 300 s).
+
+### Éviter une nouvelle suspension sur le plan Hobby
+
+Deux consommations à surveiller (Billing → Usage) :
+
+1. **socket.io en long-polling** : chaque onglet ouvert maintient une
+   requête en attente ~25 s en continu côté fonctions serverless — quelques
+   onglets ouverts en permanence suffisent à épuiser le quota de calcul du
+   mois. Fermer les onglets inactifs ; l'app reste utilisable via le panneau
+   de prévisualisation du sandbox de développement (le même code y tourne).
+2. **Fonctions longues** (`maxDuration` 300 s) : générations d'images,
+   vocal et longues réponses sont coûteuses en temps de calcul. Sur Hobby,
+   un usage intensif quotidien de ces features dépasse le quota — espacer
+   les générations lourdes ou basculer ces usages vers le chemin 4
+   (auto-hébergement).
